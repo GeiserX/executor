@@ -4,7 +4,7 @@ import { Effect } from "effect";
 
 import {
   definePlugin,
-  Owner,
+  ownerForItemId,
   ProviderItemId,
   ProviderKey,
   StorageError,
@@ -77,35 +77,6 @@ const decryptSecret = (key: Buffer, payload: string): Effect.Effect<string, Stor
   });
 
 const ENCRYPTED_PROVIDER_KEY = ProviderKey.make("encrypted");
-
-/** Map the executor's (tenant, subject?) binding onto the storage `Owner`
- *  literal: a bound subject writes the user's own partition, otherwise the
- *  org-shared one. Fallback only — prefer `ownerForItemId`. */
-const ownerOf = (binding: OwnerBinding): Owner =>
-  binding.subject == null ? Owner.make("org") : Owner.make("user");
-
-// Item ids whose SECOND colon-segment is the owning partition:
-//   connection:<owner>:<integration>:<name>:<variable>
-//   oauth:<owner>:<integration>:<name>[:refresh]
-//   oauth-client:<owner>:<slug>:secret
-const OWNER_SCOPED_PREFIXES: ReadonlySet<string> = new Set(["connection", "oauth", "oauth-client"]);
-
-/** The owner a logical item id embeds, or null for ids that carry none. */
-const embeddedOwner = (id: string): Owner | null => {
-  const [prefix, owner] = id.split(":");
-  if (OWNER_SCOPED_PREFIXES.has(prefix ?? "") && (owner === "org" || owner === "user")) {
-    return Owner.make(owner);
-  }
-  return null;
-};
-
-/** The partition a credential's value belongs to: the CREDENTIAL's owner
- *  (embedded in the item id), not the acting caller's binding — so an org
- *  connection whose OAuth consent completes in one member's browser session
- *  files tokens every member can resolve. Ids without an embedded owner fall
- *  back to the caller binding. Mirrors the workos-vault provider. */
-const ownerForItemId = (id: string, binding: OwnerBinding): Owner =>
-  embeddedOwner(id) ?? ownerOf(binding);
 
 const makeEncryptedProvider = (
   key: Buffer,

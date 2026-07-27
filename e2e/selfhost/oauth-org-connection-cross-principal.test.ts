@@ -2,20 +2,21 @@
 // the org, not just whoever's browser session completed the consent.
 //
 // Issue #1453: the encrypted-secrets provider (the writable provider on
-// self-host and the Cloudflare host) files token rows under the ACTING
+// self-host and the Cloudflare host) filed token rows under the ACTING
 // caller's partition — so completing an org connection's consent in a user
-// session lands the tokens at owner='user', subject=<that user>, while the
-// connection row itself says org. The consenting user's own probe still reads
-// the tokens (user rows shadow org rows), so the connection looks healthy —
-// but every other principal resolves no value and fails with
+// session landed the tokens at owner='user', subject=<that user>, while the
+// connection row itself said org. The consenting user's own calls still read
+// the tokens (user rows shadow org rows), so the connection looked healthy —
+// but every other principal resolved no value and failed with
 // `oauth_connection_missing`. The same mis-filing was fixed for the WorkOS
-// Vault provider in #950; encrypted-secrets never got that fix.
+// Vault provider in #950.
 //
 // The journey: the bootstrap admin registers an OAuth-protected integration,
 // completes the org-owned authorization-code flow (a real test AS on
-// 127.0.0.1), and proves the tool works for them. A second, invited member of
-// the same org then invokes the same tool — the guarantee under test is that
-// the org connection resolves for them too.
+// 127.0.0.1), and proves the tool call carries the minted token upstream. A
+// second, invited member of the same org then invokes the same tool — the
+// guarantee under test is that the same org connection resolves the same
+// token for them too.
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 
@@ -33,23 +34,22 @@ import { serveOAuthTestServer } from "@executor-js/sdk/testing";
 
 import { scenario } from "../src/scenario";
 import { Api, Target } from "../src/services";
-import type { Identity } from "../src/target";
-import { signInSession } from "../targets/selfhost";
+import { createInvitedIdentity } from "../targets/selfhost";
 
 const api = composePluginApi([openApiHttpPlugin()] as const);
 
 const unique = (prefix: string) => `${prefix}${randomBytes(4).toString("hex")}`;
 
-/** Upstream on 127.0.0.1: `GET /me` is 200 for any bearer. Credential
- *  resolution is the subject under test, so the upstream only needs to prove
- *  a token reached it. */
+/** Upstream on 127.0.0.1: `GET /me` echoes the authorization header it
+ *  received, so the scenario can assert a real token reached it — not merely
+ *  that a request was made. */
 const serveUpstream = () =>
   Effect.acquireRelease(
     Effect.callback<{ readonly url: string; readonly close: () => void }>((resume) => {
       const server = createServer((request, response) => {
         if (request.method === "GET" && (request.url ?? "").startsWith("/me")) {
           response.writeHead(200, { "content-type": "application/json" });
-          response.end(JSON.stringify({ me: "ok" }));
+          response.end(JSON.stringify({ authorization: request.headers.authorization ?? null }));
           return;
         }
         response.writeHead(404, { "content-type": "application/json" });
@@ -106,43 +106,6 @@ const specFor = (
     },
   });
 
-/** A second, distinct member of the (single) selfhost org: admin invite →
- *  invited email signup → Better Auth session. */
-const createInvitedIdentity = async (baseUrl: string, admin: Identity): Promise<Identity> => {
-  const cookie = admin.headers?.cookie;
-  expect(typeof cookie, "bootstrap admin has a Better Auth session cookie").toBe("string");
-
-  const invite = await fetch(new URL("/api/admin/invites", baseUrl), {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      cookie: cookie!,
-      origin: new URL(baseUrl).origin,
-    },
-    body: JSON.stringify({ role: "member" }),
-  });
-  expect(invite.status, `admin invite create response: ${await invite.clone().text()}`).toBe(200);
-  const inviteBody = (await invite.json()) as { readonly code?: string };
-  expect(typeof inviteBody.code, "invite response includes a redeemable code").toBe("string");
-
-  const email = `org-oauth-member-${randomBytes(5).toString("hex")}@e2e.test`;
-  const password = "org-oauth-member-password-123";
-  const signup = await fetch(new URL("/api/auth/sign-up/email", baseUrl), {
-    method: "POST",
-    headers: { "content-type": "application/json", origin: new URL(baseUrl).origin },
-    body: JSON.stringify({ email, password, name: email, inviteCode: inviteBody.code }),
-  });
-  expect(signup.status, `invited signup response: ${await signup.clone().text()}`).toBe(200);
-
-  const session = await signInSession(baseUrl, { email, password });
-  return {
-    label: email,
-    credentials: { email, password },
-    headers: { cookie: session.cookieHeader },
-    cookies: session.cookies,
-  };
-};
-
 /** Complete the test AS's consent headlessly and return the authorization
  *  code from the callback redirect. */
 const consentCode = (authorizationUrl: string) =>
@@ -164,6 +127,7 @@ const consentCode = (authorizationUrl: string) =>
 
 type ToolEnvelope = {
   readonly ok: boolean;
+  readonly data?: { readonly authorization?: string | null };
   readonly error?: { readonly code?: string; readonly message?: string };
 };
 
@@ -261,30 +225,38 @@ scenario(
               });
               expect(execution.status, `${who}: the execution completes`).toBe("completed");
               if (execution.status !== "completed") return yield* Effect.die("not completed");
-              const envelope = (execution.structured as { result?: ToolEnvelope }).result;
-              return envelope;
+              return (execution.structured as { result?: ToolEnvelope }).result;
             });
 
-          // Sanity: the consenting member sees a healthy connection — this is
-          // exactly why the bug is invisible to whoever set the connection up.
+          // Sanity: the consenting member's call carries a real bearer to the
+          // upstream — this passing is exactly why the bug is invisible to
+          // whoever set the connection up.
           const adminResult = yield* invoke(adminClient, "consenting member");
           expect(
-            adminResult,
-            "the consenting member's tool call resolves the org connection",
-          ).toMatchObject({ ok: true });
+            adminResult?.ok,
+            `the consenting member's tool call resolves the org connection (got: ${JSON.stringify(adminResult)})`,
+          ).toBe(true);
+          const adminToken = adminResult?.data?.authorization;
+          expect(adminToken, "the upstream received the minted bearer").toMatch(/^Bearer .+/);
 
           // THE guarantee: a different member of the same org resolves the
-          // same org-owned connection. Before the fix the token rows sit in
-          // the consenting user's partition, so this member resolves nothing
-          // and the call fails with `oauth_connection_missing`.
-          const member = yield* Effect.promise(() => createInvitedIdentity(target.baseUrl, admin));
+          // same org-owned connection to the same token. Before the fix the
+          // token rows sat in the consenting user's partition, so this member
+          // resolved nothing and failed with `oauth_connection_missing`.
+          const member = yield* Effect.promise(() =>
+            createInvitedIdentity(target.baseUrl, admin, { emailPrefix: "org-oauth-member" }),
+          );
           const memberClient = yield* makeClient(api, member);
           const memberResult = yield* invoke(memberClient, "other member");
           expect(
-            memberResult,
+            memberResult?.ok,
             "another org member's tool call resolves the same org connection " +
               `(got: ${JSON.stringify(memberResult)})`,
-          ).toMatchObject({ ok: true });
+          ).toBe(true);
+          expect(
+            memberResult?.data?.authorization,
+            "both members resolve the same org-shared token",
+          ).toBe(adminToken);
         }),
         Effect.gen(function* () {
           yield* adminClient.connections

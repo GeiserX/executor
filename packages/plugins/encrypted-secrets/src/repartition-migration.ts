@@ -13,6 +13,11 @@
 // to run a script by hand. Encryption is global-key, not principal-bound, so
 // moving a row is a pure partition change; ciphertext decrypts unchanged.
 //
+// Only org-embedded ids stuck outside the org partition are moved: that is
+// the one direction the pre-fix `ownerOf(binding)` could produce (a
+// `*:user:*` id can only ever be minted by a subject-bound executor, which
+// the old code filed as 'user' — already correct).
+//
 // Idempotent: already-correct rows never match, and the copy step is
 // insert-or-ignore against the (tenant, owner, subject, plugin_id,
 // collection, key) unique index — a post-fix write that already created the
@@ -23,6 +28,8 @@ import { Effect } from "effect";
 
 import {
   DataMigrationError,
+  embeddedItemOwner,
+  ORG_SUBJECT,
   type SqliteDataMigration,
   type SqliteDataMigrationClient,
 } from "@executor-js/sdk";
@@ -31,9 +38,6 @@ const MIGRATION_NAME = "2026-07-27-encrypted-secrets-owner-repartition";
 
 const PLUGIN_ID = "encryptedSecrets";
 const COLLECTION = "secrets";
-// Item-id prefixes whose second colon-segment is the owning partition — keep
-// in sync with OWNER_SCOPED_PREFIXES in index.ts.
-const OWNER_SCOPED_PREFIXES = ["connection", "oauth", "oauth-client"] as const;
 
 const execute = (
   client: SqliteDataMigrationClient,
@@ -53,17 +57,11 @@ const tableExists = (client: SqliteDataMigrationClient, table: string) =>
     (result) => result.rows.length > 0,
   );
 
-const embeddedOwner = (key: string): "org" | "user" | null => {
-  const [prefix, owner] = key.split(":");
-  if (!OWNER_SCOPED_PREFIXES.includes(prefix as (typeof OWNER_SCOPED_PREFIXES)[number])) {
-    return null;
-  }
-  return owner === "org" || owner === "user" ? owner : null;
-};
-
-/** Move every encrypted-secrets row whose stored partition disagrees with the
- *  owner embedded in its item id into that owner's partition. Returns the
- *  number of rows re-filed. Fresh databases lack the table; nothing to do. */
+/** Move every encrypted-secrets row whose item id embeds `org` but whose
+ *  stored partition is not the org one into `owner='org', subject=''`.
+ *  Returns the number of mis-filed rows repaired (moved or, when a post-fix
+ *  write already created the org row, dropped in its favor). Fresh databases
+ *  lack the table; nothing to do. */
 export const runSqliteEncryptedSecretsRepartition = (
   client: SqliteDataMigrationClient,
 ): Effect.Effect<number, DataMigrationError> =>
@@ -77,37 +75,44 @@ export const runSqliteEncryptedSecretsRepartition = (
       args: [PLUGIN_ID, COLLECTION],
     });
 
-    // A row is mis-filed when its stored partition disagrees with the owner
-    // embedded in its item id. In practice only org credentials stuck in a
-    // user partition, but compute it generally and symmetrically.
-    const misfiled = rows.rows.flatMap((row) => {
-      if (typeof row.row_id !== "string" || typeof row.key !== "string") return [];
-      const subject = typeof row.subject === "string" ? row.subject : "";
-      const want = embeddedOwner(row.key);
-      if (want === null) return [];
-      const wantSubject = want === "org" ? "" : subject;
-      if (row.owner === want && subject === wantSubject) return [];
-      return [{ rowId: row.row_id, want, wantSubject }];
+    const misfiled: string[] = [];
+    for (const row of rows.rows) {
+      if (typeof row.row_id !== "string" || typeof row.key !== "string") {
+        return yield* new DataMigrationError({
+          migration: MIGRATION_NAME,
+          cause: `unreadable plugin_storage row: ${JSON.stringify(row)}`,
+        });
+      }
+      if (embeddedItemOwner(row.key) !== "org") continue;
+      if (row.owner === "org" && row.subject === ORG_SUBJECT) continue;
+      misfiled.push(row.row_id);
+    }
+    if (misfiled.length === 0) return 0;
+
+    const applyAll = Effect.gen(function* () {
+      for (const rowId of misfiled) {
+        // Re-file in place: copy into the org partition (no-op when a
+        // post-fix write already created it), then drop the mis-filed row.
+        yield* execute(client, {
+          sql: `INSERT OR IGNORE INTO plugin_storage
+                  (row_id, tenant, owner, subject, plugin_id, collection, key, data, created_at, updated_at)
+                SELECT row_id || '-repart', tenant, 'org', ?, plugin_id, collection, key, data, created_at, updated_at
+                FROM plugin_storage WHERE row_id = ?`,
+          args: [ORG_SUBJECT, rowId],
+        });
+        yield* execute(client, {
+          sql: "DELETE FROM plugin_storage WHERE row_id = ?",
+          args: [rowId],
+        });
+      }
+      yield* execute(client, "COMMIT");
+      return misfiled.length;
     });
 
-    let moved = 0;
-    for (const { rowId, want, wantSubject } of misfiled) {
-      // Re-file in place: copy into the correct partition (no-op when a
-      // post-fix write already created it), then drop the mis-filed row.
-      yield* execute(client, {
-        sql: `INSERT OR IGNORE INTO plugin_storage
-                (row_id, tenant, owner, subject, plugin_id, collection, key, data, created_at, updated_at)
-              SELECT row_id || '-repart', tenant, ?, ?, plugin_id, collection, key, data, created_at, updated_at
-              FROM plugin_storage WHERE row_id = ?`,
-        args: [want, wantSubject, rowId],
-      });
-      yield* execute(client, {
-        sql: "DELETE FROM plugin_storage WHERE row_id = ?",
-        args: [rowId],
-      });
-      moved += 1;
-    }
-    return moved;
+    yield* execute(client, "BEGIN");
+    return yield* applyAll.pipe(
+      Effect.tapError(() => execute(client, "ROLLBACK").pipe(Effect.ignore)),
+    );
   });
 
 /** Registry entry for the boot-time data-migration ledger. */

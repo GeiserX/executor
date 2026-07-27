@@ -162,6 +162,14 @@ export {
   type ExecutorOwnerPolicyContext,
 } from "./owner-policy";
 
+// Provider item-id owner grammar — the partition credential providers file
+// rows under (issues #950, #1453).
+export {
+  OWNER_SCOPED_ITEM_ID_PREFIXES,
+  embeddedItemOwner,
+  ownerForItemId,
+} from "./provider-item-owner";
+
 // Tool policies.
 export {
   matchPattern,

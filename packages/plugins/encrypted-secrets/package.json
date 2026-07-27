@@ -18,7 +18,6 @@
   },
   "devDependencies": {
     "@effect/vitest": "catalog:",
-    "@libsql/client": "catalog:",
     "@types/node": "catalog:",
     "bun-types": "catalog:",
     "tsup": "catalog:",
