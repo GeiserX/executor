@@ -106,8 +106,6 @@ const serveMutableSpec = (initial: string) =>
   );
 
 // ── Session plumbing over the real auth endpoints (mirrors the web app) ──────
-const cookieOf = (identity: Identity): string => identity.headers?.["cookie"] ?? "";
-
 const postJson = (target: TargetShape, path: string, identity: Identity, body: unknown) =>
   Effect.promise(async () => {
     const response = await fetch(new URL(path, target.baseUrl), {
@@ -115,7 +113,7 @@ const postJson = (target: TargetShape, path: string, identity: Identity, body: u
       headers: {
         "content-type": "application/json",
         origin: new URL(target.baseUrl).origin,
-        cookie: cookieOf(identity),
+        ...(identity.headers ?? {}),
       },
       body: JSON.stringify(body),
     });
@@ -125,12 +123,21 @@ const postJson = (target: TargetShape, path: string, identity: Identity, body: u
     return response;
   });
 
-const withRefreshedSession = (identity: Identity, response: Response): Identity => {
+/** Re-bound to the refreshed session cookie and scoped to the joined org —
+ *  org-scoped requests fail closed without the selector header. */
+const withRefreshedSession = (
+  identity: Identity,
+  response: Response,
+  organizationId: string,
+): Identity => {
   const refreshed = (response.headers.getSetCookie?.() ?? [])
     .find((header) => header.startsWith("wos-session="))
     ?.split(";")[0];
   if (!refreshed) throw new Error("response did not refresh the session cookie");
-  return { ...identity, headers: { cookie: refreshed } };
+  return {
+    ...identity,
+    headers: { cookie: refreshed, "x-executor-organization": organizationId },
+  };
 };
 
 /** Invite `member` into `admin`'s org and accept — the real invite flow. */
@@ -143,7 +150,8 @@ const joinOrg = (target: TargetShape, admin: Identity, member: Identity) =>
     const acceptResponse = yield* postJson(target, "/api/auth/accept-invitation", member, {
       invitationId: invitation.id,
     });
-    return withRefreshedSession(member, acceptResponse);
+    const joined = (yield* Effect.promise(() => acceptResponse.clone().json())) as { id: string };
+    return withRefreshedSession(member, acceptResponse, joined.id);
   });
 
 const apiKeyTemplate = [

@@ -103,7 +103,11 @@ const requestedOrgSelectorFromReturnTo = (returnTo: string): string | null =>
 const requireSelectedOrganization = Effect.gen(function* () {
   const session = yield* SessionContext;
   const headers = yield* requestHeaders;
-  const selector = headers[ORG_SELECTOR_HEADER] ?? session.organizationId;
+  // Fail closed: these handlers act on a specific org, so the console URL's
+  // org header is required. The session's own org is a browser-global (see
+  // auth/organization.ts) — falling back to it targets another org for a
+  // multi-org user.
+  const selector = headers[ORG_SELECTOR_HEADER];
   if (!selector) {
     return yield* new NoOrganization();
   }

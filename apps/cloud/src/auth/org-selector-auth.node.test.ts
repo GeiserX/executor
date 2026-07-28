@@ -95,10 +95,15 @@ const run = (headers: Record<string, string>) =>
   );
 
 describe("resolveSessionPrincipal · URL org selector", () => {
-  it.effect("falls back to the session org when no selector header is sent", () =>
+  it.effect("fails closed when no selector header is sent", () =>
     Effect.gen(function* () {
-      const principal = yield* run({ cookie: "wos-session=x" });
-      expect(principal.organizationId, "scopes to the session org").toBe(SESSION_ORG);
+      // The session's own org is a browser-global pinned by WorkOS — falling
+      // back to it served another org's data to multi-org users. A missing
+      // header is a caller bug and must surface, not silently re-scope.
+      const error = yield* Effect.flip(run({ cookie: "wos-session=x" }));
+      expect(error, "missing selector header fails closed").toMatchObject({
+        _tag: "NoOrganization",
+      });
     }),
   );
 

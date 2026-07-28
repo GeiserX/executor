@@ -68,10 +68,12 @@ const run = (headers: Record<string, string>, organizationId: string | null = SE
   ).pipe(Effect.provide(Layer.mergeAll(stubWorkOS, stubUsers)));
 
 describe("billing route org selector", () => {
-  it.effect("falls back to the session org when no selector header is sent", () =>
+  it.effect("fails closed when no selector header is sent", () =>
     Effect.gen(function* () {
-      const org = yield* run({});
-      expect(org.id).toBe(SESSION_ORG);
+      // The session org is a browser-global — billing must never scope to it
+      // implicitly (AutumnProvider always sends the header).
+      const error = yield* Effect.flip(run({}));
+      expect(error).toMatchObject({ _tag: "HttpResponseError", status: 401 });
     }),
   );
 
@@ -89,7 +91,7 @@ describe("billing route org selector", () => {
     }),
   );
 
-  it.effect("requires either a selector header or a session org", () =>
+  it.effect("fails closed for an org-less session too", () =>
     Effect.gen(function* () {
       const error = yield* Effect.flip(run({}, null));
       expect(error).toMatchObject({ _tag: "HttpResponseError", status: 401 });

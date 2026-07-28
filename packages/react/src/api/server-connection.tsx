@@ -91,11 +91,26 @@ let activeConnection = resolveInitialExecutorServerConnection();
 // cloudflare) never produce one either.
 export const EXECUTOR_ORG_HEADER = EXECUTOR_ORG_SELECTOR_HEADER;
 
+// The org the authenticated shell is scoped to (`OrganizationProvider`
+// registers it). Covers the window where the URL is still bare — SSR'd entry
+// at `/`, and the beat before OrgSlugGate canonicalizes — so every org-scoped
+// request names its org explicitly and the server can fail closed instead of
+// guessing from the session cookie (which is how multi-org users kept getting
+// another org's data). Browser-only: module state would leak across
+// concurrently-rendered requests on the server, and transformClient never
+// runs there anyway.
+let shellOrgSlugFallback: string | null = null;
+
+export const setShellOrgSlugFallback = (slug: string | null): void => {
+  if (typeof window === "undefined") return;
+  shellOrgSlugFallback = slug;
+};
+
 export const getActiveOrgSlug = (): string | null => {
   const pathname = globalThis.window?.location?.pathname;
   if (!pathname) return null;
   const first = pathname.split("/")[1];
-  return first && isValidOrgSlug(first) ? first : null;
+  return first && isValidOrgSlug(first) ? first : shellOrgSlugFallback;
 };
 
 export const getExecutorOrganizationHeaders = (): Readonly<Record<string, string>> => {

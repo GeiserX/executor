@@ -40,7 +40,11 @@ const OrgAuthMiddleware = HttpRouter.middleware<{ provides: AuthContext }>()(
           .pipe(Effect.orElseSucceed(() => null));
         if (!result) return unauthorized();
 
-        const selector = request.headers[ORG_SELECTOR_HEADER] ?? result.organizationId;
+        // Fail closed: every org API request is org-scoped, so the console
+        // URL's org header is required. The session's own org is a
+        // browser-global (see auth/organization.ts) — falling back to it
+        // serves another org's data to a multi-org user.
+        const selector = request.headers[ORG_SELECTOR_HEADER];
         if (!selector) return noOrganization();
 
         const org = yield* authorizeOrganizationSelector(result.userId, selector).pipe(

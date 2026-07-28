@@ -91,16 +91,17 @@ export const workosAccountProvider: Layer.Layer<
         ? Effect.succeed(caller.session)
         : Effect.fail<AccountUnauthorized>(new AccountUnauthorized());
 
-    // The org scope for an org-scoped request: the console URL's org (sent in
-    // the selector header) when present, else the session's own org. Membership
-    // is re-checked live, so the header is a selector, not a trust boundary —
-    // and two browser tabs on different orgs each send their own header, so
-    // they stay independent (see organization.ts). Yields the session +
-    // resolved org, or AccountNoOrganization.
+    // The org scope for an org-scoped request: the console URL's org, sent in
+    // the selector header. FAIL CLOSED when it's missing — the session's own
+    // org is a browser-global (see organization.ts), so falling back to it
+    // targets another org for a multi-org user. Membership is re-checked
+    // live, so the header is a selector, not a trust boundary — and two
+    // browser tabs on different orgs each send their own header, so they stay
+    // independent. Yields the session + resolved org, or AccountNoOrganization.
     const requireOrganization = (headers: AccountHeaders) =>
       Effect.gen(function* () {
         const session = yield* requireSession();
-        const selector = headers[ORG_SELECTOR_HEADER] ?? session.organizationId;
+        const selector = headers[ORG_SELECTOR_HEADER];
         if (!selector) {
           return yield* new AccountNoOrganization();
         }
@@ -180,9 +181,12 @@ export const workosAccountProvider: Layer.Layer<
       me: (headers) =>
         Effect.gen(function* () {
           const session = yield* requireSession();
-          // Same selector precedence as requireOrganization: the URL's org
-          // (header) drives /account/me so the shell reflects the org the tab
-          // is viewing, not a session-global active org.
+          // `me` is the ONE org-scoped read that keeps the session fallback:
+          // on a slugged URL the header drives it (the shell reflects the org
+          // the tab is viewing), but on a BARE console URL there is no org in
+          // scope yet and the shell still needs a default org to canonicalize
+          // onto. That default is a PICK, not a scope authority — every
+          // data-bearing endpoint fails closed on the header instead.
           const selector = headers[ORG_SELECTOR_HEADER] ?? session.organizationId;
           const org = selector
             ? yield* authorizeOrganizationSelector(session.accountId, selector).pipe(

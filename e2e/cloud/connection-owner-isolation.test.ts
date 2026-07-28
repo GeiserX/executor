@@ -74,7 +74,7 @@ const postJson = (target: TargetShape, path: string, identity: Identity, body: u
       headers: {
         "content-type": "application/json",
         origin: new URL(target.baseUrl).origin,
-        cookie: cookieOf(identity),
+        ...(identity.headers ?? {}),
       },
       body: JSON.stringify(body),
     });
@@ -84,13 +84,23 @@ const postJson = (target: TargetShape, path: string, identity: Identity, body: u
     return response;
   });
 
-/** The identity re-bound to the refreshed session cookie a response set. */
-const withRefreshedSession = (identity: Identity, response: Response): Identity => {
+/** The identity re-bound to the refreshed session cookie a response set and
+ *  scoped to `organizationId` — org-scoped requests fail closed without the
+ *  selector, exactly like the real web client (which derives it per request
+ *  from the console URL). */
+const withRefreshedSession = (
+  identity: Identity,
+  response: Response,
+  organizationId: string,
+): Identity => {
   const refreshed = (response.headers.getSetCookie?.() ?? [])
     .find((header) => header.startsWith("wos-session="))
     ?.split(";")[0];
   if (!refreshed) throw new Error("response did not refresh the session cookie");
-  return { ...identity, headers: { cookie: refreshed } };
+  return {
+    ...identity,
+    headers: { cookie: refreshed, [ORG_SELECTOR_HEADER]: organizationId },
+  };
 };
 
 /** Invite `member` into `admin`'s org and accept — the real invite flow.
@@ -104,14 +114,16 @@ const joinOrg = (target: TargetShape, admin: Identity, member: Identity) =>
     const acceptResponse = yield* postJson(target, "/api/auth/accept-invitation", member, {
       invitationId: invitation.id,
     });
-    return withRefreshedSession(member, acceptResponse);
+    const joined = (yield* Effect.promise(() => acceptResponse.clone().json())) as { id: string };
+    return withRefreshedSession(member, acceptResponse, joined.id);
   });
 
 /** Create another org for this account; returns the identity bound to it. */
 const createAnotherOrg = (target: TargetShape, identity: Identity, name: string) =>
   Effect.gen(function* () {
     const response = yield* postJson(target, "/api/auth/create-organization", identity, { name });
-    return withRefreshedSession(identity, response);
+    const created = (yield* Effect.promise(() => response.clone().json())) as { id: string };
+    return withRefreshedSession(identity, response, created.id);
   });
 
 // `/api/auth/switch-organization` (session-cookie-based org switching) was
@@ -119,8 +131,9 @@ const createAnotherOrg = (target: TargetShape, identity: Identity, name: string)
 // the session. A request picks its active org via the `x-executor-organization`
 // header (apps/cloud/src/auth/organization.ts's `ORG_SELECTOR_HEADER`,
 // `EXECUTOR_ORG_SELECTOR_HEADER = "x-executor-organization"` in
-// packages/core/sdk/src/server-connection.ts), falling back to the session's
-// own org when absent. The header is a SELECTOR, not a trust boundary — the
+// packages/core/sdk/src/server-connection.ts); org-scoped requests without it
+// FAIL CLOSED (the session-org fallback silently served another org's data to
+// multi-org users). The header is a SELECTOR, not a trust boundary — the
 // server re-checks live membership — so attaching it directly to the identity
 // here is exactly what the real web client does from the console URL's slug.
 const ORG_SELECTOR_HEADER = "x-executor-organization";
@@ -303,5 +316,28 @@ scenario(
       orgAUserList.map((connection) => connection.name),
       "back in org A, the user-owned connection is still there",
     ).toContain(name);
+  }),
+);
+
+scenario(
+  "Connections · an org-scoped request without the org selector header is refused, never re-scoped",
+  {},
+  Effect.gen(function* () {
+    // The regression this pins: the server used to fall back to the org
+    // pinned inside the session cookie, so a request that forgot the header
+    // silently answered with ANOTHER org's data (the multi-org wrong-org
+    // family: #1011, #1042, #1043, the connections list). Now the request is
+    // refused outright.
+    const target = yield* Target;
+    yield* Api;
+    const identity = yield* target.newIdentity();
+
+    const bare = { ...identity, headers: { cookie: cookieOf(identity) } };
+    const response = yield* Effect.promise(() =>
+      fetch(new URL("/api/connections", target.baseUrl), { headers: bare.headers }),
+    );
+    expect(response.status, "no selector header → 403, not the session org's data").toBe(403);
+    const body = (yield* Effect.promise(() => response.json())) as { code?: string };
+    expect(body.code, "the refusal names the missing org").toBe("no_organization");
   }),
 );

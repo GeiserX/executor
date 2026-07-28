@@ -39,6 +39,8 @@ import {
 } from "@executor-js/api/server";
 import type { FailureRenderingStrategy, IdentityFailure, Principal } from "@executor-js/api/server";
 
+import { EXECUTOR_ORG_SELECTOR_HEADER } from "@executor-js/sdk/shared";
+
 import { ApiKeyService } from "./api-keys";
 import { workosApiJwtBearerConfig } from "./api-jwt-bearer";
 import { BEARER_PREFIX } from "./bearer";
@@ -85,6 +87,10 @@ const NO_ORGANIZATION_IN_API_KEY = {
 const NO_ORGANIZATION_IN_SESSION = {
   code: "no_organization",
   message: "No organization in session",
+};
+const MISSING_ORG_SELECTOR = {
+  code: "no_organization",
+  message: `Missing ${EXECUTOR_ORG_SELECTOR_HEADER} header`,
 };
 const INVALID_ACCESS_TOKEN = {
   code: "invalid_access_token",
@@ -199,13 +205,19 @@ export const resolveSessionPrincipal = (request: Request) =>
     if (!session) {
       return yield* new NoOrganization(NO_ORGANIZATION_IN_SESSION);
     }
-    // The console URL's org is the scope authority (sent as a header); the
-    // session's own org is the fallback for non-console callers. Membership is
-    // re-checked live either way — the header is a selector, not a trust
-    // boundary (see organization.ts).
-    const selector = orgSelectorFromRequest(request) ?? session.organizationId;
+    // The console URL's org is the scope authority, sent as a header on every
+    // org-scoped request. FAIL CLOSED when it's missing: the session's own
+    // `org_id` is a browser-global pinned by WorkOS at login/org-creation, so
+    // falling back to it silently serves ANOTHER org's data to a multi-org
+    // user (the connections-list wrong-org bug — the fourth of its kind after
+    // #1011/#1042/#1043). A missing header is a caller bug, and 403 makes it
+    // visible instead. Membership is re-checked live — the header is a
+    // selector, not a trust boundary (see organization.ts). Genuinely org-less
+    // surfaces (/account/me on bare URLs) have their own resolver and never
+    // reach this one.
+    const selector = orgSelectorFromRequest(request);
     if (!selector) {
-      return yield* new NoOrganization(NO_ORGANIZATION_IN_SESSION);
+      return yield* new NoOrganization(MISSING_ORG_SELECTOR);
     }
     const org = yield* authorizeOrganizationSelector(session.userId, selector);
     if (!org) return yield* new NoOrganization(NO_ORGANIZATION_IN_SESSION);

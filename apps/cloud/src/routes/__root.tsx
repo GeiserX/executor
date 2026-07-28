@@ -290,7 +290,11 @@ function AuthGate({ ssrOrigin }: { ssrOrigin: string | null }) {
   return (
     <AutumnProvider pathPrefix="/api/billing" headers={billingHeaders}>
       <Sentry.ErrorBoundary fallback={<ShellErrorFallback />} showDialog={false}>
-        <ExecutorProvider connection={connection} onHandledError={captureFrontendError}>
+        <ExecutorProvider
+          connection={connection}
+          onHandledError={captureFrontendError}
+          scopeKey={scopeSlug}
+        >
           <React.Suspense fallback={<BlankScreen />}>
             <ExecutorPluginsProvider plugins={clientPlugins}>
               <OrganizationProvider
@@ -298,10 +302,13 @@ function AuthGate({ ssrOrigin }: { ssrOrigin: string | null }) {
                 organizationSlug={scopeSlug}
               >
                 {/* The org header scopes every request to the URL's org, so
-                    reaching here means the caller is a member of `activeSlug`
+                    reaching here means the caller is a member of `scopeSlug`
                     (a foreign slug already 404'd above). The gate only keeps
-                    the URL canonical — bare → /<slug>. */}
-                <OrgSlugGate activeSlug={activeSlug}>
+                    the URL canonical — bare → /<slug>. Canonicalize onto the
+                    SCOPE slug, never the auth-hint org: on first paint
+                    `activeSlug` is the cookie's org, and handing it to the
+                    gate rewrote a slugged URL toward another org. */}
+                <OrgSlugGate activeSlug={scopeSlug}>
                   <Shell />
                   <Toaster />
                 </OrgSlugGate>

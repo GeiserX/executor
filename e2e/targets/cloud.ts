@@ -76,6 +76,7 @@ export const cloudTarget = (): Target => ({
       const label = `user-${randomUUID().slice(0, 8)}`;
       const email = `${label}@e2e.test`;
       let session = await signIn(email);
+      let orgId: string | null = null;
       if (org) {
         // The real create-organization flow; the refreshed sealed session in
         // the response carries the new org.
@@ -92,11 +93,18 @@ export const cloudTarget = (): Target => ({
           throw new Error(`cloud newIdentity: create-organization failed (${response.status})`);
         }
         session = cookiePair(response, "wos-session") ?? session;
+        orgId = ((await response.json()) as { id: string }).id;
       }
       const [name, value] = session.split(/=(.*)/s);
       return {
         label: email,
-        headers: { cookie: session },
+        // Org-scoped API requests must name their org — the server fails
+        // closed on a missing selector (the browser derives it from the URL;
+        // raw fetches get it from here).
+        headers: {
+          cookie: session,
+          ...(orgId ? { "x-executor-organization": orgId } : {}),
+        },
         cookies: [{ name: name!, value: value! }],
         credentials: { email, password: "emulated" },
       };

@@ -106,10 +106,19 @@ export const authorizeOrganization = (userId: string, organizationId: string) =>
 // browser-global — two tabs can't be in two orgs at once, and switching in one
 // silently re-scopes the other. Scoping per-request from the URL makes each
 // tab independent.
+//
+// The header is REQUIRED on org-scoped requests — resolvers fail closed
+// (403 no_organization) when it's missing rather than falling back to the
+// session's pinned org. The fallback repeatedly served another org's data to
+// multi-org users (#1011, #1042, #1043, the connections list), because any
+// request that forgot the header silently scoped to whichever org WorkOS
+// last pinned into the cookie. The one deliberate exception is `/account/me`
+// on a bare URL, which uses the session org as a default org to PICK, never
+// as a data scope (see workos-account-service.ts).
 
 export const ORG_SELECTOR_HEADER = EXECUTOR_ORG_SELECTOR_HEADER;
 
-/** The URL-pinned org selector for a request, or `null` to fall back to the session. */
+/** The URL-pinned org selector for a request, or `null` when the caller sent none. */
 export const orgSelectorFromRequest = (request: Request): string | null =>
   request.headers.get(ORG_SELECTOR_HEADER);
 

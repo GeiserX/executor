@@ -1,5 +1,7 @@
 import * as React from "react";
 
+import { setShellOrgSlugFallback } from "./server-connection";
+
 // The active organization for org-scoped hosts (the cloud app). Local and
 // desktop aren't org-scoped, so they leave it unset and consumers fall back to
 // unscoped behaviour. This is purely a UI hint (e.g. which org to pin in an MCP
@@ -28,6 +30,17 @@ export function OrganizationProvider(
         : null,
     [props.organizationId, props.organizationSlug],
   );
+  // Register the shell's org as the request-time fallback for the org header,
+  // so API calls made while the URL is still bare (entry at `/` before
+  // OrgSlugGate canonicalizes) stay explicitly scoped — the server fails
+  // closed on requests with no org rather than guessing. Registered during
+  // RENDER (memo, not an effect): children's mount effects fire their first
+  // queries before a parent effect would run, and those requests must already
+  // carry the org. Idempotent module-state write, browser-only (see
+  // server-connection).
+  const slug = value?.organizationSlug ?? null;
+  React.useMemo(() => setShellOrgSlugFallback(slug), [slug]);
+  React.useEffect(() => () => setShellOrgSlugFallback(null), []);
   return (
     <OrganizationContext.Provider value={value}>{props.children}</OrganizationContext.Provider>
   );

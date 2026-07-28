@@ -18,7 +18,11 @@ type BillingSession = {
 
 export const resolveBillingOrganization = (request: Request, session: BillingSession) =>
   Effect.gen(function* () {
-    const selector = request.headers.get(ORG_SELECTOR_HEADER) ?? session.organizationId;
+    // Fail closed: billing is org-scoped, so the console URL's org header is
+    // required (AutumnProvider always sends it). The session's own org is a
+    // browser-global — falling back to it bills/reads another org for a
+    // multi-org user.
+    const selector = request.headers.get(ORG_SELECTOR_HEADER);
     if (!selector) {
       return yield* new HttpResponseError({
         status: 401,
