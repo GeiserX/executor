@@ -10,6 +10,7 @@
 
 // Branded ids + the owner literal.
 export {
+  ArtifactId,
   AuthTemplateSlug,
   ConnectionAddress,
   ConnectionName,
@@ -62,6 +63,7 @@ export {
   InvalidConnectionInputError,
   CredentialProviderNotRegisteredError,
   CredentialResolutionError,
+  ArtifactNotFoundError,
   isUserActionableError,
   type ExecuteError,
   type ExecutorError,
@@ -100,6 +102,15 @@ export {
   type PolicySource,
 } from "./policies";
 export type { ToolPolicyAction } from "./core-schema";
+
+// Artifact projections (types only — the row mappers are server-side).
+export type {
+  Artifact,
+  ArtifactSummary,
+  SaveArtifactInput,
+  RenameArtifactInput,
+  RemoveArtifactInput,
+} from "./artifact";
 
 // Schema-side views + onboarding autodetect.
 export { ToolSchemaView, IntegrationDetectionResult } from "./types";

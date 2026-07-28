@@ -52,6 +52,7 @@ export {
   ToolName,
   ElicitationId,
   PolicyId,
+  ArtifactId,
   Tenant,
   Subject,
   Owner,
@@ -71,6 +72,7 @@ export {
   ConnectionNotFoundError,
   CredentialProviderNotRegisteredError,
   CredentialResolutionError,
+  ArtifactNotFoundError,
   isUserActionableError,
   type ExecuteError,
   type ExecutorError,
@@ -150,6 +152,7 @@ export {
   type ToolInvocationRow,
   type DefinitionRow,
   type ToolPolicyRow,
+  type ArtifactRow,
   type PluginStorageRow,
   type BlobRow,
   type ToolPolicyAction,
@@ -187,6 +190,17 @@ export {
   type EffectivePolicy,
   type PolicySource,
 } from "./policies";
+
+// Artifacts — saved generative-UI components.
+export {
+  rowToArtifact,
+  rowToArtifactSummary,
+  type Artifact,
+  type ArtifactSummary,
+  type SaveArtifactInput,
+  type RenameArtifactInput,
+  type RemoveArtifactInput,
+} from "./artifact";
 
 // Elicitation.
 export {

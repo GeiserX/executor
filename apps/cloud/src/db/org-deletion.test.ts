@@ -28,6 +28,7 @@ import * as cloudSchema from "./schema";
 import * as executorSchema from "./executor-schema";
 import { memberships, accounts } from "./schema";
 import {
+  artifact,
   blob,
   connection,
   definition,
@@ -146,6 +147,17 @@ const seedTenant = async (db: DrizzleDb, tenant: string, tag: string) => {
     tenant,
   });
 
+  await db.insert(artifact).values({
+    id: `art-${tag}`,
+    title: "Dashboard",
+    code: "export default function App() { return null; }",
+    created_at: now,
+    updated_at: now,
+    tenant,
+    owner: "o",
+    subject: "s",
+  });
+
   const orgNs = `o:${tenant}/plugin`;
   const userNs = `u:${tenant}:subject/plugin`;
   await db.insert(blob).values({
@@ -172,6 +184,7 @@ const TENANT_TABLES = [
   tool_policy,
   plugin_storage,
   subject,
+  artifact,
 ] as const;
 
 // Tables that are NOT purged by org id, each with the reason it is exempt. Any

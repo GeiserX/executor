@@ -357,6 +357,27 @@ export const coreTables = defineTables({
     ["tenant", "owner", "subject", "id"],
   ),
 
+  // A saved generative-UI artifact — the JSX source a model produced, kept so
+  // it can be re-rendered later and matched by title/description from any MCP
+  // client. Owner-scoped like every other personal row: artifacts are created
+  // at the `user` tier, and the `org` tier the table already carries is what
+  // sharing will use later without new machinery.
+  artifact: ownedExecutorTable(
+    "artifact",
+    {
+      id: keyColumn("id"),
+      title: textColumn("title"),
+      // Model-supplied prose the agent matches against ("my active users
+      // dashboard"). Nullable: the title alone is enough to save one.
+      description: nullableTextColumn("description"),
+      // The JSX source. Free-form TEXT, never indexed.
+      code: textColumn("code"),
+      created_at: dateColumn("created_at"),
+      updated_at: dateColumn("updated_at"),
+    },
+    ["tenant", "owner", "subject", "id"],
+  ),
+
   // Host-owned plugin storage (shared `plugin_storage` table, owner-scoped).
   plugin_storage: ownedExecutorTable(
     "plugin_storage",
@@ -410,6 +431,19 @@ export const TOOL_INVOCATION_COLUMNS = [
 ] as const satisfies readonly (keyof ToolRow)[];
 export type DefinitionRow = FumaRow<CoreSchema["definition"]>;
 export type ToolPolicyRow = FumaRow<CoreSchema["tool_policy"]>;
+export type ArtifactRow = FumaRow<CoreSchema["artifact"]>;
+/** The columns a list projects — everything except the JSX source, which only
+ *  a full read needs. */
+export const ARTIFACT_SUMMARY_COLUMNS = [
+  "owner",
+  "id",
+  "title",
+  "description",
+  "created_at",
+  "updated_at",
+] as const satisfies readonly (keyof ArtifactRow)[];
+/** The artifact-row projection {@link ARTIFACT_SUMMARY_COLUMNS} selects. */
+export type ArtifactSummaryRow = Pick<ArtifactRow, (typeof ARTIFACT_SUMMARY_COLUMNS)[number]>;
 export type PluginStorageRow = FumaRow<CoreSchema["plugin_storage"]>;
 export type BlobRow = FumaRow<CoreSchema["blob"]>;
 

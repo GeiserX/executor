@@ -226,6 +226,26 @@ export const tool_policy = pgTable(
   ],
 );
 
+export const artifact = pgTable(
+  "artifact",
+  {
+    id: varchar("id", { length: 255 }).notNull(),
+    title: text("title").notNull(),
+    description: text("description"),
+    code: text("code").notNull(),
+    created_at: timestamp("created_at").notNull(),
+    updated_at: timestamp("updated_at").notNull(),
+    row_id: varchar("row_id", { length: 255 })
+      .primaryKey()
+      .notNull()
+      .$defaultFn(() => createId()),
+    tenant: varchar("tenant", { length: 255 }).notNull(),
+    owner: varchar("owner", { length: 255 }).notNull(),
+    subject: varchar("subject", { length: 255 }).notNull(),
+  },
+  (table) => [uniqueIndex("artifact_uidx").on(table.tenant, table.owner, table.subject, table.id)],
+);
+
 export const plugin_storage = pgTable(
   "plugin_storage",
   {

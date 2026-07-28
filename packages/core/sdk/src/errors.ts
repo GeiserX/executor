@@ -2,7 +2,14 @@ import { Schema } from "effect";
 
 import { ElicitationDeclinedError } from "./elicitation";
 import type { StorageFailure } from "./fuma-runtime";
-import { ConnectionName, IntegrationSlug, Owner, ProviderKey, ToolAddress } from "./ids";
+import {
+  ArtifactId,
+  ConnectionName,
+  IntegrationSlug,
+  Owner,
+  ProviderKey,
+  ToolAddress,
+} from "./ids";
 
 export interface UserActionableError {
   readonly __executorUserActionable: true;
@@ -192,6 +199,21 @@ export class CredentialResolutionError extends Schema.TaggedErrorClass<Credentia
 ) {}
 
 // ---------------------------------------------------------------------------
+// Artifacts
+// ---------------------------------------------------------------------------
+
+/** No artifact with this id is visible to the bound owner scope — it was never
+ *  saved, was deleted, or belongs to another subject. */
+export class ArtifactNotFoundError extends Schema.TaggedErrorClass<ArtifactNotFoundError>()(
+  "ArtifactNotFoundError",
+  { id: ArtifactId },
+) {
+  override get message(): string {
+    return `Artifact not found: ${this.id}`;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Union — the failure channel of `execute`.
 // ---------------------------------------------------------------------------
 
@@ -211,4 +233,5 @@ export type ExecuteError =
 export type ExecutorError =
   | ExecuteError
   | IntegrationNotFoundError
-  | IntegrationRemovalNotAllowedError;
+  | IntegrationRemovalNotAllowedError
+  | ArtifactNotFoundError;

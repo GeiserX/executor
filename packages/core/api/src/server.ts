@@ -7,6 +7,7 @@ export {
   ProvidersHandlers,
   OAuthHandlers,
   PoliciesHandlers,
+  ArtifactsHandlers,
   ExecutionsHandlers,
 } from "./handlers";
 export {
