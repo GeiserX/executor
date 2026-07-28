@@ -2489,14 +2489,22 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
           integration: input.integration,
           name,
         };
+        // Label precedence: an explicit (user-chosen) label always wins; a
+        // derived label (OIDC claims) only FILLS an empty slot. Like
+        // `description` below, a reconnect or token refresh must not erase a
+        // label the user curated. Resolved once, used by every write below.
+        let identityLabel: string | null = null;
         yield* transaction(
           Effect.gen(function* () {
             const existing = yield* findConnectionRow(ref);
+            const existingLabel = existing?.identity_label?.trim() ? existing.identity_label : null;
+            identityLabel =
+              input.identityLabel ?? existingLabel ?? input.derivedIdentityLabel ?? null;
             const set: Record<string, unknown> = {
               template: String(input.template),
               provider: input.provider,
               item_ids: { [PRIMARY_INPUT_VARIABLE]: input.itemId },
-              identity_label: input.identityLabel ?? null,
+              identity_label: identityLabel,
               oauth_client: String(input.oauthClient),
               oauth_client_owner: input.oauthClientOwner,
               refresh_item_id: input.refreshItemId,
@@ -2529,7 +2537,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
                 template: String(input.template),
                 provider: input.provider,
                 item_ids: { [PRIMARY_INPUT_VARIABLE]: input.itemId },
-                identity_label: input.identityLabel ?? null,
+                identity_label: identityLabel,
                 // Curated description: never stamped by a mint — a reconnect
                 // or token refresh must not erase what the user wrote.
                 description: null,
@@ -2568,7 +2576,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
               template: String(input.template),
               provider: input.provider,
               item_ids: { [PRIMARY_INPUT_VARIABLE]: input.itemId },
-              identity_label: input.identityLabel ?? null,
+              identity_label: identityLabel,
               description: null,
               oauth_client: String(input.oauthClient),
               oauth_client_owner: input.oauthClientOwner,
@@ -3848,6 +3856,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
       ownedKeys: (owner: Owner) => ownedKeys(owner),
       defaultWritableProvider,
       mintOAuthConnection: (input: MintOAuthConnectionInput) => mintOAuthConnection(input),
+      connectionNameTaken: (ref) => findConnectionRow(ref).pipe(Effect.map((row) => row !== null)),
       // One integration-row read + one projector run. Resolve the method this
       // template selects exactly as the runtime's `selectAuthMethod` does —
       // exact slug match, else the sole declared method (single-method

@@ -384,6 +384,115 @@ describe("oauth.start / oauth.complete", () => {
     ),
   );
 
+  it.effect("newConnection resolves a taken name to the next free suffix", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const server = yield* serveOAuthTestServer({
+          scopes: ["openid", "email", "profile", "read"],
+          idTokenClaims: { email: "alice@example.com", sub: "user-1" },
+        });
+        const { executor } = yield* makeTestWorkspaceHarness({ plugins });
+        yield* executor.acme.seed(["openid", "email", "profile", "read"]);
+
+        yield* executor.oauth.createClient({
+          owner: "org",
+          slug: CLIENT,
+          authorizationUrl: server.authorizationEndpoint,
+          tokenUrl: server.tokenEndpoint,
+          grant: "authorization_code",
+          clientId: "test-client",
+          clientSecret: "test-secret",
+        });
+
+        const runFlow = Effect.gen(function* () {
+          const started = yield* executor.oauth.start({
+            owner: "org",
+            client: CLIENT,
+            clientOwner: "org",
+            name: ConnectionName.make("main"),
+            integration: INTEG,
+            template: TEMPLATE,
+            newConnection: true,
+          });
+          expect(started.status).toBe("redirect");
+          if (started.status !== "redirect") return null;
+          const callback = yield* server.completeAuthorizationCodeFlow({
+            authorizationUrl: started.authorizationUrl,
+          });
+          return yield* executor.oauth.complete({
+            state: started.state,
+            code: callback.code,
+          });
+        });
+
+        const first = yield* runFlow;
+        const second = yield* runFlow;
+        expect(String(first?.name)).toBe("main");
+        expect(String(second?.name)).toBe("main2");
+
+        const connections = yield* executor.connections.list({ integration: INTEG });
+        expect(connections.map((connection) => String(connection.name)).sort()).toEqual([
+          "main",
+          "main2",
+        ]);
+      }),
+    ),
+  );
+
+  it.effect("preserves a curated label when reconnecting without an explicit label", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const server = yield* serveOAuthTestServer({
+          scopes: ["openid", "email", "profile", "read"],
+          idTokenClaims: { email: "alice@example.com", sub: "user-1" },
+        });
+        const { executor } = yield* makeTestWorkspaceHarness({ plugins });
+        yield* executor.acme.seed(["openid", "email", "profile", "read"]);
+
+        yield* executor.oauth.createClient({
+          owner: "org",
+          slug: CLIENT,
+          authorizationUrl: server.authorizationEndpoint,
+          tokenUrl: server.tokenEndpoint,
+          grant: "authorization_code",
+          clientId: "test-client",
+          clientSecret: "test-secret",
+        });
+
+        const runFlow = Effect.gen(function* () {
+          const started = yield* executor.oauth.start({
+            owner: "org",
+            client: CLIENT,
+            clientOwner: "org",
+            name: ConnectionName.make("main"),
+            integration: INTEG,
+            template: TEMPLATE,
+          });
+          expect(started.status).toBe("redirect");
+          if (started.status !== "redirect") return null;
+          const callback = yield* server.completeAuthorizationCodeFlow({
+            authorizationUrl: started.authorizationUrl,
+          });
+          return yield* executor.oauth.complete({
+            state: started.state,
+            code: callback.code,
+          });
+        });
+
+        const first = yield* runFlow;
+        expect(first?.identityLabel).toBe("alice@example.com");
+
+        // The user renames the connection, then reconnects (no typed label).
+        yield* executor.connections.update(
+          { owner: "org", integration: INTEG, name: ConnectionName.make("main") },
+          { identityLabel: "Finance account" },
+        );
+        const second = yield* runFlow;
+        expect(second?.identityLabel).toBe("Finance account");
+      }),
+    ),
+  );
+
   it.effect("does not overwrite connection identity from id_token claims on refresh", () =>
     Effect.scoped(
       Effect.gen(function* () {

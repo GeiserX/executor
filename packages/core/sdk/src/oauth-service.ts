@@ -83,6 +83,10 @@ export interface MintOAuthConnectionInput {
   readonly integration: IntegrationSlug;
   readonly template: AuthTemplateSlug;
   readonly identityLabel?: string | null;
+  /** Display label derived from the provider (OIDC id_token claims), as opposed
+   *  to `identityLabel` which the user chose. Only fills an EMPTY label slot:
+   *  a re-mint must never clobber a curated label with a derived one. */
+  readonly derivedIdentityLabel?: string | null;
   /** Credential provider key + item id the access token is stored under. */
   readonly provider: string;
   readonly itemId: string;
@@ -127,6 +131,14 @@ export interface OAuthServiceDeps {
   readonly mintOAuthConnection: (
     input: MintOAuthConnectionInput,
   ) => Effect.Effect<Connection, StorageFailure>;
+  /** Whether a connection row exists under `(owner, integration, name)`: the
+   *  raw row, not the policy-filtered list, so `start` can resolve a free
+   *  name for `newConnection` flows against what is actually stored. */
+  readonly connectionNameTaken: (ref: {
+    readonly owner: Owner;
+    readonly integration: IntegrationSlug;
+    readonly name: ConnectionName;
+  }) => Effect.Effect<boolean, StorageFailure>;
   /**
    * Resolve the OAuth scope policy for a `(integration, template)`:
    *  - `{ kind: "scopes", scopes }`: the scopes the integration's auth template
@@ -1060,6 +1072,32 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
         });
       }
 
+      // newConnection: resolve the requested name to a FREE one against the
+      // stored rows (not a client-side, policy-filtered view), so a second
+      // untyped connect mints `personalGmail2` instead of silently re-minting
+      // the first account's row. Reconnects omit the flag and keep targeting
+      // their existing row. Bounded: a pathological owner with 1000 same-named
+      // connections fails loudly rather than scanning forever.
+      let name = input.name;
+      if (input.newConnection === true) {
+        let suffix = 2;
+        while (
+          yield* deps.connectionNameTaken({
+            owner: input.owner,
+            integration: input.integration,
+            name,
+          })
+        ) {
+          if (suffix > 1000) {
+            return yield* new OAuthStartError({
+              message: `No free connection name derivable from ${input.name}.`,
+            });
+          }
+          name = ConnectionName.make(`${String(input.name)}${suffix}`);
+          suffix++;
+        }
+      }
+
       // Declared scopes win (driven by the selected auth template). MCP-style
       // integrations declare none and discover them from the client's protected
       // resource / authorization server metadata at connect.
@@ -1107,7 +1145,7 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
           ),
         );
         const connection = yield* mintFromToken(
-          input,
+          { ...input, name },
           client,
           token,
           requestedScopes,
@@ -1163,7 +1201,7 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
           state: String(state),
           client_slug: String(input.client),
           integration: String(input.integration),
-          name: String(input.name),
+          name: String(name),
           template: String(input.template),
           redirect_url: flowRedirectUri,
           pkce_verifier: verifier,
@@ -1308,7 +1346,7 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
           name: session.name,
           integration: session.integration,
           template: session.template,
-          identityLabel: session.identityLabel ?? token.idTokenIdentityLabel ?? null,
+          identityLabel: session.identityLabel ?? null,
         },
         client,
         token,
@@ -1384,6 +1422,9 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
         integration: target.integration,
         template: target.template,
         identityLabel: target.identityLabel ?? null,
+        // The OIDC account claims travel separately: they may only FILL an
+        // empty label, never replace a user-curated one on reconnect.
+        derivedIdentityLabel: token.idTokenIdentityLabel ?? null,
         provider: String(provider.key),
         itemId,
         oauthClient: OAuthClientSlug.make(client.slug),
