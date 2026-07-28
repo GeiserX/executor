@@ -24,6 +24,7 @@ import { HttpRouter, HttpServerResponse } from "effect/unstable/http";
 import { HttpApiBuilder } from "effect/unstable/httpapi";
 import { HttpApiSwagger, OpenApi } from "effect/unstable/httpapi";
 
+import { AccountApi, AdminUsersApi } from "@executor-js/api";
 import { requestScopedMiddleware } from "@executor-js/api/server";
 
 import { UserStoreService } from "../auth/context";
@@ -56,6 +57,8 @@ const apiPrefixedRouter = Layer.effect(HttpRouter.HttpRouter)(
 const CloudOpenApi = ProtectedCloudApi.add(CloudAuthPublicApi)
   .add(CloudAuthApi)
   .add(OrgApi)
+  .add(AccountApi)
+  .add(AdminUsersApi)
   .prefix("/api");
 
 const spec = OpenApi.fromApi(CloudOpenApi);
