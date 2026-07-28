@@ -1,6 +1,7 @@
-import { Effect, Option, Predicate, Schema } from "effect";
+import { Effect, Option, Predicate, Redacted, Schema } from "effect";
 
 import {
+  credentialValueToWrite,
   type CredentialProvider,
   Owner,
   type OwnerBinding,
@@ -381,18 +382,18 @@ export const makeWorkOSVaultCredentialProvider = (
           ),
         );
         if (!object || !object.value) return null;
-        return object.value;
+        return Redacted.make(object.value);
       }),
 
     has: (id: ProviderItemId) => store.get(id).pipe(Effect.map((meta) => meta !== null)),
 
-    set: (id: ProviderItemId, value: string) =>
+    set: (id: ProviderItemId, value: string | Redacted.Redacted<string>) =>
       Effect.gen(function* () {
         const existing = yield* store.get(id);
         yield* upsertSecretValue(
           client,
           yield* nameFor(id),
-          value,
+          credentialValueToWrite(value),
           vaultContextFor(id, owner),
         ).pipe(
           Effect.mapError(

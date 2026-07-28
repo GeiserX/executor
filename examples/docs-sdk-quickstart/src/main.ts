@@ -1,8 +1,9 @@
 // This example is the source of truth for docs snippets on /sdk/quickstart.
 // Run `bun run docs:snippets` after editing docs:start/docs:end blocks.
-import { Effect } from "effect";
+import { Effect, Redacted } from "effect";
 import {
   createExecutor,
+  credentialValueToWrite,
   ProviderItemId,
   ProviderKey,
   type CredentialProvider,
@@ -79,15 +80,20 @@ const inventoryApi = {
 // A connection stores its value in a writable credential provider. This tiny
 // in-memory store is enough for a script; production hosts swap in a durable
 // provider (keychain, 1Password, an encrypted DB store, …). Providers are
-// Effect-native, so `get`/`set` return `Effect`s.
+// Effect-native, so `get`/`set` return `Effect`s, and `get` hands back a
+// `Redacted` so a credential cannot land in a log by accident.
 const memory = new Map<string, string>();
 const memoryProvider: CredentialProvider = {
   key: ProviderKey.make("memory"),
   writable: true,
-  get: (id: ProviderItemId) => Effect.sync(() => memory.get(String(id)) ?? null),
-  set: (id: ProviderItemId, value: string) =>
+  get: (id: ProviderItemId) =>
     Effect.sync(() => {
-      memory.set(String(id), value);
+      const value = memory.get(String(id));
+      return value === undefined ? null : Redacted.make(value);
+    }),
+  set: (id: ProviderItemId, value: string | Redacted.Redacted<string>) =>
+    Effect.sync(() => {
+      memory.set(String(id), credentialValueToWrite(value));
     }),
 };
 

@@ -1,4 +1,4 @@
-import { Effect, Inspectable, Layer, Option, Predicate, Schema } from "effect";
+import { Effect, Inspectable, Layer, Option, Predicate, Redacted, Schema } from "effect";
 import { FetchHttpClient, type HttpClient } from "effect/unstable/http";
 import { fumadb } from "@executor-js/fumadb";
 import { memoryAdapter } from "@executor-js/fumadb/adapters/memory";
@@ -1528,12 +1528,16 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         // Null means "public client, send no client_secret" — both for a row
         // that never had one and for a confidential row whose vault item is
         // gone, which the AS then rejects loudly instead of us guessing.
-        const clientSecret =
+        // unwrap: migrated in stage 3. Unwrap BEFORE presence-normalizing —
+        // `Redacted.make("")` is truthy, so an emptiness test on the wrapper
+        // would read a public client as confidential.
+        const storedClientSecret =
           clientRow.client_secret_item_id == null
             ? null
-            : oauthClientSecretFromInput(
-                yield* provider.get(ProviderItemId.make(String(clientRow.client_secret_item_id))),
-              );
+            : yield* provider.get(ProviderItemId.make(String(clientRow.client_secret_item_id)));
+        const clientSecret = oauthClientSecretFromInput(
+          storedClientSecret === null ? null : Redacted.value(storedClientSecret),
+        );
         // Re-request the scopes this connection was GRANTED (RFC 6749 §6: a
         // refresh must not exceed the originally-granted scope). Empty → omit
         // the param, which the AS treats as "same scopes as granted".
@@ -1582,14 +1586,18 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
                   return yield* reauth("No refresh token is stored for this connection.");
                 }
                 const refreshToken = yield* provider.get(ProviderItemId.make(row.refresh_item_id));
-                if (!refreshToken) {
+                // Absence is `null` — never falsiness. Every `Redacted` is
+                // truthy, so a truthiness test here would silently stop
+                // detecting an unresolvable item id.
+                if (refreshToken === null) {
                   return yield* reauth("Stored refresh token could not be resolved.");
                 }
                 return yield* refreshAccessToken({
                   tokenUrl,
                   clientId: String(clientRow.client_id),
                   clientSecret,
-                  refreshToken,
+                  // unwrap: migrated in stage 3
+                  refreshToken: Redacted.value(refreshToken),
                   scopes: grantedScopes,
                   // RFC 8707: keep the re-minted token bound to the same resource
                   // (MCP servers require this on refresh).
@@ -1709,7 +1717,9 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         }
         const out: Record<string, string | null> = {};
         for (const [variable, itemId] of Object.entries(connectionItemIds(row))) {
-          out[variable] = yield* provider.get(ProviderItemId.make(itemId));
+          // unwrap: migrated in stage 3
+          const value = yield* provider.get(ProviderItemId.make(itemId));
+          out[variable] = value === null ? null : Redacted.value(value);
         }
         return out;
       }).pipe(
@@ -2813,7 +2823,9 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
               cause: undefined,
             });
           }
-          out[variable] = yield* provider.get(origin.from.id);
+          // unwrap: migrated in stage 3
+          const value = yield* provider.get(origin.from.id);
+          out[variable] = value === null ? null : Redacted.value(value);
         }
         return out;
       });
@@ -3346,7 +3358,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
     const providersGet = (
       key: ProviderKey,
       id: ProviderItemId,
-    ): Effect.Effect<string | null, StorageFailure> =>
+    ): Effect.Effect<Redacted.Redacted<string> | null, StorageFailure> =>
       Effect.gen(function* () {
         const provider = credentialProviders.get(String(key));
         if (!provider) return null;

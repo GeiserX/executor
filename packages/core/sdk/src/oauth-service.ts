@@ -14,7 +14,7 @@
 // redeems the session, exchanges the code, and mints the connection.
 // ---------------------------------------------------------------------------
 
-import { Duration, Effect, Layer, Option, Schema } from "effect";
+import { Duration, Effect, Layer, Option, Redacted, Schema } from "effect";
 import { FetchHttpClient, type HttpClient } from "effect/unstable/http";
 
 import type { Connection } from "./connection";
@@ -1029,8 +1029,15 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
             if (row.client_secret_item_id != null) {
               const provider = deps.defaultWritableProvider();
               if (provider) {
+                // unwrap: migrated in stage 3. Unwrap BEFORE
+                // presence-normalizing — `Redacted.make("")` is truthy, so an
+                // emptiness test on the wrapper would read a public client as
+                // confidential.
+                const stored = yield* provider.get(
+                  ProviderItemId.make(String(row.client_secret_item_id)),
+                );
                 clientSecret = oauthClientSecretFromInput(
-                  yield* provider.get(ProviderItemId.make(String(row.client_secret_item_id))),
+                  stored === null ? null : Redacted.value(stored),
                 );
               }
             }

@@ -1,11 +1,11 @@
-import { Context, Effect, Layer } from "effect";
+import { Context, Effect, Layer, Redacted } from "effect";
 import { withQueryContext } from "@executor-js/fumadb/query";
 import { collectTables, createExecutor, type Executor, type ExecutorConfig } from "./executor";
 import type { FumaDb } from "./fuma-runtime";
 import { ProviderItemId, ProviderKey, Subject, Tenant } from "./ids";
 import { definePlugin, type AnyPlugin } from "./plugin";
 import type { ExecutorOwnerPolicyContext } from "./owner-policy";
-import type { CredentialProvider } from "./provider";
+import { credentialValueToWrite, type CredentialProvider } from "./provider";
 import type { SqliteTestFumaDb } from "./sqlite-test-db";
 
 // ---------------------------------------------------------------------------
@@ -231,10 +231,14 @@ export const memoryCredentialsPlugin = definePlugin(() => {
   const provider: CredentialProvider = {
     key: ProviderKey.make("memory"),
     writable: true,
-    get: (id) => Effect.sync(() => store.get(String(id)) ?? null),
+    get: (id) =>
+      Effect.sync(() => {
+        const value = store.get(String(id));
+        return value === undefined ? null : Redacted.make(value);
+      }),
     set: (id, value) =>
       Effect.sync(() => {
-        store.set(String(id), value);
+        store.set(String(id), credentialValueToWrite(value));
       }),
     delete: (id) =>
       Effect.sync(() => {

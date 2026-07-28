@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, Predicate, Result, Schema } from "effect";
+import { Effect, Predicate, Redacted, Result, Schema } from "effect";
 
 import { type ToolPolicyRow } from "./core-schema";
 import {
@@ -20,7 +20,7 @@ import {
   resolveToolPolicy,
 } from "./policies";
 import { definePlugin, tool } from "./plugin";
-import type { CredentialProvider } from "./provider";
+import { credentialValueToWrite, type CredentialProvider } from "./provider";
 import { makeTestExecutor } from "./testing";
 
 // ---------------------------------------------------------------------------
@@ -270,8 +270,13 @@ const memoryProvider = (): CredentialProvider => {
   return {
     key: ProviderKey.make("memory"),
     writable: true,
-    get: (id) => Effect.sync(() => store.get(String(id)) ?? null),
-    set: (id, value) => Effect.sync(() => void store.set(String(id), value)),
+    get: (id) =>
+      Effect.sync(() => {
+        const value = store.get(String(id));
+        return value === undefined ? null : Redacted.make(value);
+      }),
+    set: (id, value) =>
+      Effect.sync(() => void store.set(String(id), credentialValueToWrite(value))),
   };
 };
 

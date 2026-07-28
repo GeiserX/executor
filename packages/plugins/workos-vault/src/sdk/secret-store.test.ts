@@ -1,6 +1,6 @@
 // oxlint-disable executor/no-try-catch-or-throw -- boundary: the fake WorkOS Vault client below simulates the real promise SDK, which throws to signal API errors
 import { describe, expect, it } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Redacted } from "effect";
 
 import {
   Owner,
@@ -59,11 +59,19 @@ const makeMetadata = (
   versionId,
 });
 
+/** `objects` is the vault's storage as the fake holds it — the bytes a real
+ *  Vault would have received. Assertions about what was actually persisted read
+ *  it directly rather than round-tripping through `get`, which would hide a
+ *  write that stored the wrong thing. */
+type InspectableFakeClient = WorkOSVaultClient & {
+  readonly objects: ReadonlyMap<string, WorkOSVaultObject>;
+};
+
 const makeFakeClient = (options?: {
   readonly conflictOnNextSecretUpdate?: boolean;
   readonly rejectNamesWithColon?: boolean;
   readonly rejectReadNamesLongerThan?: number;
-}): WorkOSVaultClient => {
+}): InspectableFakeClient => {
   const objects = new Map<string, WorkOSVaultObject>();
   let sequence = 0;
   let conflictPending = options?.conflictOnNextSecretUpdate ?? false;
@@ -161,6 +169,7 @@ const makeFakeClient = (options?: {
   };
 
   return {
+    objects,
     use: <A>(operation: string, fn: (client: WorkOSVaultPromiseApi) => Promise<A>) =>
       Effect.tryPromise({
         try: () => fn(rawClient),
@@ -246,7 +255,7 @@ const makeFakeStorageDeps = (binding: OwnerBinding): StorageDeps => {
 const orgBinding: OwnerBinding = { tenant: Tenant.make("tenant-a"), subject: null };
 
 const makeProvider = (
-  client: WorkOSVaultClient,
+  client: InspectableFakeClient,
   binding: OwnerBinding = orgBinding,
 ): ReturnType<typeof makeWorkOSVaultCredentialProvider> => {
   const deps = makeFakeStorageDeps(binding);
@@ -256,6 +265,13 @@ const makeProvider = (
 
 const id = (value: string) => ProviderItemId.make(value);
 
+/** Unwrap a `get` for comparison against the expected plaintext. Absence stays
+ *  `null` — every `Redacted` is truthy, so presence is tested explicitly. */
+const resolved = <E>(
+  effect: Effect.Effect<Redacted.Redacted<string> | null, E>,
+): Effect.Effect<string | null, E> =>
+  effect.pipe(Effect.map((value) => (value === null ? null : Redacted.value(value))));
+
 describe("WorkOS Vault credential provider", () => {
   it.effect("stores and resolves values through WorkOS Vault", () =>
     Effect.gen(function* () {
@@ -263,12 +279,35 @@ describe("WorkOS Vault credential provider", () => {
 
       yield* provider.set!(id("github-token"), "ghp_secret");
 
-      expect(yield* provider.get(id("github-token"))).toBe("ghp_secret");
+      expect(yield* resolved(provider.get(id("github-token")))).toBe("ghp_secret");
       expect(provider.key).toBe("workos-vault");
 
       const listed = yield* provider.list!();
       expect(listed).toHaveLength(1);
       expect(listed[0]!.id).toBe("github-token");
+    }),
+  );
+
+  // The whole point of the Redacted migration: a `set` that forgot to unwrap
+  // would send the literal "<redacted>" to Vault, and every read-back through
+  // `get` would still look right. Only the vault's own bytes catch it.
+  it.effect("writes the real secret to Vault for both string and Redacted input", () =>
+    Effect.gen(function* () {
+      const client = makeFakeClient();
+      const provider = makeProvider(client);
+
+      yield* provider.set!(id("plain"), "sk_plain_written");
+      yield* provider.set!(id("wrapped"), Redacted.make("sk_wrapped_written"));
+
+      const persisted = [...client.objects.values()].map((object) => object.value);
+      expect(persisted).toEqual(expect.arrayContaining(["sk_plain_written", "sk_wrapped_written"]));
+      expect(persisted).not.toContain("<redacted>");
+
+      // An update path (create → update) must unwrap too.
+      yield* provider.set!(id("wrapped"), Redacted.make("sk_wrapped_rotated"));
+      const rotated = [...client.objects.values()].map((object) => object.value);
+      expect(rotated).toContain("sk_wrapped_rotated");
+      expect(rotated).not.toContain("<redacted>");
     }),
   );
 
@@ -279,7 +318,7 @@ describe("WorkOS Vault credential provider", () => {
       yield* provider.set!(id("api-key"), "v1");
       yield* provider.set!(id("api-key"), "v2");
 
-      expect(yield* provider.get(id("api-key"))).toBe("v2");
+      expect(yield* resolved(provider.get(id("api-key")))).toBe("v2");
       expect(yield* provider.list!()).toHaveLength(1);
     }),
   );
@@ -287,7 +326,7 @@ describe("WorkOS Vault credential provider", () => {
   it.effect("get returns null for an unknown id", () =>
     Effect.gen(function* () {
       const provider = makeProvider(makeFakeClient());
-      expect(yield* provider.get(id("absent"))).toBeNull();
+      expect(yield* resolved(provider.get(id("absent")))).toBeNull();
     }),
   );
 
@@ -305,11 +344,11 @@ describe("WorkOS Vault credential provider", () => {
       const provider = makeProvider(makeFakeClient());
 
       yield* provider.set!(id("remove-me"), "gone soon");
-      expect(yield* provider.get(id("remove-me"))).toBe("gone soon");
+      expect(yield* resolved(provider.get(id("remove-me")))).toBe("gone soon");
 
       yield* provider.delete!(id("remove-me"));
 
-      expect(yield* provider.get(id("remove-me"))).toBeNull();
+      expect(yield* resolved(provider.get(id("remove-me")))).toBeNull();
       expect(yield* provider.list!()).toHaveLength(0);
 
       // delete is idempotent and returns void; deleting an absent id is a no-op.
@@ -329,7 +368,7 @@ describe("WorkOS Vault credential provider", () => {
 
       yield* provider.set!(longId, "token");
       // The metadata row exists; the vault value read is treated as missing.
-      expect(yield* provider.get(longId)).toBeNull();
+      expect(yield* resolved(provider.get(longId))).toBeNull();
 
       yield* provider.delete!(longId);
       expect(yield* provider.list!()).toHaveLength(0);
@@ -343,7 +382,7 @@ describe("WorkOS Vault credential provider", () => {
       yield* provider.set!(id("conflict"), "initial");
       yield* provider.set!(id("conflict"), "retry-me");
 
-      expect(yield* provider.get(id("conflict"))).toBe("retry-me");
+      expect(yield* resolved(provider.get(id("conflict")))).toBe("retry-me");
       expect((yield* provider.list!()).map((s) => s.id)).toEqual(["conflict"]);
     }),
   );
@@ -355,7 +394,7 @@ describe("WorkOS Vault credential provider", () => {
       const provider = makeProvider(makeFakeClient({ rejectNamesWithColon: true }));
 
       yield* provider.set!(id("user-org:u1:org42"), "personal");
-      expect(yield* provider.get(id("user-org:u1:org42"))).toBe("personal");
+      expect(yield* resolved(provider.get(id("user-org:u1:org42")))).toBe("personal");
     }),
   );
 
@@ -368,7 +407,7 @@ describe("WorkOS Vault credential provider", () => {
       const provider = makeProvider(makeFakeClient(), userBinding);
 
       yield* provider.set!(id("token"), "v");
-      expect(yield* provider.get(id("token"))).toBe("v");
+      expect(yield* resolved(provider.get(id("token")))).toBe("v");
     }),
   );
 });
@@ -495,9 +534,9 @@ describe("WorkOS Vault — credential owner partitioning", () => {
       yield* creator.set!(id("connection:org:exa_search_api:workspaceexa:token"), "exa_secret");
 
       // user B (same org, different subject) resolves the same org connection
-      expect(yield* other.get(id("connection:org:exa_search_api:workspaceexa:token"))).toBe(
-        "exa_secret",
-      );
+      expect(
+        yield* resolved(other.get(id("connection:org:exa_search_api:workspaceexa:token"))),
+      ).toBe("exa_secret");
       // …and an automation context with no subject resolves it too
       const automation = makeWorkOSVaultCredentialProvider({
         client,
@@ -506,9 +545,9 @@ describe("WorkOS Vault — credential owner partitioning", () => {
         ),
         owner: { tenant: Tenant.make("tenant-a"), subject: null },
       });
-      expect(yield* automation.get(id("connection:org:exa_search_api:workspaceexa:token"))).toBe(
-        "exa_secret",
-      );
+      expect(
+        yield* resolved(automation.get(id("connection:org:exa_search_api:workspaceexa:token"))),
+      ).toBe("exa_secret");
     }),
   );
 
@@ -530,8 +569,10 @@ describe("WorkOS Vault — credential owner partitioning", () => {
       yield* userA.set!(id("connection:user:notion:personal:token"), "private_secret");
 
       // user A resolves their own; user B cannot see the metadata → no value
-      expect(yield* userA.get(id("connection:user:notion:personal:token"))).toBe("private_secret");
-      expect(yield* userB.get(id("connection:user:notion:personal:token"))).toBeNull();
+      expect(yield* resolved(userA.get(id("connection:user:notion:personal:token")))).toBe(
+        "private_secret",
+      );
+      expect(yield* resolved(userB.get(id("connection:user:notion:personal:token")))).toBeNull();
     }),
   );
 
@@ -553,8 +594,8 @@ describe("WorkOS Vault — credential owner partitioning", () => {
       yield* creator.set!(id("oauth:org:slack:workspace"), "access_tok");
       yield* creator.set!(id("oauth-client:org:my_app:secret"), "client_sec");
 
-      expect(yield* other.get(id("oauth:org:slack:workspace"))).toBe("access_tok");
-      expect(yield* other.get(id("oauth-client:org:my_app:secret"))).toBe("client_sec");
+      expect(yield* resolved(other.get(id("oauth:org:slack:workspace")))).toBe("access_tok");
+      expect(yield* resolved(other.get(id("oauth-client:org:my_app:secret")))).toBe("client_sec");
     }),
   );
 });
@@ -589,8 +630,8 @@ describe("WorkOS Vault — object-name partition isolation", () => {
       yield* tenantOne.set!(sharedId, "org-1-key");
       yield* tenantTwo.set!(sharedId, "org-2-key");
 
-      expect(yield* tenantOne.get(sharedId)).toBe("org-1-key");
-      expect(yield* tenantTwo.get(sharedId)).toBe("org-2-key");
+      expect(yield* resolved(tenantOne.get(sharedId))).toBe("org-1-key");
+      expect(yield* resolved(tenantTwo.get(sharedId))).toBe("org-2-key");
     }),
   );
 
@@ -604,8 +645,8 @@ describe("WorkOS Vault — object-name partition isolation", () => {
       yield* userA.set!(sharedId, "a-token");
       yield* userB.set!(sharedId, "b-token");
 
-      expect(yield* userA.get(sharedId)).toBe("a-token");
-      expect(yield* userB.get(sharedId)).toBe("b-token");
+      expect(yield* resolved(userA.get(sharedId))).toBe("a-token");
+      expect(yield* resolved(userB.get(sharedId))).toBe("b-token");
     }),
   );
 
@@ -645,13 +686,13 @@ describe("WorkOS Vault — object-name partition isolation", () => {
 
       // resolves (name under the limit), hashed siblings stay distinct, and
       // identical long ids in two partitions stay isolated
-      expect(yield* userA.get(longId)).toBe("a-refresh-token");
-      expect(yield* userA.get(siblingId)).toBe("a-access-token");
-      expect(yield* userB.get(longId)).toBe("b-refresh-token");
+      expect(yield* resolved(userA.get(longId))).toBe("a-refresh-token");
+      expect(yield* resolved(userA.get(siblingId))).toBe("a-access-token");
+      expect(yield* resolved(userB.get(longId))).toBe("b-refresh-token");
 
       // a second write lands on the same capped name (update, not duplicate)
       yield* userA.set!(longId, "a-refresh-token-2");
-      expect(yield* userA.get(longId)).toBe("a-refresh-token-2");
+      expect(yield* resolved(userA.get(longId))).toBe("a-refresh-token-2");
     }),
   );
 });

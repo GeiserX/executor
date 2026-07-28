@@ -1,3 +1,4 @@
+import { Redacted } from "effect";
 import type { Effect } from "effect";
 
 import type { StorageFailure } from "./fuma-runtime";
@@ -24,12 +25,33 @@ export interface CredentialProvider {
    *  connection's `remove` only drops our routing, leaving the item intact. */
   readonly writable: boolean;
   /** Resolve a value by opaque id. The single hop a credential goes through
-   *  before its template is applied. The provider interprets the id. */
-  readonly get: (id: ProviderItemId) => Effect.Effect<string | null, StorageFailure>;
+   *  before its template is applied. The provider interprets the id.
+   *
+   *  Returns `Redacted` so a credential cannot reach a log, a span attribute, or
+   *  an error message by accident — this is the chokepoint the guarantee hangs
+   *  off, so implementations must never widen it back to a bare string. */
+  readonly get: (
+    id: ProviderItemId,
+  ) => Effect.Effect<Redacted.Redacted<string> | null, StorageFailure>;
   readonly has?: (id: ProviderItemId) => Effect.Effect<boolean, StorageFailure>;
-  readonly set?: (id: ProviderItemId, value: string) => Effect.Effect<void, StorageFailure>;
+  /** Accepts a bare string as well as `Redacted` so callers holding a value that
+   *  never left the process (a freshly minted token, a pasted form field) do not
+   *  have to wrap it first. Unwrap with `Redacted.value` at the serialization
+   *  line: a missed unwrap serializes the literal "<redacted>" and silently
+   *  persists garbage. */
+  readonly set?: (
+    id: ProviderItemId,
+    value: string | Redacted.Redacted<string>,
+  ) => Effect.Effect<void, StorageFailure>;
   readonly delete?: (id: ProviderItemId) => Effect.Effect<void, StorageFailure>;
   /** Browse entries for discovery (pick a 1Password item). Optional — some
    *  backends can't enumerate. */
   readonly list?: () => Effect.Effect<readonly ProviderEntry[], StorageFailure>;
 }
+
+/** The unwrap a `set` implementation performs at its serialization line. Keep
+ *  the call adjacent to the write: `Redacted`'s toString/toJSON render
+ *  "<redacted>", so a value that reaches a backend still wrapped is persisted as
+ *  that literal instead of failing. */
+export const credentialValueToWrite = (value: string | Redacted.Redacted<string>): string =>
+  Redacted.isRedacted(value) ? Redacted.value(value) : value;

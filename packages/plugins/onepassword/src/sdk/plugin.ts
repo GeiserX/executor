@@ -1,4 +1,4 @@
-import { Effect, Schema } from "effect";
+import { Effect, Redacted, Schema } from "effect";
 
 import {
   definePlugin,
@@ -203,21 +203,21 @@ const makeProvider = (
   key: PROVIDER_KEY,
   writable: false,
 
-  get: (id: ProviderItemId): Effect.Effect<string | null, StorageFailure> =>
+  get: (id: ProviderItemId): Effect.Effect<Redacted.Redacted<string> | null, StorageFailure> =>
     ctx.storage.getConfig().pipe(
       Effect.flatMap((config) => {
-        if (!config) return Effect.succeed(null as string | null);
+        if (!config) return Effect.succeed(null as Redacted.Redacted<string> | null);
 
         const uri = configuredVaultUri(config, id);
-        if (uri === null) return Effect.succeed(null as string | null);
+        if (uri === null) return Effect.succeed(null as Redacted.Redacted<string> | null);
 
         return getServiceFromConfig(config, timeoutMs, preferSdk).pipe(
           Effect.flatMap((svc) => svc.resolveSecret(uri)),
-          Effect.map((v): string | null => v),
+          Effect.map((v): Redacted.Redacted<string> | null => Redacted.make(v)),
           Effect.orElseSucceed(() => null),
         );
       }),
-      Effect.catch(() => Effect.succeed(null as string | null)),
+      Effect.catch(() => Effect.succeed(null as Redacted.Redacted<string> | null)),
     ),
 
   list: (): Effect.Effect<readonly ProviderEntry[], StorageFailure> =>

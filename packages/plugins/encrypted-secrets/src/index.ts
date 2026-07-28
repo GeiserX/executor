@@ -1,8 +1,9 @@
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
 
-import { Effect } from "effect";
+import { Effect, Redacted } from "effect";
 
 import {
+  credentialValueToWrite,
   definePlugin,
   Owner,
   ProviderItemId,
@@ -96,14 +97,18 @@ const makeEncryptedProvider = (
     storage
       .get<string>({ collection: COLLECTION, key: id })
       .pipe(
-        Effect.flatMap((entry) => (entry ? decryptSecret(key, entry.data) : Effect.succeed(null))),
+        Effect.flatMap((entry) =>
+          entry
+            ? decryptSecret(key, entry.data).pipe(Effect.map(Redacted.make))
+            : Effect.succeed(null),
+        ),
       ),
 
   has: (id: ProviderItemId) =>
     storage.get({ collection: COLLECTION, key: id }).pipe(Effect.map((entry) => entry !== null)),
 
-  set: (id: ProviderItemId, value: string) =>
-    encryptSecret(key, value).pipe(
+  set: (id: ProviderItemId, value: string | Redacted.Redacted<string>) =>
+    encryptSecret(key, credentialValueToWrite(value)).pipe(
       Effect.flatMap((payload) =>
         storage.put({ collection: COLLECTION, key: id, owner, data: payload }),
       ),

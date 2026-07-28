@@ -1,5 +1,5 @@
 /* oxlint-disable executor/no-try-catch-or-throw -- boundary: plugin source config validation is converted into the extension Effect failure channel */
-import { Data, Effect, Predicate, Result } from "effect";
+import { Data, Effect, Predicate, Redacted, Result } from "effect";
 import {
   AuthTemplateSlug,
   ConnectionName,
@@ -249,16 +249,20 @@ const tokenItemId = (slug: string): ProviderItemId =>
 // A source authenticates only with its own explicitly provided token. No
 // implicit credential sharing: a stored GitHub connection must never leak
 // into git fetches the user did not tie to it.
+// Unwrapped here rather than at the fetch sites because the git source API
+// takes a bare bearer token; keeping it wrapped any longer would only move the
+// unwrap, not remove it.
 const gitTokenFor = (
   ctx: PluginCtx<AppsStore>,
   config: Extract<AppSourceConfig, { readonly kind: "git" }>,
 ): Effect.Effect<string | null, unknown> =>
   Effect.gen(function* () {
     if (config.tokenProvider && config.tokenItemId) {
-      return yield* ctx.providers.get(
+      const token = yield* ctx.providers.get(
         ProviderKey.make(config.tokenProvider),
         ProviderItemId.make(config.tokenItemId),
       );
+      return token === null ? null : Redacted.value(token);
     }
     return null;
   });

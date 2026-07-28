@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, Predicate, Result } from "effect";
+import { Effect, Predicate, Redacted, Result } from "effect";
 
 import {
   AuthTemplateSlug,
@@ -12,7 +12,7 @@ import {
 } from "./ids";
 import { createExecutor } from "./executor";
 import { definePlugin } from "./plugin";
-import type { CredentialProvider } from "./provider";
+import { credentialValueToWrite, type CredentialProvider } from "./provider";
 import { makeTestConfig, makeTestExecutor } from "./testing";
 
 // removed: v1 connection-refresh lifecycle, ConnectionProvider.refresh,
@@ -27,8 +27,13 @@ const memoryProvider = (): CredentialProvider => {
   return {
     key: ProviderKey.make("memory"),
     writable: true,
-    get: (id) => Effect.sync(() => store.get(String(id)) ?? null),
-    set: (id, value) => Effect.sync(() => void store.set(String(id), value)),
+    get: (id) =>
+      Effect.sync(() => {
+        const value = store.get(String(id));
+        return value === undefined ? null : Redacted.make(value);
+      }),
+    set: (id, value) =>
+      Effect.sync(() => void store.set(String(id), credentialValueToWrite(value))),
     has: (id) => Effect.sync(() => store.has(String(id))),
     list: () =>
       Effect.sync(() =>

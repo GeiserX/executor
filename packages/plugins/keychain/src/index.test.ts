@@ -1,5 +1,5 @@
 import { describe, it, expect } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Redacted } from "effect";
 import { ProviderItemId, ProviderKey, createExecutor } from "@executor-js/sdk";
 import { makeTestConfig } from "@executor-js/sdk/testing";
 import { keychainPlugin } from "./index";
@@ -77,7 +77,7 @@ describe("keychain plugin", () => {
 
           // Provider resolves the value back.
           const resolved = yield* provider.get(id);
-          expect(resolved).toBe("keychain-test-value");
+          expect(resolved === null ? null : Redacted.value(resolved)).toBe("keychain-test-value");
         }).pipe(Effect.ensuring(provider.delete!(id).pipe(Effect.orElseSucceed(() => undefined))));
       }),
   );

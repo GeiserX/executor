@@ -46,6 +46,7 @@ export type {
   ValidateConnectionInput,
 } from "./connection";
 export type { CredentialProvider, ProviderEntry } from "./provider";
+export { credentialValueToWrite } from "./provider";
 export type { Tool, ToolDef, ToolListFilter, ToolAnnotations } from "./tool";
 
 // Tagged errors (Schema-based — browser-safe).

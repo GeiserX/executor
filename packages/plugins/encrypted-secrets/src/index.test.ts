@@ -1,4 +1,4 @@
-import { Effect, Exit } from "effect";
+import { Effect, Exit, Redacted } from "effect";
 import { describe, expect, test } from "@effect/vitest";
 
 import { Owner, ProviderItemId, type CredentialProvider, type PluginCtx } from "@executor-js/sdk";
@@ -82,6 +82,13 @@ const makeProvider = (key: string, owner: Owner = Owner.make("org")) => {
 
 const id = (value: string) => ProviderItemId.make(value);
 
+/** Unwrap a `get` for comparison against the expected plaintext. Absence stays
+ *  `null` — every `Redacted` is truthy, so presence is tested explicitly. */
+const resolved = async <E>(effect: Effect.Effect<Redacted.Redacted<string> | null, E>) => {
+  const value = await Effect.runPromise(effect);
+  return value === null ? null : Redacted.value(value);
+};
+
 const expectFailure = async <A, E>(effect: Effect.Effect<A, E>) => {
   const exit = await Effect.runPromiseExit(effect);
   expect(Exit.isFailure(exit)).toBe(true);
@@ -119,8 +126,7 @@ describe("provider", () => {
   test("set then get returns the plaintext", async () => {
     const { provider } = makeProvider("master");
     await Effect.runPromise(provider.set!(id("github"), "ghp_xyz"));
-    const got = await Effect.runPromise(provider.get(id("github")));
-    expect(got).toBe("ghp_xyz");
+    expect(await resolved(provider.get(id("github")))).toBe("ghp_xyz");
   });
 
   test("stores ciphertext at rest, not plaintext", async () => {
@@ -131,6 +137,23 @@ describe("provider", () => {
     expect(stored.startsWith("v1.")).toBe(true);
   });
 
+  // A `set` that forgot to unwrap would encrypt the literal "<redacted>", and
+  // the ciphertext-at-rest test above would still pass. Decrypting what was
+  // actually stored is the only check that catches it.
+  test("encrypts the real secret for both string and Redacted input", async () => {
+    const key = deriveKey("master");
+
+    for (const [itemId, input, expected] of [
+      ["plain", "sk_plain_written", "sk_plain_written"],
+      ["wrapped", Redacted.make("sk_wrapped_written"), "sk_wrapped_written"],
+    ] as const) {
+      const { provider, rows } = makeProvider("master");
+      await Effect.runPromise(provider.set!(id(itemId), input));
+      const persisted = String([...rows.values()][0]!.data);
+      expect(await Effect.runPromise(decryptSecret(key, persisted))).toBe(expected);
+    }
+  });
+
   // removed: "a secret in one scope is invisible to another scope" — v2 drops
   // the scope arg entirely. The provider keys solely by the opaque
   // `ProviderItemId`; the referencing connection row owns the (tenant, owner,
@@ -139,7 +162,7 @@ describe("provider", () => {
 
   test("get returns null for a missing id", async () => {
     const { provider } = makeProvider("master");
-    expect(await Effect.runPromise(provider.get(id("absent")))).toBeNull();
+    expect(await resolved(provider.get(id("absent")))).toBeNull();
   });
 
   test("has and delete reflect presence", async () => {

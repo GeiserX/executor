@@ -3,7 +3,7 @@
 import type { Client } from "@libsql/client";
 import { drizzle } from "drizzle-orm/libsql";
 import { migrate } from "drizzle-orm/libsql/migrator";
-import { Data, Effect } from "effect";
+import { Data, Effect, Redacted } from "effect";
 import { createId } from "@executor-js/fumadb/cuid";
 import { createHash, randomBytes } from "node:crypto";
 import * as fs from "node:fs";
@@ -673,7 +673,10 @@ const providerGet = async (
   }
   if (provider === KEYCHAIN_PROVIDER) {
     const oldProvider = makeKeychainProvider(`${keychainBaseServiceName()}/${scopeId}`);
-    return await Effect.runPromise(oldProvider.get(secretId as never));
+    // The migration re-persists the value under its v2 id, so it needs the
+    // plaintext here and nowhere else.
+    const value = await Effect.runPromise(oldProvider.get(secretId as never));
+    return value === null ? null : Redacted.value(value);
   }
   return null;
 };

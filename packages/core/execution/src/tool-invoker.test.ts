@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Data, Effect, Fiber, Schema } from "effect";
+import { Data, Effect, Fiber, Redacted, Schema } from "effect";
 
 import {
   AuthTemplateSlug,
@@ -14,6 +14,7 @@ import {
   ToolName,
   ToolResult,
   createExecutor,
+  credentialValueToWrite,
   definePlugin,
   type AnyPlugin,
   type CredentialProvider,
@@ -134,8 +135,13 @@ const memoryProvider = (key: string): CredentialProvider => {
   return {
     key: ProviderKey.make(key),
     writable: true,
-    get: (id) => Effect.sync(() => store.get(String(id)) ?? null),
-    set: (id, value) => Effect.sync(() => void store.set(String(id), value)),
+    get: (id) =>
+      Effect.sync(() => {
+        const value = store.get(String(id));
+        return value === undefined ? null : Redacted.make(value);
+      }),
+    set: (id, value) =>
+      Effect.sync(() => void store.set(String(id), credentialValueToWrite(value))),
     has: (id) => Effect.sync(() => store.has(String(id))),
     list: () =>
       Effect.sync(() =>

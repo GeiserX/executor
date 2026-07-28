@@ -1,5 +1,5 @@
 import { Effect, type Schema as EffectSchema } from "effect";
-import type { Context, Layer } from "effect";
+import type { Context, Layer, Redacted } from "effect";
 import type { HttpClient } from "effect/unstable/http";
 import type { HttpApiGroup } from "effect/unstable/httpapi";
 import type { StandardJSONSchemaV1, StandardSchemaV1 } from "@standard-schema/spec";
@@ -249,11 +249,12 @@ export interface PluginCtx<TStore = unknown> {
       provider: ProviderKey,
     ) => Effect.Effect<readonly ProviderEntry[], StorageFailure>;
     /** Read an opaque item from a provider. Plugins use this for secret values
-     *  they own that are not modeled as connections. */
+     *  they own that are not modeled as connections. `Redacted` so a plugin
+     *  cannot log or serialize the value without saying so. */
     readonly get: (
       provider: ProviderKey,
       id: ProviderItemId,
-    ) => Effect.Effect<string | null, StorageFailure>;
+    ) => Effect.Effect<Redacted.Redacted<string> | null, StorageFailure>;
     readonly has: (
       provider: ProviderKey,
       id: ProviderItemId,

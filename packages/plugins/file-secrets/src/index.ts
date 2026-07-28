@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { Deferred, Effect, Exit, Schema } from "effect";
+import { Deferred, Effect, Exit, Redacted, Schema } from "effect";
 
 import {
+  credentialValueToWrite,
   definePlugin,
   ProviderItemId,
   ProviderKey,
@@ -237,7 +238,10 @@ const makeFileProvider = (location: AuthLocation): CredentialProvider => {
     get: (id: ProviderItemId) =>
       ensureMigration.pipe(
         Effect.andThen(Effect.suspend(() => readAll(location.filePath))),
-        Effect.map((data) => data[id] ?? null),
+        Effect.map((data) => {
+          const value = data[id];
+          return value === undefined ? null : Redacted.make(value);
+        }),
       ),
 
     has: (id: ProviderItemId) =>
@@ -246,12 +250,12 @@ const makeFileProvider = (location: AuthLocation): CredentialProvider => {
         Effect.map((data) => id in data),
       ),
 
-    set: (id: ProviderItemId, value: string) =>
+    set: (id: ProviderItemId, value: string | Redacted.Redacted<string>) =>
       ensureMigration.pipe(
         Effect.andThen(
           Effect.gen(function* () {
             const data = yield* readAll(location.filePath);
-            data[id] = value;
+            data[id] = credentialValueToWrite(value);
             yield* writeAll(location.filePath, data);
           }),
         ),

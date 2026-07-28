@@ -1,10 +1,16 @@
 import { describe, expect, it } from "@effect/vitest";
 
-import { createExecutor, ProviderItemId, ProviderKey, type CredentialProvider } from "./promise";
+import {
+  createExecutor,
+  credentialValueToWrite,
+  ProviderItemId,
+  ProviderKey,
+  type CredentialProvider,
+} from "./promise";
 import { definePlugin, tool } from "./plugin";
 import type { ToolDef } from "./tool";
 import { IntegrationSlug, ToolName } from "./ids";
-import { Effect, Schema } from "effect";
+import { Effect, Redacted, Schema } from "effect";
 
 // A minimal static-tool plugin built on the Effect surface, consumed
 // through the Promise façade. Exercises the proxy's ability to promisify
@@ -148,10 +154,14 @@ describe("promise/createExecutor", () => {
     const memoryProvider: CredentialProvider = {
       key: ProviderKey.make("memory"),
       writable: true,
-      get: (id: ProviderItemId) => Effect.sync(() => store.get(String(id)) ?? null),
-      set: (id: ProviderItemId, value: string) =>
+      get: (id: ProviderItemId) =>
         Effect.sync(() => {
-          store.set(String(id), value);
+          const value = store.get(String(id));
+          return value === undefined ? null : Redacted.make(value);
+        }),
+      set: (id: ProviderItemId, value: string | Redacted.Redacted<string>) =>
+        Effect.sync(() => {
+          store.set(String(id), credentialValueToWrite(value));
         }),
     };
 

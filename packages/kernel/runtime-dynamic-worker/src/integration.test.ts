@@ -20,6 +20,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Predicate from "effect/Predicate";
+import * as Redacted from "effect/Redacted";
 import { HttpClient, HttpClientResponse, type HttpClientRequest } from "effect/unstable/http";
 import { fumadb } from "@executor-js/fumadb";
 import {
@@ -32,6 +33,7 @@ import postgres from "postgres";
 import {
   collectTables,
   createExecutor,
+  credentialValueToWrite,
   AuthTemplateSlug,
   ConnectionName,
   IntegrationSlug,
@@ -71,9 +73,13 @@ const memoryProvider = (): CredentialProvider => {
   return {
     key: ProviderKey.make("memory"),
     writable: true,
-    get: (id: ProviderItemId) => Effect.sync(() => store.get(String(id)) ?? null),
-    set: (id: ProviderItemId, value: string) =>
-      Effect.sync(() => void store.set(String(id), value)),
+    get: (id: ProviderItemId) =>
+      Effect.sync(() => {
+        const value = store.get(String(id));
+        return value === undefined ? null : Redacted.make(value);
+      }),
+    set: (id: ProviderItemId, value: string | Redacted.Redacted<string>) =>
+      Effect.sync(() => void store.set(String(id), credentialValueToWrite(value))),
     has: (id: ProviderItemId) => Effect.sync(() => store.has(String(id))),
     list: () =>
       Effect.sync((): readonly ProviderEntry[] =>

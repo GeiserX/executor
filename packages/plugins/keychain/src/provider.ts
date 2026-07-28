@@ -1,6 +1,7 @@
-import { Effect } from "effect";
+import { Effect, Redacted } from "effect";
 
 import {
+  credentialValueToWrite,
   StorageError,
   ProviderKey,
   type CredentialProvider,
@@ -40,14 +41,20 @@ const KEYCHAIN_PROVIDER_KEY = ProviderKey.make("keychain");
 export const makeKeychainProvider = (serviceName: string): CredentialProvider => ({
   key: KEYCHAIN_PROVIDER_KEY,
   writable: true,
-  get: (id: ProviderItemId) => getPassword(serviceName, id).pipe(Effect.mapError(toStorageError)),
+  get: (id: ProviderItemId) =>
+    getPassword(serviceName, id).pipe(
+      Effect.map((value: string | null) => (value === null ? null : Redacted.make(value))),
+      Effect.mapError(toStorageError),
+    ),
   has: (id: ProviderItemId) =>
     getPassword(serviceName, id).pipe(
       Effect.map((value: string | null) => value !== null),
       Effect.mapError(toStorageError),
     ),
-  set: (id: ProviderItemId, value: string) =>
-    setPassword(serviceName, id, value).pipe(Effect.mapError(toStorageError)),
+  set: (id: ProviderItemId, value: string | Redacted.Redacted<string>) =>
+    setPassword(serviceName, id, credentialValueToWrite(value)).pipe(
+      Effect.mapError(toStorageError),
+    ),
   delete: (id: ProviderItemId) =>
     deletePassword(serviceName, id).pipe(Effect.asVoid, Effect.mapError(toStorageError)),
   // Keychain doesn't support enumerating — you need to know the account name.

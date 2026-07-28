@@ -11,9 +11,9 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { Effect, Predicate, Result } from "effect";
+import { Effect, Predicate, Redacted, Result } from "effect";
 
-import { ProviderKey } from "@executor-js/sdk";
+import { ProviderItemId, ProviderKey, type CredentialProvider } from "@executor-js/sdk";
 import { makeTestWorkspaceHarness } from "@executor-js/sdk/testing";
 
 import { fileSecretsPlugin } from "./index";
@@ -35,6 +35,11 @@ const inspectPlugin = (plugin: ReturnType<typeof fileSecretsPlugin>) =>
 const writeAuthFile = (filePath: string, contents: string, mode = 0o600): void => {
   mkdirSync(dirname(filePath), { recursive: true });
   writeFileSync(filePath, contents, { mode });
+};
+
+const providerOf = (plugin: ReturnType<typeof fileSecretsPlugin>): CredentialProvider => {
+  const credentialProviders = plugin.credentialProviders as () => readonly CredentialProvider[];
+  return credentialProviders()[0]!;
 };
 
 describe("file secrets auth location", () => {
@@ -176,6 +181,32 @@ describe("file secrets auth location", () => {
         );
       }),
     ),
+  );
+
+  // auth.json is written with JSON.stringify, and a `Redacted` serializes to
+  // the string "<redacted>" instead of throwing. A `set` that forgot to unwrap
+  // would therefore write a well-formed file full of useless placeholders, and
+  // a `get`-based round-trip would report it as stored correctly. Reading the
+  // file's raw bytes is what makes that failure loud.
+  it.effect("writes the real secret to auth.json for both string and Redacted input", () =>
+    Effect.gen(function* () {
+      vi.stubEnv("EXECUTOR_DATA_DIR", dataDir);
+      const provider = providerOf(fileSecretsPlugin());
+
+      yield* provider.set!(ProviderItemId.make("plain"), "sk_plain_written");
+      yield* provider.set!(ProviderItemId.make("wrapped"), Redacted.make("sk_wrapped_written"));
+
+      // Asserted as raw text, not parsed: the bytes on disk are the thing under
+      // test, and the sibling migration cases assert the same way.
+      const onDisk = readFileSync(join(dataDir, "auth.json"), "utf8");
+      expect(onDisk).toContain('"plain": "sk_plain_written"');
+      expect(onDisk).toContain('"wrapped": "sk_wrapped_written"');
+      expect(onDisk).not.toContain("<redacted>");
+
+      const read = yield* provider.get(ProviderItemId.make("wrapped"));
+      expect(read === null ? null : Redacted.value(read)).toBe("sk_wrapped_written");
+      expect(yield* provider.get(ProviderItemId.make("absent"))).toBeNull();
+    }),
   );
 
   it.effect("shares one migration across concurrent first provider operations", () =>

@@ -18,12 +18,13 @@
 // default.
 // ---------------------------------------------------------------------------
 
-import { Cause, Effect, Result } from "effect";
+import { Cause, Effect, Redacted, Result } from "effect";
 
 import {
   AuthTemplateSlug,
   ConnectionName,
   createExecutor,
+  credentialValueToWrite,
   IntegrationSlug,
   ProviderItemId,
   ProviderKey,
@@ -61,15 +62,20 @@ import { workosVaultPlugin } from "@executor-js/plugin-workos-vault";
 // A connection's value lives in a writable credential provider. This tiny
 // in-memory store is enough for a script; the keychain / file-secrets /
 // 1Password plugins below contribute durable ones. Providers are Effect-native,
-// so `get`/`set` return `Effect`s.
+// so `get`/`set` return `Effect`s, and `get` hands back a `Redacted` so a
+// credential cannot land in a log by accident.
 const memory = new Map<string, string>();
 const memoryProvider: CredentialProvider = {
   key: ProviderKey.make("memory"),
   writable: true,
-  get: (id: ProviderItemId) => Effect.sync(() => memory.get(String(id)) ?? null),
-  set: (id: ProviderItemId, value: string) =>
+  get: (id: ProviderItemId) =>
     Effect.sync(() => {
-      memory.set(String(id), value);
+      const value = memory.get(String(id));
+      return value === undefined ? null : Redacted.make(value);
+    }),
+  set: (id: ProviderItemId, value: string | Redacted.Redacted<string>) =>
+    Effect.sync(() => {
+      memory.set(String(id), credentialValueToWrite(value));
     }),
 };
 

@@ -39,6 +39,7 @@ export type {
 // but Promise consumers still author them to register an inline writable store
 // via `createExecutor({ providers })`.
 export type { CredentialProvider, ProviderEntry } from "./provider";
+export { credentialValueToWrite } from "./provider";
 export type {
   CreateToolPolicyInput,
   RemoveToolPolicyInput,

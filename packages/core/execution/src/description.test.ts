@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Redacted } from "effect";
 
 import {
   AuthTemplateSlug,
@@ -8,6 +8,7 @@ import {
   ProviderItemId,
   ProviderKey,
   createExecutor,
+  credentialValueToWrite,
   definePlugin,
   type CredentialProvider,
 } from "@executor-js/sdk";
@@ -20,8 +21,13 @@ const memoryProvider = (): CredentialProvider => {
   return {
     key: ProviderKey.make("memory"),
     writable: true,
-    get: (id) => Effect.sync(() => store.get(String(id)) ?? null),
-    set: (id, value) => Effect.sync(() => void store.set(String(id), value)),
+    get: (id) =>
+      Effect.sync(() => {
+        const value = store.get(String(id));
+        return value === undefined ? null : Redacted.make(value);
+      }),
+    set: (id, value) =>
+      Effect.sync(() => void store.set(String(id), credentialValueToWrite(value))),
     has: (id) => Effect.sync(() => store.has(String(id))),
     list: () =>
       Effect.sync(() =>
