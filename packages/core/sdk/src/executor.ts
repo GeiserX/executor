@@ -1662,10 +1662,17 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
       }).pipe(
         // The refresh path was previously invisible to telemetry: no span, no
         // log, no metric. When a customer reported "my OAuth just died", there
-        // was no way to answer "did a refresh even fire, and what did the AS
-        // say?" without a repro. Stamp the outcome and the AS's own error code
-        // (an enumerable RFC 6749 §5.2 identifier, never user content or token
-        // material) so refresh health is greppable in traces.
+        // was no way to answer "did a refresh even fire, and did it work?"
+        // without a repro. Stamp the outcome and the failure KIND — enumerable
+        // identifiers only, never user content or token material.
+        //
+        // The AS's own RFC 6749 §5.2 code is not stamped here: it survives only
+        // inside the error's message, and that message embeds the token
+        // endpoint's response URL and a body preview, so it can't go on a span
+        // attribute. Making that code a queryable dimension needs it lifted to
+        // a typed field on CredentialResolutionError first — worth doing, since
+        // invalid_client (a rotated secret, fleet-wide) currently looks exactly
+        // like a transient server_error from a trace.
         Effect.tap(() => Effect.annotateCurrentSpan({ "executor.oauth.refresh.outcome": "ok" })),
         Effect.tapError((error: StorageFailure | CredentialResolutionError) =>
           Effect.annotateCurrentSpan({
