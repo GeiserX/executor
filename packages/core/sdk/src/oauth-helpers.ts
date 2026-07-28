@@ -19,6 +19,8 @@
 import { Data, Effect, Option, Predicate, Schema } from "effect";
 import * as oauth from "oauth4webapi";
 
+import { endpointForTelemetry } from "./telemetry-endpoint";
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -286,21 +288,40 @@ const responseFromOAuthErrorCause = (cause: unknown): Response | undefined => {
   return undefined;
 };
 
+// Every credential a token endpoint can echo back, in both wire encodings it
+// can echo them in: JSON and form-urlencoded. `code`, `code_verifier`,
+// `device_code`, and the `*assertion` family are grant material — a leaked one
+// is redeemable, exactly like a token. `client_assertion_type` and
+// `code_challenge` are deliberately absent: the first is a public URN, the
+// second is a hash of a verifier that is itself redacted.
+const CREDENTIAL_BODY_KEYS =
+  "access_token|refresh_token|id_token|client_secret|code_verifier|assertion|client_assertion|device_code";
+
 const redactTokenEndpointBody = (body: string): string =>
   body
     .replaceAll(
-      /("(?:access_token|refresh_token|id_token|client_secret)"\s*:\s*")[^"]*(")/gi,
+      new RegExp(`("(?:${CREDENTIAL_BODY_KEYS})"\\s*:\\s*")[^"]*(")`, "gi"),
       "$1[redacted]$2",
     )
+    // A JSON `code` is an authorization code EXCEPT inside an RFC 6749 §5.2
+    // error object, where providers spell their error label
+    // `{"error":{"code":"invalid_client_id"}}`. That label is the diagnostic
+    // point of the summary, so it is the one exemption — matching the `"error":{`
+    // prefix keeps the match whole and unreplaced; a `code` anywhere else is
+    // redacted.
     .replaceAll(
-      /((?:access_token|refresh_token|id_token|client_secret|code)=)[^&\s]*/gi,
-      "$1[redacted]",
-    );
+      /("error"\s*:\s*\{\s*)?("code"\s*:\s*")[^"]*(")/gi,
+      (match, errorPrefix, key, close) =>
+        errorPrefix === undefined ? `${key}[redacted]${close}` : match,
+    )
+    .replaceAll(new RegExp(`((?:${CREDENTIAL_BODY_KEYS}|code)=)[^&\\s]*`, "gi"), "$1[redacted]");
 
 const tokenEndpointHttpSummary = async (response: Response): Promise<string> => {
   const status = `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`;
   const contentType = response.headers.get("content-type");
-  const url = response.url ? ` from ${response.url}` : "";
+  // The token endpoint is configured per OAuth client and can carry credentials
+  // in its query string; this summary lands in a user-visible error message.
+  const url = response.url ? ` from ${endpointForTelemetry(response.url)}` : "";
   const parts = [`${status}${url}`];
   if (contentType) parts.push(`content-type ${contentType}`);
   const preview = await bodyPreviewFromResponse(response);

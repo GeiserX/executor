@@ -73,6 +73,7 @@ import {
 } from "./oauth-helpers";
 import { OAUTH2_SESSION_TTL_MS, encodeOAuthCallbackState } from "./oauth";
 import { canonicalIssuerUrl, hostOfUrl, isDcrClassifiedRow, parseUrl } from "./oauth-gc";
+import { endpointForTelemetry } from "./telemetry-endpoint";
 
 /** Connection-minting input for the OAuth flow — extends a connection create
  *  with the OAuth lifecycle fields (client slug, refresh material, expiry,
@@ -1464,8 +1465,11 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
         ),
       );
       if (!as) {
+        // `input.url` is a raw user paste and a first-class credential carrier
+        // (an MCP endpoint with `?token=…`, or `user:pass@host`). This message
+        // reaches the UI and the logs, so echo only the sanitized endpoint.
         return yield* new OAuthProbeError({
-          message: `No OAuth authorization-server metadata found at ${input.url}`,
+          message: `No OAuth authorization-server metadata found at ${endpointForTelemetry(input.url)}`,
         });
       }
       return {

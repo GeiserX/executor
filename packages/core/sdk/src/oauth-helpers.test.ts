@@ -719,6 +719,120 @@ describe("exchangeAuthorizationCode", () => {
         }),
     ),
   );
+
+  it.effect("redacts every grant credential a JSON error body can echo back", () =>
+    // The token endpoint echoes the request it rejected. `code`,
+    // `code_verifier`, `device_code`, and the assertion family are all
+    // redeemable grant material, so a summary that quotes any of them hands a
+    // log reader a working credential. The nested `error` object is what makes
+    // this body non-conforming, which is the shape that reaches the summary.
+    withTokenEndpoint(
+      () =>
+        json(400, {
+          error: { code: "invalid_client_id", message: "Invalid client_id" },
+          code: "echoed-authorization-code",
+          code_verifier: "echoed-pkce-verifier",
+          device_code: "echoed-device-code",
+          assertion: "echoed-assertion",
+          client_assertion: "echoed-client-assertion",
+        }),
+      ({ tokenUrl }) =>
+        Effect.gen(function* () {
+          const exit = yield* Effect.exit(
+            exchangeAuthorizationCode({
+              tokenUrl,
+              clientId: "cid",
+              redirectUrl: "https://cb",
+              codeVerifier: "v",
+              code: "c",
+            }),
+          );
+          expect(Exit.isFailure(exit)).toBe(true);
+          if (!Exit.isFailure(exit)) return;
+          const failure = JSON.stringify(exit.cause);
+          // The provider's error label still survives — redaction must not cost
+          // the diagnostic that makes the summary worth emitting.
+          expect(failure).toContain("invalid_client_id");
+          for (const secret of [
+            "echoed-authorization-code",
+            "echoed-pkce-verifier",
+            "echoed-device-code",
+            "echoed-assertion",
+            "echoed-client-assertion",
+          ]) {
+            expect(failure).not.toContain(secret);
+          }
+        }),
+    ),
+  );
+
+  it.effect("redacts every grant credential a form-encoded error body can echo back", () =>
+    withTokenEndpoint(
+      () =>
+        HttpServerResponse.text(
+          "error=invalid_grant&code=echoed-authorization-code&code_verifier=echoed-pkce-verifier" +
+            "&device_code=echoed-device-code&assertion=echoed-assertion" +
+            "&client_assertion=echoed-client-assertion",
+          { status: 400 },
+        ),
+      ({ tokenUrl }) =>
+        Effect.gen(function* () {
+          const exit = yield* Effect.exit(
+            exchangeAuthorizationCode({
+              tokenUrl,
+              clientId: "cid",
+              redirectUrl: "https://cb",
+              codeVerifier: "v",
+              code: "c",
+            }),
+          );
+          expect(Exit.isFailure(exit)).toBe(true);
+          if (!Exit.isFailure(exit)) return;
+          const failure = JSON.stringify(exit.cause);
+          expect(failure).toContain("invalid_grant");
+          for (const secret of [
+            "echoed-authorization-code",
+            "echoed-pkce-verifier",
+            "echoed-device-code",
+            "echoed-assertion",
+            "echoed-client-assertion",
+          ]) {
+            expect(failure).not.toContain(secret);
+          }
+        }),
+    ),
+  );
+
+  it.effect("strips query-string credentials from the summarized token URL", () =>
+    // The token endpoint is configured per OAuth client, so its URL can itself
+    // carry a credential — and `fetch` preserves the query string on
+    // `response.url`, so an unsanitized summary republishes it into a
+    // user-visible message. The summary keeps scheme/host/path (the debuggable
+    // part) and drops the query.
+    withTokenEndpoint(
+      () => HttpServerResponse.text("route not found", { status: 404 }),
+      ({ tokenUrl }) =>
+        Effect.gen(function* () {
+          const url = new URL(tokenUrl);
+          url.searchParams.set("api_key", "endpoint-query-credential");
+          const exit = yield* Effect.exit(
+            exchangeAuthorizationCode({
+              tokenUrl: url.toString(),
+              clientId: "cid",
+              redirectUrl: "https://cb",
+              codeVerifier: "v",
+              code: "c",
+            }),
+          );
+          expect(Exit.isFailure(exit)).toBe(true);
+          if (!Exit.isFailure(exit)) return;
+          const failure = JSON.stringify(exit.cause);
+          expect(failure).toContain("HTTP 404");
+          expect(failure).toContain("/token");
+          expect(failure).not.toContain("endpoint-query-credential");
+        }),
+    ),
+  );
 });
 
 describe("exchangeClientCredentials", () => {

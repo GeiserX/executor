@@ -1,5 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
 import { Effect, Predicate } from "effect";
+import { HttpServerResponse } from "effect/unstable/http";
 
 import {
   AuthTemplateSlug,
@@ -12,10 +13,11 @@ import {
 } from "./ids";
 import { StorageError } from "./fuma-runtime";
 import { decodeOAuthCallbackState } from "./oauth";
-import { OAuthStartError } from "./oauth-client";
+import { OAuthProbeError, OAuthStartError } from "./oauth-client";
 import { missingGrantedOAuthScopes } from "./oauth-service";
 import { definePlugin } from "./plugin";
 import { makeTestWorkspaceHarness, memoryCredentialsPlugin } from "./test-config";
+import { serveTestHttpApp } from "./testing";
 import { serveOAuthTestServer } from "./testing/oauth-test-server";
 
 // Milestone 2: prove the v2 `oauth.start` / `oauth.complete` token-minting flow
@@ -1319,6 +1321,39 @@ describe("oauth client secret presence", () => {
           config.db.findFirst("oauth_client", { where: (b) => b("slug", "=", String(CLIENT)) }),
         );
         expect(row ?? null).toBeNull();
+      }),
+    ),
+  );
+});
+
+describe("oauth.probe error message sanitization", () => {
+  it.effect("echoes the probed URL without its query string or userinfo", () =>
+    // The probe URL is a raw user paste and a supported credential carrier (an
+    // MCP endpoint with `?token=…`, `user:pass@host`). Its failure message
+    // reaches the connect UI and the logs, so it may name the endpoint but
+    // never the credential riding on it.
+    Effect.scoped(
+      Effect.gen(function* () {
+        // A loopback server with no OAuth metadata anywhere: the probe finds
+        // nothing and takes the "no metadata found" branch that echoes the URL.
+        const server = yield* serveTestHttpApp(() =>
+          Effect.succeed(HttpServerResponse.empty({ status: 404 })),
+        );
+        const { executor } = yield* makeTestWorkspaceHarness({ plugins });
+
+        const probed = new URL(server.url("/mcp"));
+        probed.searchParams.set("token", "probe-query-credential");
+        probed.username = "probe-user";
+        probed.password = "probe-password";
+
+        const error = yield* Effect.flip(executor.oauth.probe({ url: probed.toString() }));
+        expect(Predicate.isTagged("OAuthProbeError")(error)).toBe(true);
+        const probeError = error as OAuthProbeError;
+        // The endpoint itself still names the failure — sanitizing must not
+        // cost the diagnostic.
+        expect(probeError.message).toContain("/mcp");
+        expect(probeError.message).not.toContain("probe-query-credential");
+        expect(probeError.message).not.toContain("probe-password");
       }),
     ),
   );
