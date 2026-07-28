@@ -3,9 +3,12 @@
 // backed by a Better-Auth-authorized platform view, mounted at
 // `/api/admin/users*` beside the existing invite-code admin routes.
 //
-// AUTH: an owner/admin member of the single org, resolved through the org
-// primitive's `getActiveMember` — the SAME gate the invite-code admin API uses
-// (`admin/handlers.ts`), not a new permission concept. Self-host has no
+// AUTH: an owner/admin member of the single org, resolved by the shared
+// `requireInstanceAdmin` — the SAME gate the invite-code admin API uses
+// (`admin/handlers.ts`), not a new permission concept. Membership is resolved
+// against the INSTANCE's organization id, never the caller's
+// `session.activeOrganizationId`: see require-admin.ts for the privilege
+// escalation that distinction refuses. Self-host has no
 // organization-OWNED api key (Better Auth keys always belong to the user who
 // created one), so there is no machine-credential path here; the operator's own
 // admin session is the credential. That asymmetry with cloud is deliberate and
@@ -46,24 +49,23 @@ import {
 import type { Executor } from "@executor-js/sdk";
 
 import { BetterAuth, type BetterAuthHandle } from "../auth/better-auth";
+import { requireInstanceAdmin } from "./require-admin";
 import { SelfHostDb, SelfHostDbProvider, type SelfHostDbHandle } from "../db/self-host-db";
 import { SelfHostHostConfig, SelfHostPluginsProvider } from "../execution";
 
 /**
- * The same owner/admin gate the invite-code admin API applies. A plain member
- * session is refused: this plane reports every user in the instance.
+ * The SAME gate the invite-code admin API applies — literally the same
+ * function, not a second copy of the same idea, which is how the two planes
+ * came to share a bypass. A plain member session is refused, and so is an owner
+ * of some OTHER organization: this plane reports every user in the instance, so
+ * the org it authorizes against is the instance's own (see require-admin.ts).
  */
 const requireAdmin = (headers: AdminUsersHeaders) =>
-  Effect.gen(function* () {
-    const { auth } = yield* BetterAuth;
-    const member = yield* Effect.tryPromise({
-      try: () => auth.api.getActiveMember({ headers: new Headers(headers) }),
-      catch: () => new AdminUsersError({ message: "Failed to resolve session" }),
-    }).pipe(Effect.orElseSucceed(() => null));
-    if (!member) return yield* new AdminUsersUnauthorized();
-    if (member.role !== "owner" && member.role !== "admin") return yield* new AdminUsersForbidden();
-    return member;
-  });
+  requireInstanceAdmin(new Headers(headers)).pipe(
+    Effect.mapError((denial) =>
+      denial === "unauthorized" ? new AdminUsersUnauthorized() : new AdminUsersForbidden(),
+    ),
+  );
 
 /**
  * Self-host's member directory: `externalId` → email/name.
