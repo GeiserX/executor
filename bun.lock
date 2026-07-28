@@ -217,6 +217,7 @@
       "version": "0.0.34",
       "dependencies": {
         "@better-auth/api-key": "^1.6.11",
+        "@cloudflare/worker-bundler": "0.2.1",
         "@effect/atom-react": "catalog:",
         "@effect/platform-bun": "catalog:",
         "@executor-js/api": "workspace:*",
@@ -240,11 +241,12 @@
         "better-auth": "^1.6.11",
         "drizzle-orm": "catalog:",
         "effect": "catalog:",
+        "esbuild": "^0.27.3",
         "react": "catalog:",
         "react-dom": "catalog:",
+        "workerd": "1.20260708.1",
       },
       "devDependencies": {
-        "@cloudflare/worker-bundler": "0.2.1",
         "@effect/vitest": "catalog:",
         "@executor-js/vite-plugin": "workspace:*",
         "@tailwindcss/vite": "catalog:",
@@ -255,11 +257,9 @@
         "@types/react-dom": "catalog:",
         "@vitejs/plugin-react": "catalog:",
         "bun-types": "catalog:",
-        "esbuild": "^0.27.3",
         "typescript": "catalog:",
         "vite": "catalog:",
         "vitest": "catalog:",
-        "workerd": "1.20260708.1",
       },
     },
     "apps/local": {
