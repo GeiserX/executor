@@ -13,6 +13,7 @@ const stubApiKeys = Layer.succeed(ApiKeyService)({
     Effect.succeed(
       value === "valid_user_key"
         ? {
+            scope: "user" as const,
             accountId: "user_123",
             organizationId: "org_123",
             keyId: "api_key_123",

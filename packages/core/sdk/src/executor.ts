@@ -369,6 +369,15 @@ export type Executor<TPlugins extends readonly AnyPlugin[] = readonly []> = {
     readonly resolve: (address: ToolAddress) => Effect.Effect<EffectivePolicy, StorageFailure>;
   };
 
+  /**
+   * The PLATFORM VIEW: read-only, tenant-wide reads across every subject.
+   * Present only when the executor was built with `platformView: true`
+   * (default off) — every other surface on this executor stays bound to the
+   * single `{ tenant, subject }` product view and is unaffected by this one.
+   * Internal admin surface; the public HTTP shape is a separate concern.
+   */
+  readonly admin?: ExecutorAdmin;
+
   readonly execute: (
     address: ToolAddress,
     args: unknown,
@@ -377,6 +386,80 @@ export type Executor<TPlugins extends readonly AnyPlugin[] = readonly []> = {
 
   readonly close: () => Effect.Effect<void, StorageFailure>;
 } & PluginExtensions<TPlugins>;
+
+// ---------------------------------------------------------------------------
+// The platform view — internal admin reads.
+//
+// Everything else on the executor is the PRODUCT view: bound to one
+// { tenant, subject }. This is the read-only escape hatch beside it, reading
+// the same store through a `reach: "tenant"` context so it can answer
+// "who exists under this tenant, and what have they connected".
+//
+// Vocabulary note: internal code says subject/tenant/reach. Anything
+// public-facing says users/owners — the translation happens at the HTTP edge,
+// not here.
+//
+// FIELD DISCIPLINE: these shapes are a hand-picked allowlist, not a projection
+// of the row. Nothing secret-bearing may appear — no `item_ids`, no
+// `refresh_item_id`, no oauth client secrets, no credential material of any
+// kind. Adding a field here is a deliberate act.
+// ---------------------------------------------------------------------------
+
+/** One principal seen under the tenant (a row of the `subject` table). */
+export interface AdminSubject {
+  /** The host-auth principal id. Opaque — it also carries host sentinels
+   *  like "local", so nothing may parse it. */
+  readonly externalId: string;
+  readonly createdAt: Date;
+  /** Epoch ms of the last sighting on the request path; null when never seen
+   *  (a subject can be created at connection-create before any sighting). */
+  readonly lastSeenAt: number | null;
+  readonly status: string | null;
+}
+
+/** A connection as the platform view sees it: enough to answer "what has this
+ *  user connected and is it healthy", and nothing that could resolve a
+ *  credential. */
+export interface AdminConnection {
+  readonly owner: Owner;
+  /** The owning principal — `null` for org-owned connections, which belong to
+   *  the tenant rather than to any one user. */
+  readonly subject: string | null;
+  readonly integration: IntegrationSlug;
+  readonly name: ConnectionName;
+  /** The scope set the provider actually granted, space-delimited as recorded
+   *  at connect/refresh. Null for static credentials. A summary of ACCESS —
+   *  never a token. */
+  readonly oauthScope: string | null;
+  readonly lastHealth: HealthCheckResult | null;
+}
+
+/** A subject together with every connection it owns in the tenant. */
+export interface AdminSubjectWithConnections extends AdminSubject {
+  readonly connections: readonly AdminConnection[];
+}
+
+export interface AdminListSubjectsOptions {
+  readonly limit?: number;
+  readonly offset?: number;
+}
+
+export interface ExecutorAdmin {
+  /** Every subject under the tenant, oldest first (stable: ties break on
+   *  `external_id`). */
+  readonly listSubjects: (
+    options?: AdminListSubjectsOptions,
+  ) => Effect.Effect<readonly AdminSubject[], StorageFailure>;
+  /** Every connection in the tenant owned by `externalId`. Org-owned
+   *  connections are NOT attributed to a user and are excluded. */
+  readonly listSubjectConnections: (
+    externalId: string,
+  ) => Effect.Effect<readonly AdminConnection[], StorageFailure>;
+  /** `listSubjects` joined with each subject's connections. */
+  readonly listSubjectsWithConnections: (
+    options?: AdminListSubjectsOptions,
+  ) => Effect.Effect<readonly AdminSubjectWithConnections[], StorageFailure>;
+}
 
 export interface ExecutorDb {
   readonly db: FumaDb<any>;
@@ -448,6 +531,16 @@ export interface ExecutorConfig<TPlugins extends readonly AnyPlugin[] = readonly
    * config-revision re-sync still apply).
    */
   readonly toolsSyncTtlMs?: number | null;
+  /**
+   * Opt into the PLATFORM VIEW: a read-only, tenant-wide `executor.admin`
+   * surface that reads across every subject in the tenant (see
+   * {@link ExecutorAdmin}). Default OFF — `admin` is simply absent, so the
+   * escape hatch has to be asked for by a host that has authorized an
+   * org-level caller. Enabling it never changes the product view: every other
+   * surface stays bound to `{ tenant, subject }`, and the platform handle
+   * cannot write (the owner policy rejects writes at `reach: "tenant"`).
+   */
+  readonly platformView?: boolean;
 }
 
 /** Default freshness window for remote-catalog connections (see
@@ -4172,6 +4265,100 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
     }
 
     // ------------------------------------------------------------------
+    // Platform view — read-only, tenant-wide admin reads (opt-in).
+    //
+    // A SECOND handle over the same root db, bound to the same tenant but at
+    // `reach: "tenant"`. Deriving it here rather than re-scoping `rootDb`
+    // keeps the product view untouched: the bound handle above never learns
+    // about reach, so it cannot drift into the platform view. Writes through
+    // this handle are rejected by the owner policy, so "read-only" is enforced
+    // at the storage boundary, not by this module's discipline.
+    // ------------------------------------------------------------------
+
+    const makeAdmin = (): ExecutorAdmin => {
+      const platformCore = makeCoreDb(
+        makeFumaClient(
+          withQueryContext(rootDbUntyped, {
+            ...ownerContext,
+            reach: "tenant",
+          } satisfies ExecutorOwnerPolicyContext),
+        ),
+      );
+
+      const rowToAdminSubject = (row: CoreRow<"subject">): AdminSubject => ({
+        externalId: row.external_id,
+        createdAt: row.created_at instanceof Date ? row.created_at : new Date(row.created_at),
+        // bigint on drivers that return one, and a blob on SQLite — hence the
+        // ORM read rather than raw SQL (see `subject-registry.ts`).
+        lastSeenAt: row.last_seen_at == null ? null : Number(row.last_seen_at),
+        status: row.status ?? null,
+      });
+
+      const rowToAdminConnection = (row: ConnectionRow): AdminConnection => {
+        const owner = row.owner as Owner;
+        return {
+          owner,
+          // Org rows carry the empty-string sentinel, not a principal.
+          subject: owner === "org" ? null : row.subject,
+          integration: IntegrationSlug.make(row.integration),
+          name: ConnectionName.make(row.name),
+          oauthScope: row.oauth_scope == null ? null : String(row.oauth_scope),
+          lastHealth: Option.getOrNull(decodeLastHealth(row.last_health)),
+        };
+      };
+
+      const listSubjects = (
+        options?: AdminListSubjectsOptions,
+      ): Effect.Effect<readonly AdminSubject[], StorageFailure> =>
+        platformCore
+          .findMany("subject", {
+            // Oldest first, ties broken on the unique key so the order is
+            // total and paging can't repeat or skip a row.
+            orderBy: [
+              ["created_at", "asc"],
+              ["external_id", "asc"],
+            ],
+            ...(options?.limit === undefined ? {} : { limit: options.limit }),
+            ...(options?.offset === undefined ? {} : { offset: options.offset }),
+          })
+          .pipe(Effect.map((rows) => rows.map(rowToAdminSubject)));
+
+      const listSubjectConnections = (
+        externalId: string,
+      ): Effect.Effect<readonly AdminConnection[], StorageFailure> =>
+        platformCore
+          .findMany("connection", {
+            // `owner: "user"` explicitly: an org connection's `subject` is the
+            // empty-string sentinel, and attributing those to a user would be
+            // a lie in every host that has one.
+            where: (b: AnyCb) => b.and(b("owner", "=", "user"), b("subject", "=", externalId)),
+            orderBy: [
+              ["integration", "asc"],
+              ["name", "asc"],
+            ],
+          })
+          .pipe(Effect.map((rows) => rows.map(rowToAdminConnection)));
+
+      const listSubjectsWithConnections = (
+        options?: AdminListSubjectsOptions,
+      ): Effect.Effect<readonly AdminSubjectWithConnections[], StorageFailure> =>
+        Effect.gen(function* () {
+          const subjects = yield* listSubjects(options);
+          return yield* Effect.forEach(subjects, (entry) =>
+            listSubjectConnections(entry.externalId).pipe(
+              Effect.map((connections) => ({ ...entry, connections })),
+            ),
+          );
+        });
+
+      return { listSubjects, listSubjectConnections, listSubjectsWithConnections };
+    };
+
+    // Default OFF: without the opt-in there is no `admin` key at all, so the
+    // tenant-wide handle is never even constructed.
+    const admin = config.platformView === true ? makeAdmin() : undefined;
+
+    // ------------------------------------------------------------------
     // close
     // ------------------------------------------------------------------
 
@@ -4242,6 +4429,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         remove: policiesRemove,
         resolve: policiesResolve,
       },
+      ...(admin ? { admin } : {}),
       execute,
       close,
     };

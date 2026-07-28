@@ -5,6 +5,7 @@ import { StorageError, type FumaRow } from "./fuma-runtime";
 import {
   assertOwnerPatch,
   assertOwnerWritable,
+  assertReachReadOnly,
   executorOwnerPolicyName,
   executorTenantPolicyName,
   executorUnscopedPolicyName,
@@ -67,6 +68,10 @@ const tenantExecutorTable = <const TColumns extends UserColumns>(
     name: executorTenantPolicyName,
     onRead: ({ builder, context }) => builder("tenant", "=", context.tenant),
     onCreate: ({ values, context }) => {
+      // Tenant-scoped reads are already tenant-wide, so reach doesn't widen
+      // them — but the platform view must stay read-only on EVERY table it can
+      // reach, and `subject` is one of these.
+      assertReachReadOnly(name, "write", context);
       if (values.tenant !== context.tenant) {
         // oxlint-disable-next-line executor/no-try-catch-or-throw -- boundary: FumaDB table policy callbacks are promise callbacks, not Effect effects
         throw new StorageError({
@@ -75,8 +80,14 @@ const tenantExecutorTable = <const TColumns extends UserColumns>(
         });
       }
     },
-    onUpdate: ({ builder, context }) => builder("tenant", "=", context.tenant),
-    onDelete: ({ builder, context }) => builder("tenant", "=", context.tenant),
+    onUpdate: ({ builder, context }) => {
+      assertReachReadOnly(name, "write", context);
+      return builder("tenant", "=", context.tenant);
+    },
+    onDelete: ({ builder, context }) => {
+      assertReachReadOnly(name, "delete", context);
+      return builder("tenant", "=", context.tenant);
+    },
   });
 };
 
@@ -104,7 +115,13 @@ const ownedExecutorTable = <const TColumns extends UserColumns>(
       assertOwnerPatch(name, create, context);
       return ownerVisibility(builder, context);
     },
-    onDelete: ({ builder, context }) => ownerVisibility(builder, context),
+    // A delete carries no values to assert against, so the reach guard is the
+    // ONLY thing standing between a widened (platform-view) context and a
+    // tenant-wide delete — `ownerVisibility` would happily match every row.
+    onDelete: ({ builder, context }) => {
+      assertReachReadOnly(name, "delete", context);
+      return ownerVisibility(builder, context);
+    },
   });
 };
 

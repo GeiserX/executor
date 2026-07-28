@@ -25,11 +25,25 @@ export const ORG_SUBJECT = "";
 
 const unscopedExecutorTables = new Set(["blob"]);
 
+/** How far a context's READS reach. Writes ignore this entirely — see
+ *  `assertOwnerWritable`. */
+export type ExecutorReach =
+  /** The product view: this subject's rows plus the tenant's org rows. */
+  | "bound"
+  /** The platform view: every row in the tenant, whatever subject owns it.
+   *  READ-ONLY by construction — it widens `ownerVisibilityCondition` and
+   *  nothing else. */
+  | "tenant";
+
 export interface ExecutorOwnerPolicyContext {
   readonly tenant: string;
   /** The acting member, or null for a pure-org executor (no `owner:"user"`
    *  reads/writes are allowed when null). */
   readonly subject: string | null;
+  /** Read reach; defaults to `"bound"`. A `"tenant"`-reach context is the
+   *  platform view: it sees the whole tenant but writes exactly as a bound
+   *  context does, so it can never mutate another subject's rows. */
+  readonly reach?: ExecutorReach;
 }
 
 type AnyConditionBuilder = ConditionBuilder<Record<string, AnyColumn>>;
@@ -51,11 +65,20 @@ const requireContext = (
 };
 
 /** The rows the bound `{ tenant, subject }` may see/mutate: org rows in the
- *  tenant, plus this subject's own user rows. */
+ *  tenant, plus this subject's own user rows.
+ *
+ *  Under `reach: "tenant"` (the platform view) this widens to the whole tenant:
+ *  every subject's rows, not just the bound one. That is a READ widening only —
+ *  the policy uses this condition for `onRead`/`onUpdate`/`onDelete` filtering,
+ *  but the write assertions below reject a tenant-reach context outright, so a
+ *  widened context can never be the one doing the mutating. */
 export const ownerVisibilityCondition = (
   builder: AnyConditionBuilder,
   context: ExecutorOwnerPolicyContext,
 ): Condition | boolean => {
+  // The platform view: partition by tenant alone. Still never cross-tenant —
+  // `tenant` is the one clause that is NEVER relaxed, at any reach.
+  if (context.reach === "tenant") return builder("tenant", "=", context.tenant);
   const orgClause = builder.and(
     builder("tenant", "=", context.tenant),
     builder("owner", "=", "org"),
@@ -69,6 +92,26 @@ export const ownerVisibilityCondition = (
   return builder.or(orgClause, userClause);
 };
 
+/**
+ * THE security property of the platform view: reach widens reads and NOTHING
+ * else. `ownerVisibilityCondition` is also what filters `onUpdate`/`onDelete`,
+ * so a widened context reaching any mutation would silently mutate every
+ * subject in the tenant. Every write path calls this first and fails loudly
+ * instead — a tenant-reach context is rejected outright rather than quietly
+ * demoted to bound behavior, because a write arriving on the read-only platform
+ * handle is a programmer error and should not be papered over.
+ */
+export const assertReachReadOnly = (
+  tableName: string,
+  access: string,
+  context: ExecutorOwnerPolicyContext | undefined,
+): void => {
+  if (context?.reach !== "tenant") return;
+  policyViolation(
+    `Storage ${access} on table "${tableName}" is not allowed: the platform view is read-only.`,
+  );
+};
+
 /** Assert a create/upsert writes a row inside the bound partition. */
 export const assertOwnerWritable = (
   tableName: string,
@@ -76,6 +119,7 @@ export const assertOwnerWritable = (
   context: ExecutorOwnerPolicyContext | undefined,
 ): void => {
   const ctx = requireContext(tableName, "write", context);
+  assertReachReadOnly(tableName, "write", ctx);
   if (values.tenant !== ctx.tenant) {
     policyViolation(`Storage write on table "${tableName}" is outside the executor tenant.`);
   }
@@ -106,6 +150,7 @@ export const assertOwnerPatch = (
   context: ExecutorOwnerPolicyContext | undefined,
 ): void => {
   const ctx = requireContext(tableName, "write", context);
+  assertReachReadOnly(tableName, "write", ctx);
   if (!patch) return;
   if (patch.tenant !== undefined && patch.tenant !== ctx.tenant) {
     policyViolation(`Storage write on table "${tableName}" cannot move a row across tenants.`);

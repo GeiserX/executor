@@ -161,6 +161,7 @@ export {
   executorOwnerPolicyName,
   executorUnscopedPolicyName,
   type ExecutorOwnerPolicyContext,
+  type ExecutorReach,
 } from "./owner-policy";
 
 // Provider item-id owner grammar — the partition credential providers file
@@ -343,7 +344,12 @@ export {
 // local/cloud DB bring-up). Its definition stays here because `createExecutor`
 // uses it; the host surface (`@executor-js/api/server`) re-exports it.
 export {
+  type AdminConnection,
+  type AdminListSubjectsOptions,
+  type AdminSubject,
+  type AdminSubjectWithConnections,
   type Executor,
+  type ExecutorAdmin,
   type ExecutorConfig,
   type ExecutorDb,
   type ExecutorDbFactory,

@@ -3,10 +3,24 @@ import { Context, Data, Effect, Layer, Option, Schema } from "effect";
 import { ApiKeyManagementError } from "./errors";
 import { WorkOSClient } from "./workos";
 
+/**
+ * Which view a validated key resolves to.
+ *   - `"user"` — the product view. The key belongs to a member; the request
+ *     binds to that member as the acting subject. Every key today is this.
+ *   - `"org"` — the PLATFORM view. The key belongs to the organization itself,
+ *     so there is no acting member: the request gets tenant-wide READ-ONLY
+ *     reach and no bound subject. Privileged; minted separately (PR 1.5).
+ */
+export type ApiKeyScope = "user" | "org";
+
 /** The owner an api key resolves to — NOT a full {@link Principal} (no email /
  * name / roles), so it carries an honest, distinct name. */
 export type ApiKeyOwner = {
-  readonly accountId: string;
+  readonly scope: ApiKeyScope;
+  /** The acting member for a `"user"` key; `null` for an `"org"` key, which
+   *  has no member behind it. Nullable rather than a sentinel so nothing can
+   *  accidentally bind an org key to a subject. */
+  readonly accountId: string | null;
   readonly organizationId: string;
   readonly keyId: string;
 };
@@ -28,12 +42,24 @@ export class ApiKeyValidationError extends Data.TaggedError("ApiKeyValidationErr
   readonly cause: unknown;
 }> {}
 
+// WorkOS keys are owned by either a user or an organization. The user shape
+// carries the member id in `id` and the org in `organization_id`; the org shape
+// carries the ORG in `id` and no member at all. Both decode here — the
+// distinction is a branch (`ownerFromApiKey`), not a decode failure, so an
+// org-owned key is no longer indistinguishable from an invalid one.
 const UserApiKeyOwner = Schema.Struct({
   type: Schema.Literal("user"),
   id: Schema.String,
   organizationId: Schema.optional(Schema.String),
   organization_id: Schema.optional(Schema.String),
 });
+
+const OrgApiKeyOwner = Schema.Struct({
+  type: Schema.Literal("organization"),
+  id: Schema.String,
+});
+
+const WorkOSApiKeyOwner = Schema.Union([UserApiKeyOwner, OrgApiKeyOwner]);
 
 const ApiKey = Schema.Struct({
   id: Schema.String,
@@ -49,8 +75,16 @@ const ApiKey = Schema.Struct({
   last_used_at: Schema.optional(Schema.NullOr(Schema.String)),
 });
 
+// Validation accepts BOTH owner shapes. The list/create paths below stay
+// user-only on purpose: they are the console's personal-key CRUD, and minting
+// org keys is a separate, privileged surface (PR 1.5).
+const ValidatedApiKey = Schema.Struct({
+  id: Schema.String,
+  owner: WorkOSApiKeyOwner,
+});
+
 const ValidateApiKeyResponse = Schema.Struct({
-  apiKey: Schema.NullOr(ApiKey),
+  apiKey: Schema.NullOr(ValidatedApiKey),
 });
 
 const RawCreatedApiKey = Schema.Struct({
@@ -82,19 +116,31 @@ const decodeValidateApiKeyResponse = Schema.decodeUnknownOption(ValidateApiKeyRe
 const decodeListApiKeysResponse = Schema.decodeUnknownOption(ListApiKeysResponse);
 const decodeCreateApiKeyResponse = Schema.decodeUnknownOption(CreateApiKeyResponse);
 
+const ownerFromApiKey = (apiKey: typeof ValidatedApiKey.Type): ApiKeyOwner | null => {
+  if (apiKey.owner.type === "organization") {
+    // An org-owned key IS the org: `owner.id` is the organization, and there
+    // is no member to act as. This resolves to the platform view.
+    return {
+      scope: "org",
+      accountId: null,
+      organizationId: apiKey.owner.id,
+      keyId: apiKey.id,
+    };
+  }
+  const organizationId = apiKey.owner.organizationId ?? apiKey.owner.organization_id;
+  if (!organizationId) return null;
+  return {
+    scope: "user",
+    accountId: apiKey.owner.id,
+    organizationId,
+    keyId: apiKey.id,
+  };
+};
+
 const ownerFromResponse = (value: unknown): ApiKeyOwner | null =>
   Option.match(decodeValidateApiKeyResponse(value), {
     onNone: () => null,
-    onSome: ({ apiKey }) => {
-      if (!apiKey) return null;
-      const organizationId = apiKey.owner.organizationId ?? apiKey.owner.organization_id;
-      if (!organizationId) return null;
-      return {
-        accountId: apiKey.owner.id,
-        organizationId,
-        keyId: apiKey.id,
-      };
-    },
+    onSome: ({ apiKey }) => (apiKey ? ownerFromApiKey(apiKey) : null),
   });
 
 const summaryFromApiKey = (apiKey: typeof ApiKey.Type): ApiKeySummary | null => {
