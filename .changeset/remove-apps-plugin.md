@@ -1,5 +1,5 @@
 ---
-"executor": minor
+"executor": patch
 ---
 
 Remove the custom apps plugin. Git and local-directory app sources are no
