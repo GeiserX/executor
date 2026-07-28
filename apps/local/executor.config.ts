@@ -50,8 +50,13 @@ export default defineExecutorConfig({
         allowPrivateGitHosts: true,
       }),
       toolkitsPlugin({ activeToolkitSlug }),
-      keychainPlugin(),
+      // The durable file store must register before keychain: the first
+      // writable provider becomes the default for minted OAuth tokens, and on
+      // sandbox/headless hosts the keychain is an in-memory keyring that a
+      // stop/recreate wipes while only EXECUTOR_DATA_DIR is persisted.
+      // Keychain stays registered for explicit external refs.
       fileSecretsPlugin(),
+      keychainPlugin(),
       onepasswordHttpPlugin(),
       desktopSettingsPlugin({
         webBaseUrl:
