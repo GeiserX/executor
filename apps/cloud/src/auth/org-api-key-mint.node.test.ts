@@ -64,10 +64,10 @@ describe("organization API keys", () => {
           }),
       });
 
-      const created = yield* apiKeys.createOrgKey({ organizationId: ORG, name: "owner.com" });
+      const created = yield* apiKeys.createOrgKey({ organizationId: ORG, name: "acme-backend" });
 
       expect(created.id).toBe("key_org_1");
-      expect(created.name).toBe("owner.com");
+      expect(created.name).toBe("acme-backend");
       expect(created.value, "create returns the one-time plaintext secret").toBe(
         "sk_org_plaintext",
       );
@@ -84,7 +84,7 @@ describe("organization API keys", () => {
           Effect.succeed({
             object: "list",
             data: [
-              orgKeyResponse(organizationId, "key_org_1", "owner.com"),
+              orgKeyResponse(organizationId, "key_org_1", "acme-backend"),
               orgKeyResponse(organizationId, "key_org_2", "ci"),
             ],
             listMetadata: { before: null, after: null },
@@ -93,7 +93,7 @@ describe("organization API keys", () => {
 
       const keys = yield* apiKeys.listOrgKeys({ organizationId: ORG });
 
-      expect(keys.map((key) => key.name)).toEqual(["owner.com", "ci"]);
+      expect(keys.map((key) => key.name)).toEqual(["acme-backend", "ci"]);
       expect(JSON.stringify(keys), "the list never carries a plaintext secret").not.toContain(
         "sk_org_plaintext",
       );
@@ -136,7 +136,7 @@ describe("organization API keys", () => {
       });
 
       const error = yield* Effect.flip(
-        apiKeys.createOrgKey({ organizationId: ORG, name: "owner.com" }),
+        apiKeys.createOrgKey({ organizationId: ORG, name: "acme-backend" }),
       );
 
       expect(error).toBeInstanceOf(ApiKeyManagementError);

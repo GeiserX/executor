@@ -7,7 +7,7 @@
 //   1. an ORG-SCOPED api key -> `PlatformAuth`. The key IS the authority: WorkOS
 //      validated it and reported which org owns it, and there is no member
 //      behind it to check membership for. This is the machine credential
-//      (owner.com's server calling us).
+//      (a customer's backend calling us).
 //   2. an admin SESSION member -> the console. Requires a live `getUserOrgMembership`
 //      whose role slug is `admin` AND whose status is `active`, matching the
 //      strictest existing cloud guard (`auth/handlers.ts`'s org-delete check) —
