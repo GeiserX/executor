@@ -122,6 +122,17 @@ export const betterAuthAccountProvider: Layer.Layer<AccountProvider, never, Bett
             }),
           ),
 
+        // Nothing to revoke: `listOrgApiKeys` is empty and `createOrgApiKey`
+        // refuses, so any id reaching here names a key this instance never
+        // issued. Refusing (rather than succeeding vacuously) keeps the console
+        // from reporting a revoke that did not happen.
+        revokeOrgApiKey: () =>
+          Effect.fail(
+            new AccountError({
+              message: "Organization API keys are not available on self-hosted instances",
+            }),
+          ),
+
         listMembers: (headers) =>
           Effect.gen(function* () {
             const resolved = yield* getSession(headers);

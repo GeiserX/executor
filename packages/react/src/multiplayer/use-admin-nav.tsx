@@ -19,6 +19,13 @@ import type { ShellNavItem } from "./shell";
 // matters. Failing closed here is deliberate: while the member list is loading
 // or unavailable, showing nothing is better than flashing a section that will
 // refuse.
+//
+// That fail-closed default is also what makes this hook SSR-safe. `orgMembersAtom`
+// carries an explicit server value (see `api/account-atoms`), so on the server it
+// reads as initial without evaluating — the role is simply UNKNOWN during SSR,
+// which lands on `false` here and resolves client-side once the list arrives.
+// The hook must never suspend or throw: it runs above the routed outlet, so
+// anything it raises takes down the whole server-rendered document.
 // ---------------------------------------------------------------------------
 
 /** Whether the current member reads as an admin/owner of this tenant. */

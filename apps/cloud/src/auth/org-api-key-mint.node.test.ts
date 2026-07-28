@@ -1,13 +1,13 @@
 import { describe, expect, it } from "@effect/vitest";
 import { Effect, Layer } from "effect";
 
-import { ApiKeyService } from "./api-keys";
+import { ApiKeyService, OrgApiKeyNotFound } from "./api-keys";
 import { ApiKeyManagementError } from "./errors";
 import { WorkOSClient, type WorkOSClientService } from "./workos";
 
 // ---------------------------------------------------------------------------
-// Minting and listing ORGANIZATION-owned api keys — the privileged credential
-// that resolves to the read-only platform view (`/admin/*`).
+// Minting, listing, and revoking ORGANIZATION-owned api keys — the privileged
+// credential that resolves to the read-only platform view (`/admin/*`).
 //
 // The decode boundary is what these pin. WorkOS returns an org-owned key with
 // the ORG in `owner.id` and no member at all, which is a different shape from
@@ -175,6 +175,142 @@ describe("organization API keys", () => {
         keys.map((key) => key.id),
         "a user-owned key is not an org key",
       ).toEqual(["key_mine"]);
+    }),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Revoking an org key. The mint is only half a credential lifecycle: an org key
+// reads every user and connection in the tenant, so it has to be destroyable.
+//
+// Revoke cannot go through `revokeUserKey`/`revokeApiKey` — that path resolves
+// ownership against the CALLER's personal keys, so an org key id is never in
+// its owned set. It also cannot just call `deleteApiKey` directly: that route is
+// scope-blind and would happily destroy a member's personal key, or a key
+// belonging to a sibling org in the same WorkOS workspace. So ownership is
+// resolved against the ORG's decoded listing first, and that filter IS the
+// authorization. These pin that filter.
+// ---------------------------------------------------------------------------
+
+describe("revoking an organization API key", () => {
+  const listing = (...keys: ReadonlyArray<unknown>) => ({
+    object: "list",
+    data: keys,
+    listMetadata: { before: null, after: null },
+  });
+
+  it.effect("revokes a key the organization owns", () =>
+    Effect.gen(function* () {
+      const deleted: string[] = [];
+      const apiKeys = yield* serviceWith({
+        listOrgApiKeys: (organizationId: string) =>
+          Effect.succeed(listing(orgKeyResponse(organizationId, "key_org_1", "acme-backend"))),
+        deleteApiKey: (id: string) =>
+          Effect.sync(() => {
+            deleted.push(id);
+          }),
+      });
+
+      yield* apiKeys.revokeOrgKey({ organizationId: ORG, keyId: "key_org_1" });
+
+      expect(deleted, "the delete reaches WorkOS exactly once, for that key").toEqual([
+        "key_org_1",
+      ]);
+    }),
+  );
+
+  it.effect("refuses a USER-owned key id, without deleting anything", () =>
+    Effect.gen(function* () {
+      // The regression this guards: a member's personal credential must not be
+      // destroyable through the org route just because an admin can call it.
+      const deleted: string[] = [];
+      const apiKeys = yield* serviceWith({
+        listOrgApiKeys: () =>
+          Effect.succeed(
+            listing(orgKeyResponse(ORG, "key_org_1", "acme-backend"), {
+              object: "api_key",
+              id: "key_user",
+              owner: { type: "user", id: "user_1", organization_id: ORG },
+              name: "personal",
+              obfuscatedValue: "sk_user…c3d4",
+              lastUsedAt: null,
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+            }),
+          ),
+        deleteApiKey: (id: string) =>
+          Effect.sync(() => {
+            deleted.push(id);
+          }),
+      });
+
+      const error = yield* Effect.flip(
+        apiKeys.revokeOrgKey({ organizationId: ORG, keyId: "key_user" }),
+      );
+
+      expect(error).toBeInstanceOf(OrgApiKeyNotFound);
+      expect(deleted, "no delete is issued for a key the org does not own").toEqual([]);
+    }),
+  );
+
+  it.effect("refuses a key belonging to ANOTHER organization", () =>
+    Effect.gen(function* () {
+      // The WorkOS workspace key is workspace-wide, so an admin of one org must
+      // not be able to revoke a sibling org's credential by id.
+      const deleted: string[] = [];
+      const apiKeys = yield* serviceWith({
+        listOrgApiKeys: () =>
+          Effect.succeed(
+            listing(
+              orgKeyResponse(ORG, "key_mine", "mine"),
+              orgKeyResponse("org_other", "key_theirs", "theirs"),
+            ),
+          ),
+        deleteApiKey: (id: string) =>
+          Effect.sync(() => {
+            deleted.push(id);
+          }),
+      });
+
+      const error = yield* Effect.flip(
+        apiKeys.revokeOrgKey({ organizationId: ORG, keyId: "key_theirs" }),
+      );
+
+      expect(error).toBeInstanceOf(OrgApiKeyNotFound);
+      expect(deleted).toEqual([]);
+    }),
+  );
+
+  it.effect("refuses an unknown key id", () =>
+    Effect.gen(function* () {
+      const apiKeys = yield* serviceWith({
+        listOrgApiKeys: () => Effect.succeed(listing()),
+        deleteApiKey: () => Effect.die("nothing should be deleted"),
+      });
+
+      const error = yield* Effect.flip(
+        apiKeys.revokeOrgKey({ organizationId: ORG, keyId: "key_nope" }),
+      );
+
+      expect(error).toBeInstanceOf(OrgApiKeyNotFound);
+    }),
+  );
+
+  it.effect("surfaces an upstream delete failure as a management error", () =>
+    Effect.gen(function* () {
+      // A failed delete must not read as a successful revoke — the console
+      // would tell an admin a live credential is gone.
+      const apiKeys = yield* serviceWith({
+        listOrgApiKeys: (organizationId: string) =>
+          Effect.succeed(listing(orgKeyResponse(organizationId, "key_org_1", "acme-backend"))),
+        deleteApiKey: () => Effect.fail("workos_unavailable"),
+      });
+
+      const error = yield* Effect.flip(
+        apiKeys.revokeOrgKey({ organizationId: ORG, keyId: "key_org_1" }),
+      );
+
+      expect(error).toBeInstanceOf(ApiKeyManagementError);
     }),
   );
 });

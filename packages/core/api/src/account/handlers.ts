@@ -56,6 +56,12 @@ export const AccountHandlers = HttpApiBuilder.group(AccountHttpApi, "account", (
         return yield* (yield* AccountProvider).createOrgApiKey(headers, payload.name);
       }),
     )
+    .handle("revokeOrgApiKey", ({ params }) =>
+      Effect.gen(function* () {
+        const headers = yield* requestHeaders;
+        return yield* (yield* AccountProvider).revokeOrgApiKey(headers, params.apiKeyId);
+      }),
+    )
     .handle("listMembers", () =>
       Effect.gen(function* () {
         const headers = yield* requestHeaders;

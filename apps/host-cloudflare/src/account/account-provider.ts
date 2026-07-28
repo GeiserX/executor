@@ -65,6 +65,7 @@ export const cloudflareAccountProvider = (
     // credential store of their own to mint one from.
     listOrgApiKeys: () => Effect.succeed({ apiKeys: [] }),
     createOrgApiKey: () => forbiddenWrite,
+    revokeOrgApiKey: () => forbiddenWrite,
     listMembers: () => Effect.succeed({ members: [] }),
     listRoles: () => Effect.succeed({ roles: [] }),
     inviteMember: () => forbiddenWrite,

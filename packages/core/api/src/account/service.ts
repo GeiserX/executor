@@ -57,6 +57,10 @@ export interface AccountProviderShape {
     headers: AccountHeaders,
     name: string,
   ) => OrgScoped<CreatedApiKey, AccountForbidden>;
+  readonly revokeOrgApiKey: (
+    headers: AccountHeaders,
+    apiKeyId: string,
+  ) => OrgScoped<Success, AccountForbidden>;
   readonly listMembers: (headers: AccountHeaders) => OrgScoped<Members>;
   readonly listRoles: (headers: AccountHeaders) => OrgScoped<Roles>;
   readonly inviteMember: (

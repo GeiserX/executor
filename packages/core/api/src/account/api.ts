@@ -219,6 +219,18 @@ export const AccountApi = HttpApiGroup.make("account")
       error: [AccountError, AccountUnauthorized, AccountForbidden, AccountNoOrganization],
     }),
   )
+  // Revoke is its own route rather than a reuse of `revokeApiKey`: that one
+  // resolves ownership against the caller's PERSONAL keys, so an org key id is
+  // never in its owned set and revoking one there always fails. An org key is
+  // the most privileged credential in the product (it reads the tenant-wide
+  // `/admin/*` plane), so it must be revocable — admin-gated, like the mint.
+  .add(
+    HttpApiEndpoint.delete("revokeOrgApiKey", "/account/org-api-keys/:apiKeyId", {
+      params: ApiKeyParams,
+      success: SuccessResponse,
+      error: [AccountError, AccountUnauthorized, AccountForbidden, AccountNoOrganization],
+    }),
+  )
   .add(
     HttpApiEndpoint.get("listMembers", "/account/members", {
       success: OrgMembersResponse,

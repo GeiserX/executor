@@ -42,6 +42,16 @@ export class ApiKeyValidationError extends Data.TaggedError("ApiKeyValidationErr
   readonly cause: unknown;
 }> {}
 
+/**
+ * The requested key id is not an org-owned key of this organization — it does
+ * not exist, belongs to a member rather than the org, or belongs to a different
+ * org in the same WorkOS workspace. Distinct from `ApiKeyManagementError` (an
+ * upstream failure) so callers can answer "not found" without a 500.
+ */
+export class OrgApiKeyNotFound extends Data.TaggedError("OrgApiKeyNotFound")<{
+  readonly keyId: string;
+}> {}
+
 // WorkOS keys are owned by either a user or an organization. The user shape
 // carries the member id in `id` and the org in `organization_id`; the org shape
 // carries the ORG in `id` and no member at all. Both decode here — the
@@ -295,6 +305,16 @@ export class ApiKeyService extends Context.Service<
       readonly organizationId: string;
       readonly name: string;
     }) => Effect.Effect<CreatedApiKey, ApiKeyManagementError>;
+    /**
+     * Revoke an org-owned key. Ownership is resolved against the ORG's own key
+     * listing — never the caller's personal keys — so a member's user key id
+     * (or another org's key id, since the WorkOS workspace key is
+     * workspace-wide) cannot be destroyed through this path.
+     */
+    readonly revokeOrgKey: (input: {
+      readonly organizationId: string;
+      readonly keyId: string;
+    }) => Effect.Effect<void, ApiKeyManagementError | OrgApiKeyNotFound>;
   }
 >()("@executor-js/cloud/ApiKeyService") {
   static WorkOS = Layer.effect(this)(
@@ -340,6 +360,25 @@ export class ApiKeyService extends Context.Service<
                 : Effect.fail(new ApiKeyManagementError({ cause: "invalid_create_response" }));
             }),
           ),
+        // Ownership is checked against the ORG's decoded key listing before the
+        // delete goes out. `deleteApiKey` is scope-blind — handed any key id it
+        // would happily destroy a member's personal credential, or a key
+        // belonging to a sibling org in the same workspace. The listing already
+        // drops both of those (`orgListFromResponse` filters on owner type AND
+        // organization), so filtering through it is the whole authorization.
+        revokeOrgKey: ({ organizationId, keyId }) =>
+          Effect.gen(function* () {
+            const response = yield* workos
+              .listOrgApiKeys(organizationId)
+              .pipe(Effect.mapError((cause) => new ApiKeyManagementError({ cause })));
+            const owned = orgListFromResponse(response, organizationId);
+            if (!owned.some((key) => key.id === keyId)) {
+              return yield* new OrgApiKeyNotFound({ keyId });
+            }
+            yield* workos
+              .deleteApiKey(keyId)
+              .pipe(Effect.mapError((cause) => new ApiKeyManagementError({ cause })));
+          }),
       };
     }),
   );
