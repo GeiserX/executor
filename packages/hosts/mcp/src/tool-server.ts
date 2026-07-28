@@ -647,6 +647,39 @@ const extractInventory = (description: string): string => {
   return index === -1 ? "" : description.slice(index).trimEnd();
 };
 
+// ---------------------------------------------------------------------------
+// Hang-visibility join keys
+// ---------------------------------------------------------------------------
+// A killed execution exports nothing: OTEL only ships a span when it ends, and
+// a Cloudflare deploy/eviction cancels the request without an error, so a hung
+// `execute` is invisible in the trace store. Two mitigations live here:
+//   1. Every execution-path span carries the JSON-RPC id + transport session id
+//      (`mcp.rpc.id`, `mcp.request.session_id`), so a client's
+//      `notifications/cancelled` — which names the cancelled request id — can
+//      be joined to the exact call it gave up on.
+//   2. A zero-duration start marker span is emitted the moment execution
+//      begins. It ends (and therefore exports) immediately, so a start marker
+//      without a matching completion span is a true positive for an execution
+//      that died mid-flight.
+
+type McpRequestJoinKeys = {
+  readonly requestId: string | number;
+  readonly sessionId?: string | undefined;
+};
+
+const joinKeyAttributes = (extra: McpRequestJoinKeys): Record<string, unknown> => ({
+  "mcp.rpc.id": String(extra.requestId),
+  ...(extra.sessionId ? { "mcp.request.session_id": extra.sessionId } : {}),
+});
+
+const withJoinKeys = <A, EffE>(
+  effect: Effect.Effect<A, EffE>,
+  extra: McpRequestJoinKeys,
+): Effect.Effect<A, EffE> => Effect.annotateSpans(effect, joinKeyAttributes(extra));
+
+const startMarker = (name: string, attributes: Record<string, unknown>): Effect.Effect<void> =>
+  Effect.void.pipe(Effect.withSpan(name, { attributes }));
+
 const JsonObjectFromString = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown));
 const decodeJsonObjectString = Schema.decodeUnknownOption(JsonObjectFromString);
 
@@ -764,8 +797,15 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
         ),
     ).pipe(Effect.withSpan("mcp.host.create_server"));
 
-    const executeCode = (code: string): Effect.Effect<McpToolResult, E> =>
+    const executeCode = (
+      code: string,
+      extra: McpRequestJoinKeys,
+    ): Effect.Effect<McpToolResult, E> =>
       Effect.gen(function* () {
+        yield* startMarker("mcp.host.tool.execute.start", {
+          "mcp.tool.name": "execute",
+          "mcp.execute.code_length": code.length,
+        });
         debugLog("execute.call", {
           elicitationMode: elicitationMode.mode,
           elicitationSupport: getElicitationSupport(server),
@@ -807,14 +847,20 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
             "mcp.execute.code_length": code.length,
           },
         }),
+        (effect) => withJoinKeys(effect, extra),
       );
 
     const resumeExecution = (
       executionId: string,
       action: "accept" | "decline" | "cancel",
       content: Record<string, unknown> | undefined,
+      extra: McpRequestJoinKeys,
     ): Effect.Effect<McpToolResult, E> =>
       Effect.gen(function* () {
+        yield* startMarker("mcp.host.tool.resume.start", {
+          "mcp.tool.name": "resume",
+          "mcp.execute.execution_id": executionId,
+        });
         debugLog("resume.call", {
           executionId,
           action,
@@ -855,6 +901,7 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
             "mcp.execute.execution_id": executionId,
           },
         }),
+        (effect) => withJoinKeys(effect, extra),
       );
 
     const requireUserResumeApproval = (executionId: string): Effect.Effect<McpToolResult> =>
@@ -898,8 +945,15 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
       );
     };
 
-    const resumeAfterBrowserApproval = (executionId: string): Effect.Effect<McpToolResult, E> =>
+    const resumeAfterBrowserApproval = (
+      executionId: string,
+      extra: McpRequestJoinKeys,
+    ): Effect.Effect<McpToolResult, E> =>
       Effect.gen(function* () {
+        yield* startMarker("mcp.host.tool.resume.start", {
+          "mcp.tool.name": "resume",
+          "mcp.execute.execution_id": executionId,
+        });
         const response = yield* waitForBrowserApprovalResponse(executionId);
         if (!response) return yield* requireUserResumeApproval(executionId);
 
@@ -926,6 +980,7 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
             "mcp.execute.execution_id": executionId,
           },
         }),
+        (effect) => withJoinKeys(effect, extra),
       );
 
     // --- tools ---
@@ -937,7 +992,7 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
           description,
           inputSchema: { code: z.string().trim().min(1) },
         },
-        ({ code }) => runToolEffect(executeCode(code)),
+        ({ code }, extra) => runToolEffect(executeCode(code, extra)),
       ),
     ).pipe(
       Effect.withSpan("mcp.host.register_tool", {
@@ -993,8 +1048,10 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
                 .default("{}"),
             },
           },
-          ({ executionId, action, content: rawContent }) =>
-            runToolEffect(resumeExecution(executionId, action, parseJsonContent(rawContent))),
+          ({ executionId, action, content: rawContent }, extra) =>
+            runToolEffect(
+              resumeExecution(executionId, action, parseJsonContent(rawContent), extra),
+            ),
         );
       }
 
@@ -1010,7 +1067,7 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
             executionId: z.string().describe("The execution ID from the paused result"),
           },
         },
-        ({ executionId }) => runToolEffect(resumeAfterBrowserApproval(executionId)),
+        ({ executionId }, extra) => runToolEffect(resumeAfterBrowserApproval(executionId, extra)),
       );
     }).pipe(
       Effect.withSpan("mcp.host.register_tool", {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
 import { Data, Deferred, Effect } from "effect";
+import type * as Tracer from "effect/Tracer";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -87,6 +88,72 @@ const withNativeClient = async <E extends Cause.YieldableError>(
   capabilities: ClientCapabilities,
   fn: (client: Client) => Promise<void>,
 ) => withClient(engine, capabilities, fn, { elicitationMode: { mode: "native" } });
+
+type RecordedSpan = {
+  readonly name: string;
+  readonly attributes: ReadonlyMap<string, unknown>;
+  ended: boolean;
+};
+
+/** A tracer that records every span + its attributes and end state. */
+const makeRecordingTracer = (): { tracer: Tracer.Tracer; spans: RecordedSpan[] } => {
+  const spans: RecordedSpan[] = [];
+  const tracer: Tracer.Tracer = {
+    span: (options) => {
+      const attributes = new Map<string, unknown>();
+      const recorded: RecordedSpan = { name: options.name, attributes, ended: false };
+      spans.push(recorded);
+      let status: Tracer.SpanStatus = { _tag: "Started", startTime: options.startTime };
+      return {
+        _tag: "Span",
+        name: options.name,
+        spanId: `span-${spans.length}`,
+        traceId: "trace-1",
+        parent: options.parent,
+        annotations: options.annotations,
+        get status() {
+          return status;
+        },
+        attributes,
+        links: options.links,
+        sampled: options.sampled,
+        kind: options.kind,
+        end: (endTime, exit) => {
+          recorded.ended = true;
+          status = { _tag: "Ended", startTime: options.startTime, endTime, exit };
+        },
+        attribute: (key, value) => {
+          attributes.set(key, value);
+        },
+        event: () => undefined,
+        addLinks: () => undefined,
+      };
+    },
+  };
+  return { tracer, spans };
+};
+
+/** withClient, but with a recording tracer installed for the whole server. */
+const withTracedClient = async <E extends Cause.YieldableError>(
+  engine: ExecutionEngine<E>,
+  fn: (client: Client, spans: RecordedSpan[]) => Promise<void>,
+) => {
+  const { tracer, spans } = makeRecordingTracer();
+  const mcpServer = await Effect.runPromise(
+    createExecutorMcpServer({ engine }).pipe(Effect.withTracer(tracer)),
+  );
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test-client", version: "1.0.0" }, { capabilities: NO_CAPS });
+  await mcpServer.connect(serverTransport);
+  await client.connect(clientTransport);
+  // oxlint-disable-next-line executor/no-try-catch-or-throw -- boundary: test helper must close MCP transports after async client assertions
+  try {
+    await fn(client, spans);
+  } finally {
+    await clientTransport.close();
+    await serverTransport.close();
+  }
+};
 
 const ELICITATION_CAPS: ClientCapabilities = {
   elicitation: { form: {}, url: {} },
@@ -1755,6 +1822,52 @@ describe("MCP host server — skills tool", () => {
       expect(textOf(result)).toContain('No skill named "nope"');
       expect(textOf(result)).toContain("`execute`");
       expect(result.structuredContent).toBeUndefined();
+    });
+  });
+});
+
+describe("MCP host server — hang-visibility tracing", () => {
+  it("execute emits a start marker and stamps the JSON-RPC id on execution spans", async () => {
+    const engine = makeStubEngine({});
+
+    await withTracedClient(engine, async (client, spans) => {
+      await client.callTool({ name: "execute", arguments: { code: "1+1" } });
+
+      // The start marker exports immediately: a start without a matching
+      // completed `mcp.host.tool.execute` is the killed-execution signal.
+      const start = spans.find((span) => span.name === "mcp.host.tool.execute.start");
+      expect(start).toBeDefined();
+      expect(start!.ended).toBe(true);
+      expect(start!.attributes.get("mcp.rpc.id")).toBeDefined();
+
+      // The completion span carries the same join key.
+      const execute = spans.find((span) => span.name === "mcp.host.tool.execute");
+      expect(execute).toBeDefined();
+      expect(execute!.attributes.get("mcp.rpc.id")).toBe(start!.attributes.get("mcp.rpc.id"));
+      expect(execute!.ended).toBe(true);
+    });
+  });
+
+  it("resume emits a start marker carrying the execution id and rpc id", async () => {
+    const engine = makeStubEngine({
+      resume: () => Effect.succeed({ status: "completed", result: { result: "resumed" } }),
+    });
+
+    await withTracedClient(engine, async (client, spans) => {
+      await client.callTool({
+        name: "resume",
+        arguments: { executionId: "exec-1", action: "accept" },
+      });
+
+      const start = spans.find((span) => span.name === "mcp.host.tool.resume.start");
+      expect(start).toBeDefined();
+      expect(start!.ended).toBe(true);
+      expect(start!.attributes.get("mcp.execute.execution_id")).toBe("exec-1");
+      expect(start!.attributes.get("mcp.rpc.id")).toBeDefined();
+
+      const resume = spans.find((span) => span.name === "mcp.host.tool.resume");
+      expect(resume).toBeDefined();
+      expect(resume!.attributes.get("mcp.rpc.id")).toBe(start!.attributes.get("mcp.rpc.id"));
     });
   });
 });
