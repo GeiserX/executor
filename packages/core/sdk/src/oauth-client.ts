@@ -1,5 +1,5 @@
 import type { Effect } from "effect";
-import { Schema } from "effect";
+import { Redacted, Schema } from "effect";
 
 import type { Connection } from "./connection";
 import type { UserActionableError } from "./errors";
@@ -56,24 +56,40 @@ export interface OAuthClient {
   readonly tokenUrl: string;
   readonly grant: OAuthGrant;
   readonly clientId: string;
-  /** The literal client secret, or `null` for a public / PKCE client. Stored
-   *  out-of-band in the credential provider (vault item id), never inline.
-   *  Presence is `null`, never `""`: an empty string is a value, so any
-   *  falsiness or emptiness test on it is a bug waiting to happen. Convert
-   *  form/wire input through `clientSecretFromInput` at the boundary. */
-  readonly clientSecret: string | null;
+  /** The client secret, or `null` for a public / PKCE client. Stored out-of-band
+   *  in the credential provider (vault item id), never inline. Accepts a bare
+   *  string as well as `Redacted` so a pasted form field needs no wrapping;
+   *  everything downstream of `createClient` carries it wrapped.
+   *  Presence is `null`, never `""` and never `Redacted.make("")`: an empty
+   *  string is a value and every `Redacted` is truthy, so any falsiness or
+   *  emptiness test on it is a bug waiting to happen. Convert form/wire input
+   *  through `oauthClientSecretFromInput` at the boundary. */
+  readonly clientSecret: string | Redacted.Redacted<string> | null;
   /** RFC 8707 Resource Indicator (MCP). Carried so the refresh request can keep
    *  the re-minted token bound to the same resource. Null/omitted otherwise. */
   readonly resource?: string | null;
 }
 
-/** Presence-normalize a client secret arriving from a form field or the wire,
- *  where "absent" can only be spelled as the empty string. Deliberately does NOT
- *  trim: a whitespace-bearing secret is a value, and trimming it here would
- *  silently downgrade a confidential client to a public one. Callers that want
- *  the user's leading/trailing whitespace dropped trim before calling. */
-export const oauthClientSecretFromInput = (value: string | null | undefined): string | null =>
-  value == null || value.length === 0 ? null : value;
+/** Presence-normalize a client secret arriving from a form field, the wire, or a
+ *  DCR response, where "absent" can only be spelled as the empty string.
+ *  Emptiness is tested on the UNWRAPPED value: every `Redacted` is truthy, so a
+ *  wrapped `""` would otherwise register a confidential client with an empty
+ *  secret. The wrapper is preserved — normalizing does not unwrap.
+ *  Deliberately does NOT trim: a whitespace-bearing secret is a value, and
+ *  trimming it here would silently downgrade a confidential client to a public
+ *  one. Callers that want the user's leading/trailing whitespace dropped trim
+ *  before calling. */
+export function oauthClientSecretFromInput(value: string | null | undefined): string | null;
+export function oauthClientSecretFromInput<A extends string | Redacted.Redacted<string>>(
+  value: A | null | undefined,
+): A | null;
+export function oauthClientSecretFromInput(
+  value: string | Redacted.Redacted<string> | null | undefined,
+): string | Redacted.Redacted<string> | null {
+  if (value == null) return null;
+  const literal = Redacted.isRedacted(value) ? Redacted.value(value) : value;
+  return literal.length === 0 ? null : value;
+}
 
 export type OAuthClientOrigin =
   | {

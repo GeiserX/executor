@@ -201,8 +201,12 @@ const recordedOAuthScope = (
   if (token.scope == null) return requestedScopes.join(" ") || null;
 
   const granted = token.scope.split(/\s+/).filter(Boolean);
+  // Presence, not truthiness: the refresh token is a `Redacted`, and every
+  // `Redacted` is truthy.
   const coveredByRefreshToken =
-    token.refresh_token && requestedScopes.includes("offline_access") ? ["offline_access"] : [];
+    token.refresh_token !== undefined && requestedScopes.includes("offline_access")
+      ? ["offline_access"]
+      : [];
   const recorded = dedupeScopes([...granted, ...coveredByRefreshToken]);
   return recorded.join(" ") || null;
 };
@@ -388,9 +392,11 @@ interface LoadedOAuthClient {
   readonly tokenUrl: string;
   readonly grant: OAuthGrant;
   readonly clientId: string;
-  /** Resolved literal secret (read from the provider via the stored item id),
-   *  or null for a public / PKCE client that stored none. */
-  readonly clientSecret: string | null;
+  /** Resolved secret (read from the provider via the stored item id), or null
+   *  for a public / PKCE client that stored none. Presence stays `null` — an
+   *  emptiness test on the wrapper would read a public client as confidential,
+   *  since `Redacted.make("")` is truthy. */
+  readonly clientSecret: Redacted.Redacted<string> | null;
   readonly resource: string | null;
 }
 
@@ -603,8 +609,14 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
       // secret is empty (the token request would then send `client_secret=`),
       // so reject it and make the caller state which it meant. Boundaries that
       // can only produce "" (HTTP payloads, form fields) normalize through
-      // `oauthClientSecretFromInput` before calling.
-      if (input.clientSecret === "") {
+      // `oauthClientSecretFromInput` before calling. Tested on the unwrapped
+      // value: a wrapped "" is just as empty and just as wrong.
+      if (
+        input.clientSecret != null &&
+        (Redacted.isRedacted(input.clientSecret)
+          ? Redacted.value(input.clientSecret)
+          : input.clientSecret) === ""
+      ) {
         return yield* new StorageError({
           message:
             "Invalid OAuth client secret: pass null for a public/PKCE client, or a non-empty secret for a confidential one.",
@@ -1025,21 +1037,22 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
           // goes out unauthenticated and the AS rejects it, which is the visible
           // failure a re-registration prompt hangs off.
           return Effect.gen(function* () {
-            let clientSecret: string | null = null;
+            let clientSecret: Redacted.Redacted<string> | null = null;
             if (row.client_secret_item_id != null) {
               const provider = deps.defaultWritableProvider();
               if (provider) {
-                // Boundary: the OAuth 2.1 helpers take a bare `client_secret`
-                // (it is posted to the token endpoint). Unwrap BEFORE
-                // presence-normalizing — `Redacted.make("")` is truthy, so an
-                // emptiness test on the wrapper would read a public client as
-                // confidential.
+                // The secret stays wrapped from here to the token endpoint; the
+                // helpers unwrap it at the oauth4webapi call. Presence is
+                // normalized against the UNWRAPPED value — `Redacted.make("")`
+                // is truthy, so testing the wrapper would read a public client
+                // as confidential.
                 const stored = yield* provider.get(
                   ProviderItemId.make(String(row.client_secret_item_id)),
                 );
-                clientSecret = oauthClientSecretFromInput(
-                  stored === null ? null : Redacted.value(stored),
-                );
+                clientSecret =
+                  stored !== null && oauthClientSecretFromInput(Redacted.value(stored)) !== null
+                    ? stored
+                    : null;
               }
             }
             return {
@@ -1174,9 +1187,16 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
           : yield* filterAuthorizationCodeScopes(client, requestedScopes);
 
       // authorization_code: persist a session + build the authorize URL.
+      // The verifier stays wrapped across the challenge computation and down to
+      // the session write below; the challenge itself is a public S256 hash.
       const verifier = createPkceCodeVerifier();
       const challenge = yield* Effect.promise(() => createPkceCodeChallenge(verifier));
-      const state = OAuthState.make(createOAuthState());
+      // Boundary: `OAuthState` is a correlation KEY, not just grant material —
+      // it is matched by equality in `oauth_session`, echoed to the provider in
+      // the authorize URL, and returned to the caller so `complete` can quote
+      // it. It cannot stay wrapped, so the unwrap happens here at the branded-id
+      // constructor rather than being spread across those call sites.
+      const state = OAuthState.make(Redacted.value(createOAuthState()));
       const providerState = encodeOAuthCallbackState({
         state: String(state),
         orgSlug: deps.callbackStateOrgSlug,
@@ -1195,7 +1215,11 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
           name: String(input.name),
           template: String(input.template),
           redirect_url: flowRedirectUri,
-          pkce_verifier: verifier,
+          // Boundary: the DB persistence line. `Redacted`'s toJSON renders
+          // "<redacted>", so a missed unwrap here would silently store that
+          // literal and every later `complete` would fail PKCE validation.
+          // (The column itself is plaintext; encrypting it is a separate change.)
+          pkce_verifier: Redacted.value(verifier),
           identity_label: input.identityLabel ?? null,
           // Persist the requested scope set (declared ∪ client, filtered to the
           // authorization-code flow) so `complete`'s recorded-scope fallback
@@ -1259,7 +1283,10 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
         name: ConnectionName.make(String(sessionRow.name)),
         template: AuthTemplateSlug.make(String(sessionRow.template)),
         redirectUrl: String(sessionRow.redirect_url),
-        pkceVerifier: sessionRow.pkce_verifier == null ? null : String(sessionRow.pkce_verifier),
+        // Re-wrapped on the way out of storage: everything downstream treats the
+        // verifier as grant material again, and the exchange unwraps it.
+        pkceVerifier:
+          sessionRow.pkce_verifier == null ? null : Redacted.make(String(sessionRow.pkce_verifier)),
         identityLabel: sessionRow.identity_label == null ? null : String(sessionRow.identity_label),
         expiresAt: Number(sessionRow.expires_at),
         // The scope set `start` requested (the integration's declared or
@@ -1397,11 +1424,16 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
           cause: undefined,
         });
       }
+      // `provider.set` accepts `Redacted` and unwraps at its own write line, so
+      // the token never becomes a bare string here.
       const itemId = accessItemId(target.owner, target.integration, target.name);
       yield* provider.set(ProviderItemId.make(itemId), token.access_token);
 
       let refreshItemId: string | null = null;
-      if (token.refresh_token) {
+      // Absence is `undefined` — never falsiness. Every `Redacted` is truthy, so
+      // a truthiness test would stop distinguishing "no refresh token" the day
+      // the field's presence model changes.
+      if (token.refresh_token !== undefined) {
         refreshItemId = refreshItemIdFor(itemId);
         yield* provider.set(ProviderItemId.make(refreshItemId), token.refresh_token);
       }

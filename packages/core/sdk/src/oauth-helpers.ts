@@ -16,7 +16,7 @@
 //     construction keeps the call sync and lets callers opt out of PAR
 // ---------------------------------------------------------------------------
 
-import { Data, Effect, Option, Predicate, Schema } from "effect";
+import { Data, Effect, Option, Predicate, Redacted, Schema } from "effect";
 import * as oauth from "oauth4webapi";
 
 import { endpointForTelemetry } from "./telemetry-endpoint";
@@ -41,10 +41,25 @@ export class OAuth2Error extends Data.TaggedError("OAuth2Error")<{
 // Token response shape (RFC 6749 §5.1)
 // ---------------------------------------------------------------------------
 
+/** Token material a caller hands one of these helpers. Widened to accept a bare
+ *  string as well as `Redacted` so a value that never left the process (a code
+ *  straight off the callback query string, a pasted secret) does not have to be
+ *  wrapped first. Outputs are always `Redacted` — the guarantee lives there. */
+export type OAuth2SecretInput = string | Redacted.Redacted<string>;
+
+/** Unwrap at an allowlisted boundary: `oauth4webapi` takes bare strings and puts
+ *  them on the wire. Every call site is a form field or an HTTP header. */
+const secretToSend = (value: OAuth2SecretInput): string =>
+  Redacted.isRedacted(value) ? Redacted.value(value) : value;
+
 export type OAuth2TokenResponse = {
-  readonly access_token: string;
+  /** Wrapped at construction (`tokenResponseFrom`) so the minted token cannot
+   *  reach a log, a span attribute, or an error payload without an explicit
+   *  `Redacted.value`. Unwrap only at a persistence or wire line — a missed
+   *  unwrap does not throw, it writes the literal "<redacted>". */
+  readonly access_token: Redacted.Redacted<string>;
   readonly token_type?: string;
-  readonly refresh_token?: string;
+  readonly refresh_token?: Redacted.Redacted<string>;
   readonly expires_in?: number;
   readonly scope?: string;
   readonly idTokenIdentityLabel?: string;
@@ -105,14 +120,22 @@ export const assertSupportedOAuthEndpointUrl = (
 // PKCE (RFC 7636) — straight delegation to `oauth4webapi`
 // ---------------------------------------------------------------------------
 
-export const createPkceCodeVerifier = (): string => oauth.generateRandomCodeVerifier();
+/** The PKCE verifier is grant material: whoever holds it plus the authorization
+ *  code can redeem the token. Wrapped for its whole in-memory life; the only
+ *  unwraps are the challenge computation below and the session-row write. */
+export const createPkceCodeVerifier = (): Redacted.Redacted<string> =>
+  Redacted.make(oauth.generateRandomCodeVerifier());
 
-export const createPkceCodeChallenge = (verifier: string): Promise<string> =>
-  oauth.calculatePKCECodeChallenge(verifier);
+/** The challenge is a public S256 hash of the verifier (it travels in the
+ *  authorize URL), so it comes back bare. */
+export const createPkceCodeChallenge = (verifier: OAuth2SecretInput): Promise<string> =>
+  oauth.calculatePKCECodeChallenge(secretToSend(verifier));
 
 /** RFC 6749 `state` — an unguessable correlation token minted by `oauth.start`
- *  and redeemed by `oauth.complete`. */
-export const createOAuthState = (): string => oauth.generateRandomState();
+ *  and redeemed by `oauth.complete`. Wrapped like the verifier: it is the
+ *  session's bearer key, and it is persisted and echoed through the provider. */
+export const createOAuthState = (): Redacted.Redacted<string> =>
+  Redacted.make(oauth.generateRandomState());
 
 // ---------------------------------------------------------------------------
 // Authorization URL builder
@@ -316,6 +339,62 @@ const redactTokenEndpointBody = (body: string): string =>
     )
     .replaceAll(new RegExp(`((?:${CREDENTIAL_BODY_KEYS}|code)=)[^&\\s]*`, "gi"), "$1[redacted]");
 
+const CREDENTIAL_KEY_PATTERN = new RegExp(`^(?:${CREDENTIAL_BODY_KEYS})$`, "i");
+
+/** The cause an `OAuth2Error` carries is the raw failure oauth4webapi threw, and
+ *  for an RFC 6749 §5.2 rejection that object holds the endpoint's PARSED error
+ *  body — which echoes the grant it rejected. The `message` is summarized
+ *  through `redactTokenEndpointBody`, but the cause is not, and anything that
+ *  serializes the failure (a log line, an error payload, `JSON.stringify` of the
+ *  Effect cause) republishes those credentials verbatim.
+ *
+ *  So the cause is projected into a plain object with every credential-named
+ *  leaf replaced, keeping the diagnostics (`error`, `error_description`,
+ *  `status`, `name`) that make it worth attaching. `Response` instances pass
+ *  through untouched: their body is not enumerable, and the summary already
+ *  quoted a redacted preview of it. */
+const redactErrorCause = (
+  cause: unknown,
+  /** True when `cause` is the value of an `error` key, where a `code` entry is
+   *  the provider's error LABEL (`{"error":{"code":"invalid_client_id"}}`) and
+   *  not an authorization code. Same exemption `redactTokenEndpointBody` makes
+   *  for the text form, spelled structurally. */
+  insideErrorObject = false,
+  seen: ReadonlySet<object> = new Set(),
+): unknown => {
+  if (cause instanceof Response) return cause;
+  if (seen.has(cause as object)) return "[circular]";
+  if (Array.isArray(cause)) {
+    const next = new Set([...seen, cause]);
+    return cause.map((entry) => redactErrorCause(entry, false, next));
+  }
+  if (!Predicate.isObject(cause)) return cause;
+  const next = new Set([...seen, cause]);
+  const redacted = Object.fromEntries(
+    Object.entries(cause).map(([key, value]) => [
+      key,
+      CREDENTIAL_KEY_PATTERN.test(key) || (key === "code" && !insideErrorObject)
+        ? "[redacted]"
+        : redactErrorCause(value, key === "error", next),
+    ]),
+  );
+  // oxlint-disable-next-line executor/no-instanceof-error -- boundary: `cause` is the untyped value oauth4webapi threw; narrowing it is how the diagnostics below are recovered
+  if (!(cause instanceof Error)) return redacted;
+  // `name`, `message`, and `stack` are non-enumerable on an Error, so the
+  // projection above drops them — and for a transport failure they are the ONLY
+  // diagnostic (a native fetch TypeError has no enumerable own property at
+  // all). Carry them explicitly, with the message scrubbed the same way the
+  // HTTP summary scrubs a body: a library that quotes a rejected field in its
+  // message must not smuggle the value back in through the cause.
+  return {
+    ...redacted,
+    name: cause.name,
+    // oxlint-disable-next-line executor/no-unknown-error-message -- boundary: narrowed to Error above; the message is scrubbed, not interpreted
+    message: redactTokenEndpointBody(cause.message),
+    ...(cause.stack === undefined ? {} : { stack: cause.stack }),
+  };
+};
+
 const tokenEndpointHttpSummary = async (response: Response): Promise<string> => {
   const status = `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`;
   const contentType = response.headers.get("content-type");
@@ -359,7 +438,7 @@ const toOAuth2Error = (cause: unknown): OAuth2Error => {
     return new OAuth2Error({
       message: `OAuth token exchange failed: ${description ?? code ?? "unknown error"}`,
       error: code,
-      cause,
+      cause: redactErrorCause(cause),
     });
   }
   return new OAuth2Error({
@@ -379,7 +458,7 @@ const toOAuth2ErrorWithHttpSummary = (cause: unknown): Effect.Effect<OAuth2Error
         new OAuth2Error({
           message: `${base.message} (${summary})`,
           error: base.error,
-          cause,
+          cause: base.cause,
         }),
     ),
   );
@@ -467,19 +546,22 @@ const oauth4webapiRequestOptions = (
 // public rather than failing on the malformed row. The `method` only chooses
 // HOW a present secret is sent (post vs basic).
 const pickClientAuth = (
-  clientSecret: string | null | undefined,
+  clientSecret: OAuth2SecretInput | null | undefined,
   method: ClientAuthMethod,
 ): oauth.ClientAuth => {
   if (clientSecret == null) return oauth.None();
-  return method === "basic"
-    ? oauth.ClientSecretBasic(clientSecret)
-    : oauth.ClientSecretPost(clientSecret);
+  // Boundary: oauth4webapi puts the secret in the form body / Basic header.
+  const secret = secretToSend(clientSecret);
+  return method === "basic" ? oauth.ClientSecretBasic(secret) : oauth.ClientSecretPost(secret);
 };
 
 const tokenResponseFrom = (r: oauth.TokenEndpointResponse): OAuth2TokenResponse => ({
-  access_token: r.access_token,
+  access_token: Redacted.make(r.access_token),
   token_type: r.token_type,
-  refresh_token: r.refresh_token,
+  // Presence is `undefined`, never falsiness: `Redacted.make("")` is truthy, so
+  // every downstream test asks whether the field is present. oauth4webapi has
+  // already rejected an empty `refresh_token` by this point.
+  refresh_token: r.refresh_token === undefined ? undefined : Redacted.make(r.refresh_token),
   expires_in: typeof r.expires_in === "number" ? r.expires_in : undefined,
   scope: r.scope,
 });
@@ -578,10 +660,10 @@ export type ExchangeAuthorizationCodeInput = {
   readonly tokenUrl: string;
   readonly issuerUrl?: string | null;
   readonly clientId: string;
-  readonly clientSecret?: string | null;
+  readonly clientSecret?: OAuth2SecretInput | null;
   readonly redirectUrl: string;
-  readonly codeVerifier: string;
-  readonly code: string;
+  readonly codeVerifier: OAuth2SecretInput;
+  readonly code: OAuth2SecretInput;
   readonly clientAuth?: ClientAuthMethod;
   readonly idTokenSigningAlgValuesSupported?: readonly string[];
   /** RFC 8707 Resource Indicator. MCP Auth spec MUST-requires this on
@@ -612,10 +694,11 @@ export const exchangeAuthorizationCode = (
       // takes the `code` directly (the UI already validated `state` by
       // looking up the session), so skip the library's state-validation
       // rail and go through the generic grant request instead.
+      // Boundary: both go out as RFC 6749 form fields.
       const params = new URLSearchParams({
-        code: input.code,
+        code: secretToSend(input.code),
         redirect_uri: input.redirectUrl,
-        code_verifier: input.codeVerifier,
+        code_verifier: secretToSend(input.codeVerifier),
       });
       if (input.resource) {
         params.set("resource", input.resource);
@@ -647,7 +730,7 @@ export type ExchangeClientCredentialsInput = {
   readonly clientId: string;
   /** Null for a client the AS registered without a secret; the grant then goes
    *  out unauthenticated and the AS decides. Never `""` — see `OAuthClient`. */
-  readonly clientSecret: string | null;
+  readonly clientSecret: OAuth2SecretInput | null;
   readonly scopes?: readonly string[];
   readonly scopeSeparator?: string;
   readonly clientAuth?: ClientAuthMethod;
@@ -703,8 +786,8 @@ export type RefreshAccessTokenInput = {
   readonly tokenUrl: string;
   readonly issuerUrl?: string | null;
   readonly clientId: string;
-  readonly clientSecret?: string | null;
-  readonly refreshToken: string;
+  readonly clientSecret?: OAuth2SecretInput | null;
+  readonly refreshToken: OAuth2SecretInput;
   readonly scopes?: readonly string[];
   readonly scopeSeparator?: string;
   readonly clientAuth?: ClientAuthMethod;
@@ -745,7 +828,8 @@ export const refreshAccessToken = (
         as,
         client,
         clientAuth,
-        input.refreshToken,
+        // Boundary: goes out as the `refresh_token` form field.
+        secretToSend(input.refreshToken),
         {
           ...oauth4webapiRequestOptions(
             input.tokenUrl,

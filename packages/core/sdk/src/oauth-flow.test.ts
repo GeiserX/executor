@@ -1331,6 +1331,155 @@ describe("oauth client secret presence", () => {
   );
 });
 
+// ---------------------------------------------------------------------------
+// Persisted bytes.
+//
+// A missed unwrap on a WRITE path does not throw: `Redacted`'s toString/toJSON
+// render "<redacted>", so the literal is stored and the failure only surfaces
+// later, as an authorization error against a provider. These assert the stored
+// value, not the in-memory one — the in-memory half is covered in
+// `oauth-helpers.test.ts`.
+// ---------------------------------------------------------------------------
+
+describe("OAuth material persists as its value, never as the redaction marker", () => {
+  it.effect("the minted access + refresh tokens and the PKCE verifier store literally", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const server = yield* serveOAuthTestServer({ scopes: ["read"] });
+        const { config, executor } = yield* makeTestWorkspaceHarness({ plugins });
+        yield* executor.acme.seed(["read"]);
+
+        yield* executor.oauth.createClient({
+          owner: "org",
+          slug: CLIENT,
+          authorizationUrl: server.authorizationEndpoint,
+          tokenUrl: server.tokenEndpoint,
+          grant: "authorization_code",
+          clientId: "test-client",
+          clientSecret: "test-secret",
+        });
+
+        const started = yield* executor.oauth.start({
+          owner: "org",
+          client: CLIENT,
+          clientOwner: "org",
+          name: ConnectionName.make("main"),
+          integration: INTEG,
+          template: TEMPLATE,
+        });
+        expect(started.status).toBe("redirect");
+        if (started.status !== "redirect") return;
+
+        // The session's PKCE verifier is written by `start`. If it stored
+        // "<redacted>" the exchange below would fail RFC 7636 validation — but
+        // assert the column too, so the reason is legible when it does.
+        const sessionRow = yield* Effect.promise(() =>
+          config.db.findFirst("oauth_session", {
+            where: (b) => b("state", "=", String(started.state)),
+          }),
+        );
+        const storedVerifier = String(sessionRow?.pkce_verifier);
+        expect(storedVerifier).not.toBe("<redacted>");
+        expect(storedVerifier).toMatch(/^[A-Za-z0-9_-]{43,128}$/);
+
+        const callback = yield* server.completeAuthorizationCodeFlow({
+          authorizationUrl: started.authorizationUrl,
+        });
+        yield* executor.oauth.complete({ state: started.state, code: callback.code });
+
+        // The stored access token is the one the AS issued: the tool echoes the
+        // resolved credential, and the server still honours it.
+        const echoed = (yield* executor.execute(
+          ToolAddress.make("tools.acme.org.main.whoami"),
+          {},
+        )) as { token: string };
+        expect(echoed.token).not.toBe("<redacted>");
+        expect(echoed.token).toMatch(/^at_/);
+        expect(yield* server.acceptsAccessToken(echoed.token)).toBe(true);
+
+        // The refresh token is stored under its own item id and must be equally
+        // literal — nothing reads it until a refresh, so a "<redacted>" write
+        // here would lie dormant until the access token first expired.
+        const connectionRow = yield* Effect.promise(() =>
+          config.db.findFirst("connection", { where: (b) => b("name", "=", "main") }),
+        );
+        expect(connectionRow?.refresh_item_id ?? null).not.toBeNull();
+
+        // Force expiry so the refresh grant runs against the stored refresh
+        // token. The AS matches it by exact string, so a grant that succeeds is
+        // proof the token round-tripped through the provider byte for byte.
+        yield* Effect.promise(() =>
+          config.db.updateMany("connection", {
+            where: (b) => b("name", "=", "main"),
+            set: { expires_at: Date.now() - 60_000 },
+          }),
+        );
+        const refreshed = (yield* executor.execute(
+          ToolAddress.make("tools.acme.org.main.whoami"),
+          {},
+        )) as { token: string };
+        expect(refreshed.token).not.toBe("<redacted>");
+        expect(refreshed.token).toMatch(/^at_/);
+        expect(refreshed.token).not.toBe(echoed.token);
+        expect(yield* server.acceptsAccessToken(refreshed.token)).toBe(true);
+      }),
+    ),
+  );
+
+  it.effect("a DCR-minted client secret authenticates instead of storing <redacted>", () =>
+    // The DCR secret is decoded straight out of the registration response into
+    // a `Redacted` field, then written to the provider and later posted to the
+    // token endpoint. A missed unwrap anywhere on that path stores the marker
+    // and the AS rejects the grant with `invalid_client`.
+    Effect.scoped(
+      Effect.gen(function* () {
+        const server = yield* serveOAuthTestServer({ scopes: ["read"] });
+        const { config, executor } = yield* makeTestWorkspaceHarness({ plugins });
+        yield* executor.acme.seed(["read"]);
+
+        const slug = yield* executor.oauth.registerDynamicClient({
+          owner: "org",
+          slug: CLIENT,
+          issuer: server.issuerUrl,
+          registrationEndpoint: server.registrationEndpoint,
+          authorizationUrl: server.authorizationEndpoint,
+          tokenUrl: server.tokenEndpoint,
+          scopes: ["read"],
+          // Advertising no `none` makes DCR register a CONFIDENTIAL client, so
+          // the server mints a secret we must carry back to /token.
+          tokenEndpointAuthMethodsSupported: ["client_secret_post"],
+        });
+
+        const row = yield* Effect.promise(() =>
+          config.db.findFirst("oauth_client", { where: (b) => b("slug", "=", String(slug)) }),
+        );
+        expect(row?.client_secret_item_id ?? null).not.toBeNull();
+
+        const started = yield* executor.oauth.start({
+          owner: "org",
+          client: slug,
+          clientOwner: "org",
+          name: ConnectionName.make("main"),
+          integration: INTEG,
+          template: TEMPLATE,
+        });
+        expect(started.status).toBe("redirect");
+        if (started.status !== "redirect") return;
+        const callback = yield* server.completeAuthorizationCodeFlow({
+          authorizationUrl: started.authorizationUrl,
+        });
+        // The exchange succeeding IS the assertion: the test server rejects a
+        // mismatched client_secret with invalid_client.
+        yield* executor.oauth.complete({ state: started.state, code: callback.code });
+
+        const grant = tokenGrantBodies(yield* server.requests).at(0);
+        expect(grant?.get("client_secret")).not.toBe("<redacted>");
+        expect(grant?.get("client_secret") ?? "").not.toBe("");
+      }),
+    ),
+  );
+});
+
 describe("oauth.probe error message sanitization", () => {
   it.effect("echoes the probed URL without its query string or userinfo", () =>
     // The probe URL is a raw user paste and a supported credential carrier (an

@@ -18,7 +18,18 @@
 // call callers actually need.
 // ---------------------------------------------------------------------------
 
-import { Data, Duration, Effect, Layer, Option, Predicate, Result, Schema } from "effect";
+import {
+  Data,
+  Duration,
+  Effect,
+  Layer,
+  Option,
+  Predicate,
+  Redacted,
+  Result,
+  Schema,
+  SchemaGetter,
+} from "effect";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http";
 
 import {
@@ -27,6 +38,7 @@ import {
   buildAuthorizationUrl,
   createPkceCodeChallenge,
   createPkceCodeVerifier,
+  type OAuth2SecretInput,
   type OAuthEndpointUrlPolicy,
 } from "./oauth-helpers";
 
@@ -106,12 +118,28 @@ export type DynamicClientMetadata = {
   readonly extra?: Readonly<Record<string, unknown>>;
 };
 
+/** A bidirectional string ⇄ `Redacted<string>` codec. `Schema.Redacted` and
+ *  `Schema.RedactedFromValue` forbid encoding, which would make any struct
+ *  carrying one decode-only; DCR client information round-trips (it is cached
+ *  and replayed through `previousState`), so the encode side is required. */
+const RedactedString = Schema.String.pipe(
+  Schema.decodeTo(Schema.Redacted(Schema.String), {
+    decode: SchemaGetter.transform(Redacted.make<string>),
+    encode: SchemaGetter.transform(Redacted.value<string>),
+  }),
+);
+
 export const OAuthClientInformationSchema = Schema.Struct({
   client_id: Schema.String,
-  client_secret: Schema.optional(Schema.String),
+  /** Minted by the AS for a confidential DCR client. Redacted from the moment
+   *  the registration response is decoded — it is posted to the token endpoint
+   *  and stored in the credential provider, and reaches nothing else. */
+  client_secret: Schema.optional(RedactedString),
   client_id_issued_at: Schema.optional(Schema.Number),
   client_secret_expires_at: Schema.optional(Schema.Number),
-  registration_access_token: Schema.optional(Schema.String),
+  /** RFC 7592 bearer token for the client's own registration resource — as
+   *  privileged as the client secret. */
+  registration_access_token: Schema.optional(RedactedString),
   registration_client_uri: Schema.optional(Schema.String),
   token_endpoint_auth_method: Schema.optional(Schema.String),
   grant_types: Schema.optional(StringArray),
@@ -413,7 +441,7 @@ export const discoverAuthorizationServerMetadata = (
 export interface RegisterDynamicClientInput {
   readonly registrationEndpoint: string;
   readonly metadata: DynamicClientMetadata;
-  readonly initialAccessToken?: string | null;
+  readonly initialAccessToken?: OAuth2SecretInput | null;
 }
 
 // Internal failure modes — collapsed into `OAuthDiscoveryError` at the
@@ -513,8 +541,12 @@ export const registerDynamicClient = (
       "content-type": "application/json",
       accept: "application/json",
     };
-    if (input.initialAccessToken) {
-      headers.authorization = `Bearer ${input.initialAccessToken}`;
+    if (input.initialAccessToken != null) {
+      // Boundary: the RFC 7591 initial access token goes out as a bearer header.
+      const token = Redacted.isRedacted(input.initialAccessToken)
+        ? Redacted.value(input.initialAccessToken)
+        : input.initialAccessToken;
+      if (token.length > 0) headers.authorization = `Bearer ${token}`;
     }
 
     let request = HttpClientRequest.post(input.registrationEndpoint).pipe(
@@ -661,7 +693,9 @@ export interface DynamicAuthorizationState {
 
 export interface DynamicAuthorizationStartResult {
   readonly authorizationUrl: string;
-  readonly codeVerifier: string;
+  /** Grant material — the caller holds it until the matching token exchange.
+   *  Unwrap only at that exchange or at the line that persists it. */
+  readonly codeVerifier: Redacted.Redacted<string>;
   readonly state: DynamicAuthorizationState;
 }
 

@@ -1531,17 +1531,16 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         // Null means "public client, send no client_secret" — both for a row
         // that never had one and for a confidential row whose vault item is
         // gone, which the AS then rejects loudly instead of us guessing.
-        // Boundary: the OAuth 2.1 helpers take a bare `client_secret` (it is
-        // posted to the token endpoint by oauth4webapi). Unwrap BEFORE
-        // presence-normalizing — `Redacted.make("")` is truthy, so an emptiness
-        // test on the wrapper would read a public client as confidential.
+        // It stays wrapped all the way to the OAuth 2.1 helpers, which unwrap
+        // at the oauth4webapi call. Presence is normalized on the UNWRAPPED
+        // value — `Redacted.make("")` is truthy, so an emptiness test on the
+        // wrapper would read a public client as confidential.
         const storedClientSecret =
           clientRow.client_secret_item_id == null
             ? null
             : yield* provider.get(ProviderItemId.make(String(clientRow.client_secret_item_id)));
-        const clientSecret = oauthClientSecretFromInput(
-          storedClientSecret === null ? null : Redacted.value(storedClientSecret),
-        );
+        const clientSecret =
+          storedClientSecret === null ? null : oauthClientSecretFromInput(storedClientSecret);
         // Re-request the scopes this connection was GRANTED (RFC 6749 §6: a
         // refresh must not exceed the originally-granted scope). Empty → omit
         // the param, which the AS treats as "same scopes as granted".
@@ -1600,9 +1599,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
                   tokenUrl,
                   clientId: String(clientRow.client_id),
                   clientSecret,
-                  // Boundary: the refresh-token grant posts the token as a form
-                  // field, so the helper takes it bare.
-                  refreshToken: Redacted.value(refreshToken),
+                  refreshToken,
                   scopes: grantedScopes,
                   // RFC 8707: keep the re-minted token bound to the same resource
                   // (MCP servers require this on refresh).
@@ -1647,8 +1644,10 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
           const tokenItemId =
             connectionItemIds(row)[PRIMARY_INPUT_VARIABLE] ??
             `connection:${row.owner}:${row.integration}:${row.name}:${PRIMARY_INPUT_VARIABLE}`;
+          // `provider.set` accepts `Redacted` and unwraps at its own write line.
           yield* provider.set(ProviderItemId.make(tokenItemId), token.access_token);
-          if (token.refresh_token && row.refresh_item_id) {
+          // Presence, not truthiness — every `Redacted` is truthy.
+          if (token.refresh_token !== undefined && row.refresh_item_id) {
             yield* provider.set(ProviderItemId.make(row.refresh_item_id), token.refresh_token);
           }
         }
@@ -1670,7 +1669,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
           set,
         });
 
-        return Redacted.make(token.access_token);
+        return token.access_token;
       });
 
     const refreshConnectionToken = (

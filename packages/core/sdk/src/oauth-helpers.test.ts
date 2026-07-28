@@ -6,7 +6,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, Exit, Ref } from "effect";
+import { Effect, Exit, Logger, Redacted, Ref } from "effect";
 import { HttpServerResponse } from "effect/unstable/http";
 
 import {
@@ -15,6 +15,7 @@ import {
   OAuth2Error,
   buildAuthorizationUrl,
   providerAuthorizeExtras,
+  createOAuthState,
   createPkceCodeChallenge,
   createPkceCodeVerifier,
   exchangeAuthorizationCode,
@@ -99,6 +100,11 @@ const tokenResponse =
   () =>
     json(200, body);
 
+/** Assert on the token VALUE, not on `Redacted`'s "<redacted>" rendering — a
+ *  `toBe` against the wrapper would pass for any implementation. */
+const secretOf = (value: Redacted.Redacted<string> | undefined): string | undefined =>
+  value === undefined ? undefined : Redacted.value(value);
+
 // ---------------------------------------------------------------------------
 // PKCE
 // ---------------------------------------------------------------------------
@@ -106,7 +112,7 @@ const tokenResponse =
 describe("PKCE", () => {
   it("createPkceCodeVerifier returns a base64url string in the RFC 7636 length range", () => {
     for (let i = 0; i < 25; i++) {
-      const verifier = createPkceCodeVerifier();
+      const verifier = Redacted.value(createPkceCodeVerifier());
       expect(verifier).toMatch(/^[A-Za-z0-9_-]+$/);
       expect(verifier.length).toBeGreaterThanOrEqual(43);
       expect(verifier.length).toBeLessThanOrEqual(128);
@@ -117,12 +123,25 @@ describe("PKCE", () => {
     const verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     const expected = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
     expect(await createPkceCodeChallenge(verifier)).toBe(expected);
+    // A wrapped verifier hashes identically — the challenge is computed from
+    // the value, not from `Redacted`'s "<redacted>" rendering.
+    expect(await createPkceCodeChallenge(Redacted.make(verifier))).toBe(expected);
   });
 
   it("createPkceCodeVerifier produces unique values", () => {
     const seen = new Set<string>();
-    for (let i = 0; i < 50; i++) seen.add(createPkceCodeVerifier());
+    for (let i = 0; i < 50; i++) seen.add(Redacted.value(createPkceCodeVerifier()));
     expect(seen.size).toBe(50);
+  });
+
+  it("PKCE and state material serializes as <redacted> rather than its value", () => {
+    // These are minted long before they reach a DB column or an authorize URL,
+    // so anything that stringifies them in between (a log line, a span
+    // attribute, a session dump) must not print the grant material.
+    for (const secret of [createPkceCodeVerifier(), createOAuthState()]) {
+      expect(JSON.stringify({ secret })).toBe('{"secret":"<redacted>"}');
+      expect(String(secret)).not.toContain(Redacted.value(secret));
+    }
   });
 });
 
@@ -259,7 +278,7 @@ describe("exchangeAuthorizationCode", () => {
           codeVerifier: "verifier",
           code: "abc",
         });
-        expect(result.access_token).toBe("tok");
+        expect(secretOf(result.access_token)).toBe("tok");
         const call = (yield* calls)[0]!;
         expect(call.method).toBe("POST");
         expect(call.headers["content-type"]).toMatch(/^application\/x-www-form-urlencoded/);
@@ -398,8 +417,8 @@ describe("exchangeAuthorizationCode", () => {
             codeVerifier: "verifier",
             code: "abc",
           });
-          expect(result.access_token).toBe("tok");
-          expect(result.refresh_token).toBe("rtok");
+          expect(secretOf(result.access_token)).toBe("tok");
+          expect(secretOf(result.refresh_token)).toBe("rtok");
           expect(result.idTokenIdentityLabel).toBe("user-1");
         }),
     ),
@@ -473,7 +492,7 @@ describe("exchangeAuthorizationCode", () => {
             codeVerifier: "verifier",
             code: "abc",
           });
-          expect(result.access_token).toBe("tok");
+          expect(secretOf(result.access_token)).toBe("tok");
           expect(result.idTokenIdentityLabel).toBeUndefined();
         }),
     ),
@@ -501,7 +520,7 @@ describe("exchangeAuthorizationCode", () => {
             codeVerifier: "verifier",
             code: "abc",
           });
-          expect(result.access_token).toBe("tok");
+          expect(secretOf(result.access_token)).toBe("tok");
         }),
     ),
   );
@@ -516,8 +535,8 @@ describe("exchangeAuthorizationCode", () => {
           codeVerifier: "verifier",
           code: "abc",
         });
-        expect(result.access_token).toBe("tok");
-        expect(result.refresh_token).toBe("rtok");
+        expect(secretOf(result.access_token)).toBe("tok");
+        expect(secretOf(result.refresh_token)).toBe("rtok");
         expect(result.expires_in).toBe(3600);
         expect(result.idTokenIdentityLabel).toBeUndefined();
       }),
@@ -577,8 +596,8 @@ describe("exchangeAuthorizationCode", () => {
             codeVerifier: "verifier",
             code: "abc",
           });
-          expect(result.access_token).toBe("tok");
-          expect(result.refresh_token).toBe("rtok");
+          expect(secretOf(result.access_token)).toBe("tok");
+          expect(secretOf(result.refresh_token)).toBe("rtok");
         }),
     ),
   );
@@ -976,7 +995,7 @@ describe("refreshAccessToken", () => {
             clientId: "cid",
             refreshToken: "old",
           });
-          expect(result.access_token).toBe("tok2");
+          expect(secretOf(result.access_token)).toBe("tok2");
         }),
     ),
   );
@@ -1004,7 +1023,7 @@ describe("refreshAccessToken", () => {
             clientId: "cid",
             refreshToken: "old",
           });
-          expect(result.access_token).toBe("tok2");
+          expect(secretOf(result.access_token)).toBe("tok2");
         }),
     ),
   );
@@ -1017,10 +1036,205 @@ describe("refreshAccessToken", () => {
           clientId: "cid",
           refreshToken: "old",
         });
-        expect(result.access_token).toBe("tok2");
+        expect(secretOf(result.access_token)).toBe("tok2");
         expect(result.expires_in).toBe(3600);
       }),
     ),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Token material is Redacted end to end.
+//
+// Two halves, both required: the WIRE half (the secret still reaches the token
+// endpoint byte for byte, so the wrapping is not merely decorative) and the
+// LEAK half (a failed exchange's error and log output quotes neither the tokens
+// the caller sent nor the ones the AS echoed back). Either half alone passes
+// trivially for a broken implementation.
+// ---------------------------------------------------------------------------
+
+// Synthetic — not shaped like any real provider's token.
+const SENT_REFRESH = "synthetic-sent-refresh-value";
+const SENT_SECRET = "synthetic-sent-client-secret";
+const ECHOED_ACCESS = "synthetic-echoed-access-value";
+const ECHOED_REFRESH = "synthetic-echoed-refresh-value";
+
+describe("OAuth token material as Redacted", () => {
+  it.effect("a wrapped refresh token and client secret reach the token endpoint intact", () =>
+    withTokenEndpoint(tokenResponse(validRefreshBody), ({ tokenUrl, calls }) =>
+      Effect.gen(function* () {
+        yield* refreshAccessToken({
+          tokenUrl,
+          clientId: "cid",
+          clientSecret: Redacted.make(SENT_SECRET),
+          refreshToken: Redacted.make(SENT_REFRESH),
+        });
+        const body = (yield* calls)[0]!.body;
+        expect(body.get("refresh_token")).toBe(SENT_REFRESH);
+        expect(body.get("client_secret")).toBe(SENT_SECRET);
+      }),
+    ),
+  );
+
+  it.effect("a wrapped code and PKCE verifier reach the token endpoint intact", () =>
+    withTokenEndpoint(tokenResponse(validCodeBody), ({ tokenUrl, calls }) =>
+      Effect.gen(function* () {
+        yield* exchangeAuthorizationCode({
+          tokenUrl,
+          clientId: "cid",
+          clientSecret: Redacted.make(SENT_SECRET),
+          redirectUrl: "https://app.example.com/cb",
+          codeVerifier: Redacted.make("synthetic-verifier-value"),
+          code: Redacted.make("synthetic-code-value"),
+        });
+        const body = (yield* calls)[0]!.body;
+        expect(body.get("code")).toBe("synthetic-code-value");
+        expect(body.get("code_verifier")).toBe("synthetic-verifier-value");
+        expect(body.get("client_secret")).toBe(SENT_SECRET);
+      }),
+    ),
+  );
+
+  it.effect("a successful exchange returns tokens that serialize as <redacted>", () =>
+    // Distinct synthetic values rather than the shared `validCodeBody` fixture:
+    // its "tok" is a substring of the `token_type` key, so a not-to-contain
+    // assertion against it could never be trusted.
+    withTokenEndpoint(
+      tokenResponse({
+        access_token: ECHOED_ACCESS,
+        token_type: "Bearer",
+        refresh_token: ECHOED_REFRESH,
+        expires_in: 3600,
+      }),
+      ({ tokenUrl }) =>
+        Effect.gen(function* () {
+          const result = yield* exchangeAuthorizationCode({
+            tokenUrl,
+            clientId: "cid",
+            redirectUrl: "https://app.example.com/cb",
+            codeVerifier: "v",
+            code: "c",
+          });
+          // The values survive an explicit unwrap …
+          expect(secretOf(result.access_token)).toBe(ECHOED_ACCESS);
+          expect(secretOf(result.refresh_token)).toBe(ECHOED_REFRESH);
+          // … but a caller that forgets one serializes the marker, not the token.
+          const serialized = JSON.stringify(result);
+          expect(serialized).toContain('"access_token":"<redacted>"');
+          expect(serialized).toContain('"refresh_token":"<redacted>"');
+          expect(serialized).not.toContain(ECHOED_ACCESS);
+          expect(serialized).not.toContain(ECHOED_REFRESH);
+        }),
+    ),
+  );
+
+  it.effect("an AS that returns no refresh_token yields undefined, not a wrapped empty", () =>
+    // Presence must survive the wrapping: `Redacted.make("")` is truthy, so a
+    // downstream truthiness test on the field would report a refresh token that
+    // does not exist and mark the connection refreshable when it is not.
+    withTokenEndpoint(
+      tokenResponse({ access_token: "tok", token_type: "Bearer", expires_in: 3600 }),
+      ({ tokenUrl }) =>
+        Effect.gen(function* () {
+          const result = yield* exchangeAuthorizationCode({
+            tokenUrl,
+            clientId: "cid",
+            redirectUrl: "https://app.example.com/cb",
+            codeVerifier: "v",
+            code: "c",
+          });
+          expect(result.refresh_token).toBeUndefined();
+          expect(Redacted.isRedacted(result.access_token)).toBe(true);
+        }),
+    ),
+  );
+
+  it.effect("a failed exchange leaks neither the sent nor the echoed token material", () =>
+    // The token endpoint echoes the grant it rejected, and the failure summary
+    // quotes that body. This is the silent-failure shape the whole change
+    // exists for: the error reaches a user-visible message AND the log, so
+    // assert against both renderings of the failure.
+    withTokenEndpoint(
+      () =>
+        json(400, {
+          error: "invalid_grant",
+          error_description: "Refresh token is no longer valid",
+          refresh_token: ECHOED_REFRESH,
+          access_token: ECHOED_ACCESS,
+        }),
+      ({ tokenUrl }) =>
+        Effect.gen(function* () {
+          // `Effect.flip` keeps the failure typed as `OAuth2Error` — the tagged
+          // error carries `message` and `error` as declared fields.
+          const error = yield* Effect.flip(
+            refreshAccessToken({
+              tokenUrl,
+              clientId: "cid",
+              clientSecret: Redacted.make(SENT_SECRET),
+              refreshToken: Redacted.make(SENT_REFRESH),
+            }),
+          );
+          // The diagnostic that makes the failure worth surfacing survives.
+          expect(error.error).toBe("invalid_grant");
+          // oxlint-disable-next-line executor/no-unknown-error-message -- boundary: OAuth2Error carries a typed `message`; the leak test asserts on its rendering
+          expect(error.message).toContain("Refresh token is no longer valid");
+
+          // The rendering a log actually emits: the error goes through the
+          // logger's own cause serialization, not a hand-rolled stringify.
+          const logged = yield* Effect.gen(function* () {
+            const lines = yield* Ref.make<readonly string[]>([]);
+            yield* Effect.logError("OAuth token refresh failed", error).pipe(
+              Effect.provide(
+                Logger.layer([
+                  Logger.make((options) =>
+                    Effect.runSync(
+                      Ref.update(lines, (all) => [
+                        ...all,
+                        `${options.message} ${String(options.cause)}`,
+                      ]),
+                    ),
+                  ),
+                ]),
+              ),
+            );
+            return (yield* Ref.get(lines)).join("\n");
+          });
+
+          // oxlint-disable-next-line executor/no-unknown-error-message -- boundary: OAuth2Error carries a typed `message`; the leak test asserts on its rendering
+          for (const rendering of [error.message, JSON.stringify(error), logged]) {
+            for (const secret of [
+              SENT_REFRESH,
+              SENT_SECRET,
+              ECHOED_ACCESS,
+              ECHOED_REFRESH,
+            ] as const) {
+              expect(rendering).not.toContain(secret);
+            }
+          }
+        }),
+    ),
+  );
+
+  it.effect("redacting the cause keeps a transport failure's own diagnostics", () =>
+    // A native fetch failure has NO enumerable own property — its name,
+    // message, and stack are all non-enumerable — so projecting the cause
+    // through a plain object walk silently reduces it to `{}`. Redaction must
+    // not cost the only diagnostic a connection-refused failure has.
+    Effect.gen(function* () {
+      const error = yield* Effect.flip(
+        exchangeAuthorizationCode({
+          tokenUrl: "http://127.0.0.1:1/token",
+          clientId: "cid",
+          redirectUrl: "https://cb",
+          codeVerifier: "v",
+          code: "c",
+          timeoutMs: 100,
+        }),
+      );
+      expect(Object.keys(error.cause as object)).toEqual(
+        expect.arrayContaining(["name", "message"]),
+      );
+    }),
   );
 });
 
