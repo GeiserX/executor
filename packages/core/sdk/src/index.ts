@@ -412,3 +412,7 @@ export {
   insufficientScopeFromEmbeddedJson,
   type InsufficientScopeDetection,
 } from "./insufficient-scope";
+
+// Endpoint sanitization for span attributes — plugins stamping a user-supplied
+// endpoint must strip its credential-bearing parts first.
+export { endpointForTelemetry, endpointTelemetryAttributes } from "./telemetry-endpoint";
