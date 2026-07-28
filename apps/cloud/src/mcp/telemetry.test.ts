@@ -5,21 +5,27 @@ import type * as Tracer from "effect/Tracer";
 import { annotateMcpRequest } from "./telemetry";
 
 // A tracer that records attributes per span so the test can assert what
-// `annotateMcpRequest` stamps on the active request span.
+// `annotateMcpRequest` stamps on the active request span. One record per span
+// creation (never keyed by name) so same-named spans stay distinct.
+type RecordedSpan = {
+  readonly name: string;
+  readonly attributes: ReadonlyMap<string, unknown>;
+};
+
 const makeRecordingTracer = (): {
   tracer: Tracer.Tracer;
   attributesOf: (name: string) => ReadonlyMap<string, unknown> | undefined;
 } => {
-  const spans = new Map<string, Map<string, unknown>>();
+  const spans: RecordedSpan[] = [];
   const tracer: Tracer.Tracer = {
     span: (options) => {
-      const attributes = spans.get(options.name) ?? new Map<string, unknown>();
-      spans.set(options.name, attributes);
+      const attributes = new Map<string, unknown>();
+      spans.push({ name: options.name, attributes });
       let status: Tracer.SpanStatus = { _tag: "Started", startTime: options.startTime };
       return {
         _tag: "Span",
         name: options.name,
-        spanId: `span-${spans.size}`,
+        spanId: `span-${spans.length}`,
         traceId: "trace-1",
         parent: options.parent,
         annotations: options.annotations,
@@ -41,7 +47,11 @@ const makeRecordingTracer = (): {
       };
     },
   };
-  return { tracer, attributesOf: (name) => spans.get(name) };
+  return { tracer, attributesOf: (name) => spans.find((span) => span.name === name)?.attributes };
+};
+
+const expectDefined: <T>(value: T) => asserts value is NonNullable<T> = (value) => {
+  expect(value).toBeDefined();
 };
 
 const postRequest = (body: unknown): Request =>
@@ -65,7 +75,8 @@ describe("annotateMcpRequest — cancellation join keys", () => {
           params: { requestId: 42, reason: "client timeout" },
         }),
       );
-      const attributes = attributesOf("mcp.request")!;
+      const attributes = attributesOf("mcp.request");
+      expectDefined(attributes);
       expect(attributes.get("mcp.rpc.method")).toBe("notifications/cancelled");
       expect(attributes.get("mcp.rpc.cancelled_id")).toBe("42");
       expect(attributes.get("mcp.rpc.cancelled_reason")).toBe("client timeout");
@@ -84,7 +95,8 @@ describe("annotateMcpRequest — cancellation join keys", () => {
           params: { name: "execute" },
         }),
       );
-      const attributes = attributesOf("mcp.request")!;
+      const attributes = attributesOf("mcp.request");
+      expectDefined(attributes);
       expect(attributes.get("mcp.rpc.id")).toBe("7");
       expect(attributes.get("mcp.tool.name")).toBe("execute");
       expect(attributes.get("mcp.rpc.cancelled_id")).toBeUndefined();

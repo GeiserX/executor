@@ -657,25 +657,29 @@ const extractInventory = (description: string): string => {
 //      (`mcp.rpc.id`, `mcp.request.session_id`), so a client's
 //      `notifications/cancelled` — which names the cancelled request id — can
 //      be joined to the exact call it gave up on.
-//   2. A zero-duration start marker span is emitted the moment execution
-//      begins. It ends (and therefore exports) immediately, so a start marker
-//      without a matching completion span is a true positive for an execution
-//      that died mid-flight.
+//   2. A zero-duration start marker span (`<completion span name>.start`, a
+//      1:1 pairing so "started without finishing" is a single unambiguous
+//      query) is emitted the moment execution begins. It ends immediately, so
+//      it becomes exportable while the execution is still running; whether it
+//      actually ships before a kill depends on the host's span processor
+//      draining first (cloud batches on a 1s timer, so markers for executions
+//      that survive >1s export, sub-second kills can still lose theirs). A
+//      start marker without a matching completion span is a true positive for
+//      an execution that died mid-flight.
 
 type McpRequestJoinKeys = {
   readonly requestId: string | number;
   readonly sessionId?: string | undefined;
 };
 
-const joinKeyAttributes = (extra: McpRequestJoinKeys): Record<string, unknown> => ({
-  "mcp.rpc.id": String(extra.requestId),
-  ...(extra.sessionId ? { "mcp.request.session_id": extra.sessionId } : {}),
+// `mcp.request.session_id` is emitted unconditionally (empty string when the
+// transport carries none) to match the worker-side `annotateMcpRequest`
+// producer: JSON-RPC ids are small per-session integers, so a row without the
+// session key would make `mcp.rpc.id` globally ambiguous.
+const joinKeyAttributes = (joinKeys: McpRequestJoinKeys): Record<string, unknown> => ({
+  "mcp.rpc.id": String(joinKeys.requestId),
+  "mcp.request.session_id": joinKeys.sessionId ?? "",
 });
-
-const withJoinKeys = <A, EffE>(
-  effect: Effect.Effect<A, EffE>,
-  extra: McpRequestJoinKeys,
-): Effect.Effect<A, EffE> => Effect.annotateSpans(effect, joinKeyAttributes(extra));
 
 const startMarker = (name: string, attributes: Record<string, unknown>): Effect.Effect<void> =>
   Effect.void.pipe(Effect.withSpan(name, { attributes }));
@@ -847,7 +851,7 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
             "mcp.execute.code_length": code.length,
           },
         }),
-        (effect) => withJoinKeys(effect, extra),
+        Effect.annotateSpans(joinKeyAttributes(extra)),
       );
 
     const resumeExecution = (
@@ -901,7 +905,7 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
             "mcp.execute.execution_id": executionId,
           },
         }),
-        (effect) => withJoinKeys(effect, extra),
+        Effect.annotateSpans(joinKeyAttributes(extra)),
       );
 
     const requireUserResumeApproval = (executionId: string): Effect.Effect<McpToolResult> =>
@@ -950,7 +954,7 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
       extra: McpRequestJoinKeys,
     ): Effect.Effect<McpToolResult, E> =>
       Effect.gen(function* () {
-        yield* startMarker("mcp.host.tool.resume.start", {
+        yield* startMarker("mcp.host.tool.resume.browser_approval.start", {
           "mcp.tool.name": "resume",
           "mcp.execute.execution_id": executionId,
         });
@@ -980,7 +984,7 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
             "mcp.execute.execution_id": executionId,
           },
         }),
-        (effect) => withJoinKeys(effect, extra),
+        Effect.annotateSpans(joinKeyAttributes(extra)),
       );
 
     // --- tools ---

@@ -35,6 +35,10 @@ const expectString: (value: unknown) => asserts value is string = (value) => {
   expect(typeof value).toBe("string");
 };
 
+const expectDefined: <T>(value: T) => asserts value is NonNullable<T> = (value) => {
+  expect(value).toBeDefined();
+};
+
 const makeStubEngine = <E extends Cause.YieldableError = never>(overrides: {
   execute?: ExecutionEngine<E>["execute"];
   executeWithPause?: ExecutionEngine<E>["executeWithPause"];
@@ -54,22 +58,26 @@ const makeStubEngine = <E extends Cause.YieldableError = never>(overrides: {
   getDescription: Effect.succeed(overrides.description ?? "test executor"),
 });
 
+type TestServerConfig<E extends Cause.YieldableError> = Pick<
+  ExecutorMcpServerConfig<E>,
+  | "debug"
+  | "elicitationMode"
+  | "browserApprovalStore"
+  | "pausedExecutionHooks"
+  | "pausedExecutionLeaseMs"
+  | "resumeFallback"
+>;
+
 /** Connect a real MCP Client to our executor MCP server over in-memory transports. */
 const withClient = async <E extends Cause.YieldableError>(
   engine: ExecutionEngine<E>,
   capabilities: ClientCapabilities,
   fn: (client: Client) => Promise<void>,
-  config?: Pick<
-    ExecutorMcpServerConfig<E>,
-    | "debug"
-    | "elicitationMode"
-    | "browserApprovalStore"
-    | "pausedExecutionHooks"
-    | "pausedExecutionLeaseMs"
-    | "resumeFallback"
-  >,
+  config?: TestServerConfig<E> & { readonly tracer?: Tracer.Tracer },
 ) => {
-  const mcpServer = await Effect.runPromise(createExecutorMcpServer({ engine, ...config }));
+  const { tracer, ...serverConfig } = config ?? {};
+  const create = createExecutorMcpServer({ engine, ...serverConfig });
+  const mcpServer = await Effect.runPromise(tracer ? Effect.withTracer(create, tracer) : create);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "test-client", version: "1.0.0" }, { capabilities });
   await mcpServer.connect(serverTransport);
@@ -137,22 +145,10 @@ const makeRecordingTracer = (): { tracer: Tracer.Tracer; spans: RecordedSpan[] }
 const withTracedClient = async <E extends Cause.YieldableError>(
   engine: ExecutionEngine<E>,
   fn: (client: Client, spans: RecordedSpan[]) => Promise<void>,
+  config?: TestServerConfig<E>,
 ) => {
   const { tracer, spans } = makeRecordingTracer();
-  const mcpServer = await Effect.runPromise(
-    createExecutorMcpServer({ engine }).pipe(Effect.withTracer(tracer)),
-  );
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "test-client", version: "1.0.0" }, { capabilities: NO_CAPS });
-  await mcpServer.connect(serverTransport);
-  await client.connect(clientTransport);
-  // oxlint-disable-next-line executor/no-try-catch-or-throw -- boundary: test helper must close MCP transports after async client assertions
-  try {
-    await fn(client, spans);
-  } finally {
-    await clientTransport.close();
-    await serverTransport.close();
-  }
+  await withClient(engine, NO_CAPS, (client) => fn(client, spans), { ...config, tracer });
 };
 
 const ELICITATION_CAPS: ClientCapabilities = {
@@ -1833,18 +1829,22 @@ describe("MCP host server — hang-visibility tracing", () => {
     await withTracedClient(engine, async (client, spans) => {
       await client.callTool({ name: "execute", arguments: { code: "1+1" } });
 
-      // The start marker exports immediately: a start without a matching
-      // completed `mcp.host.tool.execute` is the killed-execution signal.
+      // The start marker ends (becomes exportable) the moment execution
+      // begins: a start without a matching completed `mcp.host.tool.execute`
+      // is the killed-execution signal.
       const start = spans.find((span) => span.name === "mcp.host.tool.execute.start");
-      expect(start).toBeDefined();
-      expect(start!.ended).toBe(true);
-      expect(start!.attributes.get("mcp.rpc.id")).toBeDefined();
+      expectDefined(start);
+      expect(start.ended).toBe(true);
+      expect(start.attributes.get("mcp.rpc.id")).toBeDefined();
+      // Session id is stamped even without a transport session so the rpc id
+      // is never ambiguous across sessions.
+      expect(start.attributes.get("mcp.request.session_id")).toBeDefined();
 
       // The completion span carries the same join key.
       const execute = spans.find((span) => span.name === "mcp.host.tool.execute");
-      expect(execute).toBeDefined();
-      expect(execute!.attributes.get("mcp.rpc.id")).toBe(start!.attributes.get("mcp.rpc.id"));
-      expect(execute!.ended).toBe(true);
+      expectDefined(execute);
+      expect(execute.attributes.get("mcp.rpc.id")).toBe(start.attributes.get("mcp.rpc.id"));
+      expect(execute.ended).toBe(true);
     });
   });
 
@@ -1860,14 +1860,48 @@ describe("MCP host server — hang-visibility tracing", () => {
       });
 
       const start = spans.find((span) => span.name === "mcp.host.tool.resume.start");
-      expect(start).toBeDefined();
-      expect(start!.ended).toBe(true);
-      expect(start!.attributes.get("mcp.execute.execution_id")).toBe("exec-1");
-      expect(start!.attributes.get("mcp.rpc.id")).toBeDefined();
+      expectDefined(start);
+      expect(start.ended).toBe(true);
+      expect(start.attributes.get("mcp.execute.execution_id")).toBe("exec-1");
+      expect(start.attributes.get("mcp.rpc.id")).toBeDefined();
 
       const resume = spans.find((span) => span.name === "mcp.host.tool.resume");
-      expect(resume).toBeDefined();
-      expect(resume!.attributes.get("mcp.rpc.id")).toBe(start!.attributes.get("mcp.rpc.id"));
+      expectDefined(resume);
+      expect(resume.attributes.get("mcp.rpc.id")).toBe(start.attributes.get("mcp.rpc.id"));
     });
+  });
+
+  it("browser-approval resume emits its own start marker paired to its completion span", async () => {
+    const engine = makeStubEngine({
+      resume: () => Effect.succeed({ status: "completed", result: { result: "resumed" } }),
+    });
+
+    await withTracedClient(
+      engine,
+      async (client, spans) => {
+        await client.callTool({ name: "resume", arguments: { executionId: "exec-2" } });
+
+        // Distinct marker name: pairing start↔completion 1:1 keeps the
+        // started-without-finishing query unambiguous across resume modes.
+        const start = spans.find(
+          (span) => span.name === "mcp.host.tool.resume.browser_approval.start",
+        );
+        expectDefined(start);
+        expect(start.ended).toBe(true);
+        expect(start.attributes.get("mcp.execute.execution_id")).toBe("exec-2");
+
+        const completion = spans.find(
+          (span) => span.name === "mcp.host.tool.resume.browser_approval",
+        );
+        expectDefined(completion);
+        expect(completion.attributes.get("mcp.rpc.id")).toBe(start.attributes.get("mcp.rpc.id"));
+      },
+      {
+        elicitationMode: { mode: "browser", approvalUrl: (id) => `/approve/${id}` },
+        browserApprovalStore: {
+          takeResponse: () => Effect.succeed({ action: "accept" as const }),
+        },
+      },
+    );
   });
 });
