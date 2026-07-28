@@ -64,6 +64,9 @@ const CreateClientPayload = Schema.Struct({
   tokenUrl: Schema.String,
   grant: Schema.Literals(["authorization_code", "client_credentials"]),
   clientId: Schema.String,
+  /** The web form's secret field, where an empty string is the only spelling of
+   *  "no secret". The handler normalizes it to the domain's null-or-value
+   *  presence model before it reaches the service. */
   clientSecret: Schema.String,
   resource: Schema.optional(Schema.NullOr(Schema.String)),
   /** Integration whose connect dialog registered this manual app. Recorded so

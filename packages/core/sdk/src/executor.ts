@@ -92,7 +92,7 @@ import {
   type MintOAuthConnectionInput,
   type OAuthScopePolicy,
 } from "./oauth-service";
-import type { OAuthService } from "./oauth-client";
+import { oauthClientSecretFromInput, type OAuthService } from "./oauth-client";
 import {
   comparePolicyRow,
   isValidPattern,
@@ -1525,10 +1525,15 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         }
 
         // The secret is stored in the provider (a vault item id), not inline.
-        const clientSecret = clientRow.client_secret_item_id
-          ? ((yield* provider.get(ProviderItemId.make(String(clientRow.client_secret_item_id)))) ??
-            "")
-          : "";
+        // Null means "public client, send no client_secret" — both for a row
+        // that never had one and for a confidential row whose vault item is
+        // gone, which the AS then rejects loudly instead of us guessing.
+        const clientSecret =
+          clientRow.client_secret_item_id == null
+            ? null
+            : oauthClientSecretFromInput(
+                yield* provider.get(ProviderItemId.make(String(clientRow.client_secret_item_id))),
+              );
         // Re-request the scopes this connection was GRANTED (RFC 6749 §6: a
         // refresh must not exceed the originally-granted scope). Empty → omit
         // the param, which the AS treats as "same scopes as granted".

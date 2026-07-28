@@ -440,15 +440,16 @@ const oauth4webapiRequestOptions = (
 // Select the token-endpoint client authentication. The secret's presence is the
 // EXPLICIT public-vs-confidential discriminator in the v2 model: a registered
 // client either has a secret (confidential — authenticate it) or has none
-// (public PKCE — `None()`, RFC 7636). This is not a silent guess: `loadClient`
-// persists a non-empty secret for confidential clients and null/"" for public
-// ones, so an absent secret here unambiguously means "public client". The
-// `method` only chooses HOW a present secret is sent (post vs basic).
+// (public PKCE — `None()`, RFC 7636). Presence is spelled `null`, tested
+// explicitly: an empty-string secret can never reach here (the boundary
+// normalizes it to null), and testing falsiness would misclassify one as
+// public rather than failing on the malformed row. The `method` only chooses
+// HOW a present secret is sent (post vs basic).
 const pickClientAuth = (
   clientSecret: string | null | undefined,
   method: ClientAuthMethod,
 ): oauth.ClientAuth => {
-  if (!clientSecret) return oauth.None();
+  if (clientSecret == null) return oauth.None();
   return method === "basic"
     ? oauth.ClientSecretBasic(clientSecret)
     : oauth.ClientSecretPost(clientSecret);
@@ -623,7 +624,9 @@ export const exchangeAuthorizationCode = (
 export type ExchangeClientCredentialsInput = {
   readonly tokenUrl: string;
   readonly clientId: string;
-  readonly clientSecret: string;
+  /** Null for a client the AS registered without a secret; the grant then goes
+   *  out unauthenticated and the AS decides. Never `""` — see `OAuthClient`. */
+  readonly clientSecret: string | null;
   readonly scopes?: readonly string[];
   readonly scopeSeparator?: string;
   readonly clientAuth?: ClientAuthMethod;

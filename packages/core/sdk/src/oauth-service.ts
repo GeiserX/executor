@@ -35,6 +35,7 @@ import {
   OAuthRegisterDynamicError,
   OAuthSessionNotFoundError,
   OAuthStartError,
+  oauthClientSecretFromInput,
   type ConnectResult,
   type CreateOAuthClientInput,
   type OAuthClientOrigin,
@@ -386,8 +387,9 @@ interface LoadedOAuthClient {
   readonly tokenUrl: string;
   readonly grant: OAuthGrant;
   readonly clientId: string;
-  /** Resolved literal secret (read from the provider via the stored item id). */
-  readonly clientSecret: string;
+  /** Resolved literal secret (read from the provider via the stored item id),
+   *  or null for a public / PKCE client that stored none. */
+  readonly clientSecret: string | null;
   readonly resource: string | null;
 }
 
@@ -595,11 +597,25 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
       });
       const now = new Date();
 
+      // The empty string is not a spelling of "public client" here — presence is
+      // null. Accepting it silently would register a CONFIDENTIAL app whose
+      // secret is empty (the token request would then send `client_secret=`),
+      // so reject it and make the caller state which it meant. Boundaries that
+      // can only produce "" (HTTP payloads, form fields) normalize through
+      // `oauthClientSecretFromInput` before calling.
+      if (input.clientSecret === "") {
+        return yield* new StorageError({
+          message:
+            "Invalid OAuth client secret: pass null for a public/PKCE client, or a non-empty secret for a confidential one.",
+          cause: undefined,
+        });
+      }
+
       // Store the secret out-of-band in the default writable provider; the row
-      // keeps only its item id. A public/PKCE client (empty secret) stores null
+      // keeps only its item id. A public/PKCE client (null secret) stores null
       // — there is no plaintext column to fall back to (the schema dropped it).
       let clientSecretItemIdValue: string | null = null;
-      if (input.clientSecret.length > 0) {
+      if (input.clientSecret !== null) {
         const provider = deps.defaultWritableProvider();
         if (!provider || !provider.set) {
           return yield* new StorageError({
@@ -910,7 +926,7 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
       );
 
       // Persist the minted client. DCR-minted public clients have no secret; we
-      // store "" so the PKCE-only token exchange omits `client_secret`.
+      // store null so the PKCE-only token exchange omits `client_secret`.
       // Confidential DCR clients keep the returned secret in the credential
       // provider. The persisted grant is interactive authorization_code.
       // `input.scopes` was already sent to the AS at registration above; the
@@ -923,7 +939,7 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
         resource: input.resource ?? null,
         grant: "authorization_code",
         clientId: information.client_id,
-        clientSecret: information.client_secret ?? "",
+        clientSecret: oauthClientSecretFromInput(information.client_secret),
         origin: {
           kind: "dynamic_client_registration",
           integration: input.originIntegration ?? null,
@@ -1000,17 +1016,21 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
             );
           }
           // `client_secret_item_id` is null for DCR-minted / public PKCE clients;
-          // the token exchange treats a missing secret as "public client, omit
+          // the token exchange treats a null secret as "public client, omit
           // client_secret" (see pickClientAuth). A confidential client persisted
           // its secret to the provider in createClient; resolve it back here.
+          // An unresolvable item id also lands on null — the row says the app is
+          // confidential but the vault no longer holds the value, so the grant
+          // goes out unauthenticated and the AS rejects it, which is the visible
+          // failure a re-registration prompt hangs off.
           return Effect.gen(function* () {
-            let clientSecret = "";
+            let clientSecret: string | null = null;
             if (row.client_secret_item_id != null) {
               const provider = deps.defaultWritableProvider();
               if (provider) {
-                clientSecret =
-                  (yield* provider.get(ProviderItemId.make(String(row.client_secret_item_id)))) ??
-                  "";
+                clientSecret = oauthClientSecretFromInput(
+                  yield* provider.get(ProviderItemId.make(String(row.client_secret_item_id))),
+                );
               }
             }
             return {

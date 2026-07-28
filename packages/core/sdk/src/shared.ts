@@ -146,6 +146,7 @@ export {
   OAuthProbeError,
   OAuthRegisterDynamicError,
   OAuthSessionNotFoundError,
+  oauthClientSecretFromInput,
 } from "./oauth-client";
 
 // Wire-level HTTP error schema for plugin HttpApiGroup definitions.

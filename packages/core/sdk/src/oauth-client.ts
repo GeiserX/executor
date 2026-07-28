@@ -56,13 +56,24 @@ export interface OAuthClient {
   readonly tokenUrl: string;
   readonly grant: OAuthGrant;
   readonly clientId: string;
-  /** The literal client secret. Stored out-of-band in the credential provider
-   *  (vault item id), never inline. Empty string for public / PKCE clients. */
-  readonly clientSecret: string;
+  /** The literal client secret, or `null` for a public / PKCE client. Stored
+   *  out-of-band in the credential provider (vault item id), never inline.
+   *  Presence is `null`, never `""`: an empty string is a value, so any
+   *  falsiness or emptiness test on it is a bug waiting to happen. Convert
+   *  form/wire input through `clientSecretFromInput` at the boundary. */
+  readonly clientSecret: string | null;
   /** RFC 8707 Resource Indicator (MCP). Carried so the refresh request can keep
    *  the re-minted token bound to the same resource. Null/omitted otherwise. */
   readonly resource?: string | null;
 }
+
+/** Presence-normalize a client secret arriving from a form field or the wire,
+ *  where "absent" can only be spelled as the empty string. Deliberately does NOT
+ *  trim: a whitespace-bearing secret is a value, and trimming it here would
+ *  silently downgrade a confidential client to a public one. Callers that want
+ *  the user's leading/trailing whitespace dropped trim before calling. */
+export const oauthClientSecretFromInput = (value: string | null | undefined): string | null =>
+  value == null || value.length === 0 ? null : value;
 
 export type OAuthClientOrigin =
   | {

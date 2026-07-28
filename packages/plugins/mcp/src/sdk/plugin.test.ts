@@ -434,7 +434,7 @@ describe("mcpPlugin", () => {
           tokenUrl: "https://mcp.axiom.co/token",
           grant: "authorization_code",
           clientId: "stale-dcr-client",
-          clientSecret: "",
+          clientSecret: null,
           resource: "https://mcp.axiom.co/mcp",
         });
         yield* executor.oauth.createClient({
@@ -444,7 +444,7 @@ describe("mcpPlugin", () => {
           tokenUrl: "https://mcp.axiom.co/token",
           grant: "authorization_code",
           clientId: "manual-client",
-          clientSecret: "",
+          clientSecret: null,
           resource: "https://mcp.axiom.co/mcp",
         });
 

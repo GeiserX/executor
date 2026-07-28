@@ -10,6 +10,7 @@ import {
   ToolAddress,
   ToolName,
 } from "./ids";
+import { StorageError } from "./fuma-runtime";
 import { decodeOAuthCallbackState } from "./oauth";
 import { OAuthStartError } from "./oauth-client";
 import { missingGrantedOAuthScopes } from "./oauth-service";
@@ -1174,6 +1175,150 @@ describe("oauth.complete regional token-endpoint rebind (Datadog multi-site)", (
           config.db.findFirst("connection", { where: (b) => b("name", "=", "main") }),
         );
         expect(row?.oauth_token_url ?? null).toBeNull();
+      }),
+    ),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Client-secret presence. `null` is the ONLY spelling of "public / PKCE
+// client"; a non-empty string is the only spelling of "confidential". The
+// empty string used to mean "public", which is a trap the moment the secret
+// becomes a wrapper type whose empty value is truthy — so it is now rejected
+// outright rather than silently registering a confidential app with an empty
+// secret. These cases pin the wire consequence, not just the field.
+// ---------------------------------------------------------------------------
+
+const tokenGrantBodies = (
+  requests: readonly { readonly path: string; readonly method: string; readonly body: string }[],
+): readonly URLSearchParams[] =>
+  requests
+    .filter((r) => r.path === "/token" && r.method === "POST")
+    .map((r) => new URLSearchParams(r.body))
+    .filter((body) => body.has("grant_type"));
+
+describe("oauth client secret presence", () => {
+  it.effect("a null-secret client authenticates as public: no client_secret on the wire", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const server = yield* serveOAuthTestServer({
+          scopes: ["read"],
+          clients: { "public-pkce-client": null },
+        });
+        const { config, executor } = yield* makeTestWorkspaceHarness({ plugins });
+        yield* executor.acme.seed(["read"]);
+
+        yield* executor.oauth.createClient({
+          owner: "org",
+          slug: CLIENT,
+          authorizationUrl: server.authorizationEndpoint,
+          tokenUrl: server.tokenEndpoint,
+          grant: "authorization_code",
+          clientId: "public-pkce-client",
+          clientSecret: null,
+        });
+
+        // Nothing was written to the credential provider: there is no secret.
+        const row = yield* Effect.promise(() =>
+          config.db.findFirst("oauth_client", { where: (b) => b("slug", "=", String(CLIENT)) }),
+        );
+        expect(row?.client_secret_item_id ?? null).toBeNull();
+
+        const started = yield* executor.oauth.start({
+          owner: "org",
+          client: CLIENT,
+          clientOwner: "org",
+          name: ConnectionName.make("main"),
+          integration: INTEG,
+          template: TEMPLATE,
+        });
+        expect(started.status).toBe("redirect");
+        if (started.status !== "redirect") return;
+        const callback = yield* server.completeAuthorizationCodeFlow({
+          authorizationUrl: started.authorizationUrl,
+        });
+        yield* executor.oauth.complete({ state: started.state, code: callback.code });
+
+        const grants = tokenGrantBodies(yield* server.requests);
+        expect(grants).toHaveLength(1);
+        expect(grants[0]!.get("client_id")).toBe("public-pkce-client");
+        expect(grants[0]!.has("client_secret")).toBe(false);
+      }),
+    ),
+  );
+
+  it.effect("a confidential client keeps client_secret_post on the token request", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const server = yield* serveOAuthTestServer({ scopes: ["read"] });
+        const { config, executor } = yield* makeTestWorkspaceHarness({ plugins });
+        yield* executor.acme.seed(["read"]);
+
+        yield* executor.oauth.createClient({
+          owner: "org",
+          slug: CLIENT,
+          authorizationUrl: server.authorizationEndpoint,
+          tokenUrl: server.tokenEndpoint,
+          grant: "authorization_code",
+          clientId: "test-client",
+          clientSecret: "test-secret",
+        });
+
+        const row = yield* Effect.promise(() =>
+          config.db.findFirst("oauth_client", { where: (b) => b("slug", "=", String(CLIENT)) }),
+        );
+        expect(row?.client_secret_item_id ?? null).not.toBeNull();
+
+        const started = yield* executor.oauth.start({
+          owner: "org",
+          client: CLIENT,
+          clientOwner: "org",
+          name: ConnectionName.make("main"),
+          integration: INTEG,
+          template: TEMPLATE,
+        });
+        expect(started.status).toBe("redirect");
+        if (started.status !== "redirect") return;
+        const callback = yield* server.completeAuthorizationCodeFlow({
+          authorizationUrl: started.authorizationUrl,
+        });
+        yield* executor.oauth.complete({ state: started.state, code: callback.code });
+
+        const grants = tokenGrantBodies(yield* server.requests);
+        expect(grants).toHaveLength(1);
+        expect(grants[0]!.get("client_secret")).toBe("test-secret");
+      }),
+    ),
+  );
+
+  it.effect("rejects the empty string rather than guessing public or confidential", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const server = yield* serveOAuthTestServer({ scopes: ["read"] });
+        const { config, executor } = yield* makeTestWorkspaceHarness({ plugins });
+
+        const error = yield* Effect.flip(
+          executor.oauth.createClient({
+            owner: "org",
+            slug: CLIENT,
+            authorizationUrl: server.authorizationEndpoint,
+            tokenUrl: server.tokenEndpoint,
+            grant: "authorization_code",
+            clientId: "test-client",
+            clientSecret: "",
+          }),
+        );
+        // `StorageError` carries a typed `message`; the guard narrows the
+        // StorageFailure union so this read is on a typed failure.
+        expect(Predicate.isTagged("StorageError")(error)).toBe(true);
+        const storageError = error as StorageError;
+        expect(storageError.message).toContain("Invalid OAuth client secret");
+
+        // The rejection is total: no half-registered row survives it.
+        const row = yield* Effect.promise(() =>
+          config.db.findFirst("oauth_client", { where: (b) => b("slug", "=", String(CLIENT)) }),
+        );
+        expect(row ?? null).toBeNull();
       }),
     ),
   );

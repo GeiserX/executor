@@ -694,7 +694,7 @@ export const coreToolsPlugin = definePlugin((options: CoreToolsPluginOptions = {
           // This persists an OAuth client and REPLACES on slug collision. It
           // takes NO client secret: a secret would have to travel through the
           // agent's context window, so a confidential app is registered by the
-          // human via `oauth.clients.createHandoff`. An empty secret registers a
+          // human via `oauth.clients.createHandoff`. An absent secret registers a
           // PUBLIC client. The remaining risk is the write itself: prompt-injected
           // code could register a client with an attacker-controlled
           // authorizationUrl/tokenUrl, then drive `oauth.start` to mint a
@@ -711,10 +711,10 @@ export const coreToolsPlugin = definePlugin((options: CoreToolsPluginOptions = {
                 tokenUrl: input.tokenUrl,
                 grant: input.grant,
                 clientId: input.clientId,
-                // No secret crosses the agent boundary; an empty secret registers
+                // No secret crosses the agent boundary; a null secret registers
                 // a public client. Confidential clients go through
                 // `oauth.clients.createHandoff`.
-                clientSecret: "",
+                clientSecret: null,
                 resource: input.resource ?? null,
                 origin: {
                   kind: "manual",

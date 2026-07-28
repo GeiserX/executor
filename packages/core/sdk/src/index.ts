@@ -250,6 +250,7 @@ export {
   OAuthProbeError,
   OAuthRegisterDynamicError,
   OAuthSessionNotFoundError,
+  oauthClientSecretFromInput,
   type OAuthGrant,
   type OAuthAuthentication,
   type OAuthClient,

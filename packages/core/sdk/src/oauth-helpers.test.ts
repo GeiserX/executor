@@ -308,6 +308,43 @@ describe("exchangeAuthorizationCode", () => {
     ),
   );
 
+  it.effect("omits client_secret for an explicitly null secret (public PKCE client)", () =>
+    withTokenEndpoint(tokenResponse(validCodeBody), ({ tokenUrl, calls }) =>
+      Effect.gen(function* () {
+        yield* exchangeAuthorizationCode({
+          tokenUrl,
+          clientId: "cid",
+          clientSecret: null,
+          redirectUrl: "https://app.example.com/cb",
+          codeVerifier: "verifier",
+          code: "abc",
+        });
+        const body = (yield* calls)[0]!.body;
+        expect(body.get("client_id")).toBe("cid");
+        expect(body.has("client_secret")).toBe(false);
+      }),
+    ),
+  );
+
+  it.effect("authenticates with a whitespace-only secret rather than treating it as public", () =>
+    // A confidential client whose secret happens to be whitespace is still
+    // confidential. `null` is the ONLY spelling of "public", so this must
+    // authenticate — the old falsiness test silently downgraded it.
+    withTokenEndpoint(tokenResponse(validCodeBody), ({ tokenUrl, calls }) =>
+      Effect.gen(function* () {
+        yield* exchangeAuthorizationCode({
+          tokenUrl,
+          clientId: "cid",
+          clientSecret: " ",
+          redirectUrl: "https://app.example.com/cb",
+          codeVerifier: "verifier",
+          code: "abc",
+        });
+        expect((yield* calls)[0]!.body.get("client_secret")).toBe(" ");
+      }),
+    ),
+  );
+
   it.effect("includes RFC 8707 resource parameter on the token request when provided", () =>
     withTokenEndpoint(tokenResponse(validCodeBody), ({ tokenUrl, calls }) =>
       Effect.gen(function* () {

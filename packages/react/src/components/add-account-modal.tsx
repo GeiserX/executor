@@ -593,8 +593,10 @@ export const oauthIdentityLabelFromHealth = (input: {
 // Client ID Metadata Document support is not Dynamic Client Registration:
 // there is no POST to a registration endpoint and no provider-side app to pick.
 // The OAuth client identity is this host's public metadata-document URL, stored
-// locally as a public PKCE client (`clientSecret: ""`) so the existing
-// `oauth.start` flow can run unchanged.
+// locally as a public PKCE client so the existing `oauth.start` flow can run
+// unchanged. The empty `clientSecret` below is the WIRE spelling of "no
+// secret" — the HTTP payload is a plain string, and the handler normalizes it
+// to the domain's null before it reaches the service.
 // ---------------------------------------------------------------------------
 
 type CimdExistingClient = Pick<

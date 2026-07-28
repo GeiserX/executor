@@ -169,7 +169,7 @@ describe("oauth.listClients", () => {
           tokenUrl: "https://mcp.axiom.co/token",
           grant: "authorization_code",
           clientId: "old-dcr-client",
-          clientSecret: "",
+          clientSecret: null,
           resource: "https://mcp.axiom.co/mcp",
           origin: { kind: "manual" },
         });

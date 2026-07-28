@@ -274,7 +274,7 @@ describe("oauth.registerDynamicClient", () => {
           resource: server.mcpResourceUrl,
           grant: "authorization_code",
           clientId: "legacy-dcr-client",
-          clientSecret: "",
+          clientSecret: null,
         });
         yield* Effect.promise(() =>
           config.db.updateMany("oauth_client", {
@@ -327,7 +327,7 @@ describe("oauth.registerDynamicClient", () => {
           resource: server.mcpResourceUrl,
           grant: "authorization_code",
           clientId: "legacy-dcr-client",
-          clientSecret: "",
+          clientSecret: null,
         });
         // Simulate the migration's backfill: legacy DCR stamp + issuer set.
         yield* Effect.promise(() =>
