@@ -42,3 +42,18 @@ if (
 ) {
   process.env.EXECUTOR_KEYRING_NATIVE_PATH = keyringNodeOnDisk;
 }
+
+const workerdOnDisk = join(execDir, process.platform === "win32" ? "workerd.exe" : "workerd");
+if (typeof Bun !== "undefined" && !process.env.EXECUTOR_WORKERD_BIN && existsSync(workerdOnDisk)) {
+  process.env.EXECUTOR_WORKERD_BIN = workerdOnDisk;
+}
+
+const workerBundlerOnDisk = join(execDir, "worker-bundler");
+if (
+  typeof Bun !== "undefined" &&
+  !process.env.EXECUTOR_WORKER_BUNDLER_DIR &&
+  existsSync(join(workerBundlerOnDisk, "dist", "index.js")) &&
+  existsSync(join(workerBundlerOnDisk, "dist", "esbuild.wasm"))
+) {
+  process.env.EXECUTOR_WORKER_BUNDLER_DIR = workerBundlerOnDisk;
+}

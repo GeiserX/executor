@@ -46,6 +46,7 @@
     "react-dom": "catalog:"
   },
   "devDependencies": {
+    "@cloudflare/worker-bundler": "0.2.1",
     "@effect/vitest": "catalog:",
     "@executor-js/vite-plugin": "workspace:*",
     "@tailwindcss/vite": "catalog:",
@@ -56,8 +57,10 @@
     "@types/react-dom": "catalog:",
     "@vitejs/plugin-react": "catalog:",
     "bun-types": "catalog:",
+    "esbuild": "^0.27.3",
     "typescript": "catalog:",
     "vite": "catalog:",
-    "vitest": "catalog:"
+    "vitest": "catalog:",
+    "workerd": "1.20260708.1"
   }
 }
