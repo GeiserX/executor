@@ -1,9 +1,25 @@
 import { describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
 
-import { collectTables, createExecutor, type Executor } from "./executor";
+import {
+  ADMIN_DEFAULT_PAGE_SIZE,
+  ADMIN_MAX_PAGE_SIZE,
+  collectTables,
+  createExecutor,
+  type Executor,
+} from "./executor";
+import { StorageError } from "./fuma-runtime";
 import { createSqliteTestFumaDb, type SqliteTestFumaDb } from "./sqlite-test-db";
-import { Subject, Tenant } from "./ids";
+import {
+  ConnectionName,
+  IntegrationSlug,
+  OAuthClientSlug,
+  ProviderItemId,
+  ProviderKey,
+  Subject,
+  Tenant,
+} from "./ids";
+import { definePlugin } from "./plugin";
 import { resetSubjectTouchCache, touchSubject } from "./subject-registry";
 
 // The platform view: `executor.admin`, an OPT-IN read-only surface that reads
@@ -115,6 +131,33 @@ const insertConnection = (
     });
   });
 
+/** A tenant-scoped `integration` row, inserted raw. Needed because
+ *  `integrations.remove` short-circuits on an absent slug — without a real row
+ *  the call returns success having touched no storage, which would make a
+ *  read-only assertion vacuous. */
+const insertIntegration = (db: SqliteTestFumaDb, slug: string): Effect.Effect<void> =>
+  Effect.promise(async () => {
+    await db.client.execute({
+      sql: `INSERT INTO integration (
+          row_id, tenant, slug, plugin_id, name, description, config, can_remove,
+          can_refresh, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        `i-${slug}`,
+        TENANT,
+        slug,
+        "demo",
+        slug,
+        null,
+        JSON.stringify({}),
+        1,
+        0,
+        Date.now(),
+        Date.now(),
+      ],
+    });
+  });
+
 /** Seed two users and an org connection under `t1`, plus an untouchable other
  *  tenant. Subjects go in through `touchSubject` (the only legitimate writer);
  *  connections go in raw, because no single bound executor could have written
@@ -174,6 +217,32 @@ const seed = (db: SqliteTestFumaDb): Effect.Effect<void> =>
     });
   });
 
+/**
+ * A plugin contributing one writable credential provider.
+ *
+ * `oauth.createClient` stores the client secret out-of-band and fails BEFORE
+ * touching storage when no writable provider is registered. Without this, the
+ * read-only assertion below would pass on the wrong error and prove nothing —
+ * so the provider is here to make the write actually reach the owner policy.
+ */
+const providerPlugin = definePlugin(() => {
+  const store = new Map<string, string>();
+  return {
+    id: "memory-provider" as const,
+    storage: () => ({}),
+    credentialProviders: [
+      {
+        key: ProviderKey.make("memory"),
+        writable: true,
+        get: (id: ProviderItemId) => Effect.sync(() => store.get(String(id)) ?? null),
+        set: (id: ProviderItemId, value: string) =>
+          Effect.sync(() => void store.set(String(id), value)),
+        delete: (id: ProviderItemId) => Effect.sync(() => void store.delete(String(id))),
+      },
+    ],
+  };
+})();
+
 const makePlatformExecutor = (
   db: SqliteTestFumaDb,
   options?: { readonly platformView?: boolean; readonly subject?: string | null },
@@ -182,6 +251,7 @@ const makePlatformExecutor = (
     tenant: Tenant.make(TENANT),
     ...(options?.subject === null ? {} : { subject: Subject.make(options?.subject ?? SUBJECT_A) }),
     db: db.db,
+    plugins: [providerPlugin],
     onElicitation: "accept-all",
     ...(options?.platformView === false ? {} : { platformView: true }),
   }).pipe(Effect.orDie);
@@ -242,6 +312,251 @@ describe("platform view — admin.listSubjects", () => {
         expect(all).toHaveLength(2);
         expect(first.map((entry) => entry.externalId)).toEqual([all[0]?.externalId]);
         expect(second.map((entry) => entry.externalId)).toEqual([all[1]?.externalId]);
+      }),
+    ),
+  );
+
+  // Drizzle's SQLite dialect emits OFFSET only alongside LIMIT, and SQLite
+  // rejects a bare OFFSET — so forwarding the two independently made
+  // `{ offset }` a SQL syntax error on every SQLite host. The default limit is
+  // what makes an offset-only page a legal query at all.
+  it.effect("accepts an offset with no limit", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const admin = yield* requireAdmin(yield* makePlatformExecutor(db));
+
+        const all = yield* admin.listSubjects();
+        const skipped = yield* admin.listSubjects({ offset: 1 });
+
+        expect(skipped.map((entry) => entry.externalId)).toEqual([all[1]?.externalId]);
+        // Past the end is an empty page, not an error.
+        expect(yield* admin.listSubjects({ offset: 50 })).toEqual([]);
+        expect(yield* admin.listSubjectsWithConnections({ offset: 1 })).toHaveLength(1);
+      }),
+    ),
+  );
+
+  // A fraction is a 400 at the HTTP contract, but the SDK is a public entry
+  // point of its own: a fractional limit reaching the driver is a `datatype
+  // mismatch` failure, so it is floored here rather than forwarded.
+  it.effect("floors a fractional limit and offset instead of failing the query", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const admin = yield* requireAdmin(yield* makePlatformExecutor(db));
+
+        const all = yield* admin.listSubjects();
+
+        expect(yield* admin.listSubjects({ limit: 1.5 })).toEqual([all[0]]);
+        expect(yield* admin.listSubjects({ offset: 1.9 })).toEqual([all[1]]);
+      }),
+    ),
+  );
+
+  // The no-args call is the one an API consumer writes by default, and
+  // `listSubjectsWithConnections` turns each returned row into its own
+  // sequential connection query. Unbounded, that is the whole tenant inside one
+  // request.
+  it.effect("bounds an unpaged call to the default page size, and clamps past the maximum", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        // One more subject than a default page holds, so "no arguments" and
+        // "everything" are distinguishable.
+        for (let index = 0; index < ADMIN_DEFAULT_PAGE_SIZE + 5; index += 1) {
+          yield* touchSubject(db.db, {
+            tenant: TENANT,
+            // Zero-padded: `external_id` breaks `created_at` ties, and these
+            // rows are written inside the same millisecond.
+            externalId: `user_${String(index).padStart(4, "0")}`,
+          });
+        }
+
+        const admin = yield* requireAdmin(yield* makePlatformExecutor(db));
+
+        expect(yield* admin.listSubjects()).toHaveLength(ADMIN_DEFAULT_PAGE_SIZE);
+        expect(yield* admin.listSubjectsWithConnections()).toHaveLength(ADMIN_DEFAULT_PAGE_SIZE);
+        // A caller may ask for more, up to the ceiling — and no further.
+        expect(yield* admin.listSubjects({ limit: ADMIN_MAX_PAGE_SIZE * 10 })).toHaveLength(
+          ADMIN_DEFAULT_PAGE_SIZE + 5,
+        );
+      }),
+    ),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// The platform view is read-only across EVERY surface, not just `admin`.
+//
+// A platform executor is subject-less but still bound to the tenant's ORG
+// partition, so before `writes: "denied"` its ordinary product surfaces formed
+// an unguarded pure-org executor: it could create, update and delete every
+// `owner: "org"` row in the tenant through `connections`, `policies`,
+// `integrations` and `oauth`, while only the `admin` handle was actually
+// guarded. These pin that the guarantee now covers the whole executor.
+// ---------------------------------------------------------------------------
+
+/**
+ * The owner policy refuses a write by failing the storage effect. `Effect.flip`
+ * makes a SUCCEEDING write a test failure outright rather than something to
+ * assert on afterwards.
+ *
+ * The message is checked too, not just the failure: several of these surfaces
+ * can fail for unrelated reasons BEFORE reaching storage (an absent row, a
+ * missing credential provider), and such a failure would let the assertion pass
+ * without the policy ever having been consulted.
+ */
+const expectWriteRefused = <A, E extends { readonly _tag: string }>(effect: Effect.Effect<A, E>) =>
+  effect.pipe(
+    // A write that SUCCEEDS dies here rather than reaching an assertion, so the
+    // hole this pins can never be reported as a pass.
+    Effect.flatMap(() => Effect.die("expected the platform view to refuse this write")),
+    Effect.catchTag("StorageError", (error: StorageError) => {
+      expect(error.message).toContain("read-only");
+      return Effect.void;
+    }),
+    // Any OTHER failure means the call never reached the owner policy — an
+    // absent row, a missing provider — which would leave the refusal untested.
+    Effect.orDie,
+  );
+
+describe("platform view — read-only across every surface", () => {
+  it.effect("refuses org-row writes through policies and oauth", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const executor = yield* makePlatformExecutor(db, { subject: null });
+
+        yield* expectWriteRefused(
+          executor.policies.create({ owner: "org", pattern: "tools.*", action: "block" }),
+        );
+        yield* expectWriteRefused(
+          executor.oauth.createClient({
+            owner: "org",
+            slug: OAuthClientSlug.make("intruder"),
+            authorizationUrl: "https://acme.test/authorize",
+            tokenUrl: "https://acme.test/token",
+            grant: "authorization_code",
+            clientId: "intruder-id",
+            clientSecret: "intruder-secret",
+          }),
+        );
+
+        // Nothing landed.
+        expect(yield* executor.policies.list()).toEqual([]);
+        expect(yield* executor.oauth.listClients()).toEqual([]);
+      }),
+    ),
+  );
+
+  // A DELETE is the sharpest case: it carries no values to check against, so
+  // the reach/writes guard is the only thing between this executor and the
+  // tenant's org rows.
+  it.effect("refuses to delete the tenant's org rows", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        // A real `integration` row: `integrations.remove` returns success
+        // without touching storage when the slug is absent, so asserting
+        // against a missing row would prove nothing.
+        yield* insertIntegration(db, "stripe");
+        const executor = yield* makePlatformExecutor(db, { subject: null });
+
+        yield* expectWriteRefused(
+          executor.connections.remove({
+            owner: "org",
+            integration: IntegrationSlug.make("stripe"),
+            name: ConnectionName.make("shared"),
+          }),
+        );
+        yield* expectWriteRefused(
+          executor.oauth.removeClient("org", OAuthClientSlug.make("anything")),
+        );
+        yield* expectWriteRefused(executor.integrations.remove(IntegrationSlug.make("stripe")));
+
+        // Every row survived.
+        const admin = yield* requireAdmin(executor);
+        expect(yield* admin.listSubjects()).toHaveLength(2);
+        const connections = yield* Effect.promise(() =>
+          db.client.execute({ sql: `SELECT name FROM connection WHERE owner = 'org'`, args: [] }),
+        );
+        expect(connections.rows).toHaveLength(1);
+        const integrations = yield* Effect.promise(() =>
+          db.client.execute({ sql: `SELECT slug FROM integration`, args: [] }),
+        );
+        expect(integrations.rows).toHaveLength(1);
+      }),
+    ),
+  );
+
+  // Read-only is the WRITE axis only. The ordinary surfaces keep BOUND reach on
+  // purpose: widening them would hand every subject's connection row —
+  // credential item ids included — to a surface that only ever needed the admin
+  // projection.
+  it.effect("does not widen the ordinary surfaces' reads to other subjects", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const executor = yield* makePlatformExecutor(db, { subject: null });
+
+        const connections = yield* executor.connections.list().pipe(Effect.orDie);
+
+        // Only the tenant's org row: A's and B's user connections stay invisible
+        // to this surface, even though `admin` can see both.
+        expect(connections.map((entry) => entry.name)).toEqual(["shared"]);
+      }),
+    ),
+  );
+
+  // The guarantee must be exactly as narrow as advertised: an executor WITHOUT
+  // the opt-in is a normal product executor and writes normally. A read-only
+  // default would be a silent behavior change for every existing host.
+  it.effect("leaves an ordinary product executor fully writable", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        yield* insertIntegration(db, "stripe");
+        const executor = yield* makePlatformExecutor(db, {
+          platformView: false,
+          subject: SUBJECT_A,
+        });
+
+        const policy = yield* executor.policies
+          .create({ owner: "org", pattern: "tools.*", action: "block" })
+          .pipe(Effect.orDie);
+        expect(policy.pattern).toBe("tools.*");
+
+        yield* executor.oauth
+          .createClient({
+            owner: "org",
+            slug: OAuthClientSlug.make("legit"),
+            authorizationUrl: "https://acme.test/authorize",
+            tokenUrl: "https://acme.test/token",
+            grant: "authorization_code",
+            clientId: "legit-id",
+            clientSecret: "legit-secret",
+          })
+          .pipe(Effect.orDie);
+        expect(yield* executor.policies.list().pipe(Effect.orDie)).toHaveLength(1);
+        expect(yield* executor.oauth.listClients().pipe(Effect.orDie)).toHaveLength(1);
+
+        yield* executor.connections
+          .remove({
+            owner: "org",
+            integration: IntegrationSlug.make("stripe"),
+            name: ConnectionName.make("shared"),
+          })
+          .pipe(Effect.orDie);
+        yield* executor.integrations.remove(IntegrationSlug.make("stripe")).pipe(Effect.orDie);
+
+        const connections = yield* Effect.promise(() =>
+          db.client.execute({ sql: `SELECT name FROM connection WHERE owner = 'org'`, args: [] }),
+        );
+        expect(connections.rows).toHaveLength(0);
+        const integrations = yield* Effect.promise(() =>
+          db.client.execute({ sql: `SELECT slug FROM integration`, args: [] }),
+        );
+        expect(integrations.rows).toHaveLength(0);
       }),
     ),
   );

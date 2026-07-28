@@ -798,6 +798,65 @@ describe("admin users API", () => {
     ),
   );
 
+  // `offset` and `limit` are independently optional in the contract, so
+  // `?offset=` alone is a request a consumer will make. Drizzle's SQLite
+  // dialect emits OFFSET only alongside LIMIT and SQLite rejects a bare OFFSET,
+  // so this used to 500 on every SQLite host — local, self-host and D1 alike.
+  // The SDK's default page size is what makes it a legal query.
+  it.effect("serves an offset with no limit rather than 500ing", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const web = yield* webHandlerFor(
+          stubProvider((tenant) => platformExecutorFor(db, tenant), headerAuthorize),
+        );
+
+        for (const path of ["/admin/users?offset=1", "/admin/users/with-connections?offset=1"]) {
+          const response = yield* get(web, path, ORG_A);
+          expect(response.status, path).toBe(200);
+          expect((yield* jsonOf<UsersBody>(response)).users.map((user) => user.externalId)).toEqual(
+            [USER_A2],
+          );
+        }
+
+        // Well past the end is an empty page, still a 200.
+        const far = yield* get(web, "/admin/users?offset=25", ORG_A);
+        expect(far.status).toBe(200);
+        expect((yield* jsonOf<UsersBody>(far)).users).toEqual([]);
+      }),
+    ),
+  );
+
+  // A fraction decoded cleanly through `FiniteFromString` and reached the
+  // driver as a `datatype mismatch` 500. A row count is an integer by nature,
+  // so the contract rejects it up front — the same 400 a non-numeric value gets,
+  // which is what the schema's comment always claimed.
+  it.effect("400s a fractional limit or offset instead of failing in the driver", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const web = yield* webHandlerFor(
+          stubProvider((tenant) => platformExecutorFor(db, tenant), headerAuthorize),
+        );
+
+        for (const path of [
+          "/admin/users?limit=1.5",
+          "/admin/users?offset=0.5",
+          "/admin/users/with-connections?limit=1.5",
+          // Still 400s for the reasons that already held.
+          "/admin/users?limit=abc",
+          "/admin/users?limit=0",
+          "/admin/users?limit=501",
+        ]) {
+          expect((yield* get(web, path, ORG_A)).status, path).toBe(400);
+        }
+
+        // The integral neighbours are unaffected.
+        expect((yield* get(web, "/admin/users?limit=1&offset=0", ORG_A)).status).toBe(200);
+      }),
+    ),
+  );
+
   // -------------------------------------------------------------------------
   // Single-user reads, by opaque id and by email.
   // -------------------------------------------------------------------------

@@ -308,9 +308,21 @@ export const makeScopedExecutor = <
 // An org-level caller (a WorkOS org-scoped API key, or an owner/admin acting on
 // the whole workspace) has NO acting member, so there is no honest subject to
 // bind. This builds the executor that shape implies: `{ tenant, subject:
-// undefined, platformView: true }` — the tenant-wide READ-ONLY view. The owner
-// policy rejects writes at `reach: "tenant"`, so the read-only property is
-// enforced by the storage layer, not by this factory remembering to be careful.
+// undefined, platformView: true }`.
+//
+// WHAT "READ-ONLY" MEANS HERE, PRECISELY. `platformView: true` puts
+// `writes: "denied"` on the executor's base owner-policy context and
+// `reach: "tenant"` on the `admin` handle's. So:
+//   - EVERY surface on this executor — `admin`, and the ordinary `connections`
+//     / `policies` / `integrations` / `oauth` alike — is refused every create,
+//     update and delete by the owner policy. That is enforced at the storage
+//     boundary, not by this factory remembering to be careful.
+//   - Only the `admin` handle READS tenant-wide. The ordinary surfaces keep
+//     bound reach, so they see the tenant's org rows and nothing of any
+//     member's — widening them would expose every subject's `connection` row,
+//     credential item ids included, to surfaces that never needed them.
+// Read-only is therefore total; tenant-wide visibility is not, and deliberately
+// so.
 //
 // Three deliberate differences from `makeScopedExecutor`:
 //   - no `subject`, so no `owner: "user"` rows resolve implicitly and the

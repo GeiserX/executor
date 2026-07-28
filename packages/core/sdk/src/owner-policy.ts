@@ -35,6 +35,14 @@ export type ExecutorReach =
    *  nothing else. */
   | "tenant";
 
+/** Whether a context may mutate at all. Orthogonal to `reach`: reach says how
+ *  far reads SEE, this says whether writes are permitted. */
+export type ExecutorWrites =
+  /** The default: writes are allowed, bounded by `assertOwnerWritable`. */
+  | "allowed"
+  /** Every create/update/delete is rejected outright, at every reach. */
+  | "denied";
+
 export interface ExecutorOwnerPolicyContext {
   readonly tenant: string;
   /** The acting member, or null for a pure-org executor (no `owner:"user"`
@@ -44,6 +52,20 @@ export interface ExecutorOwnerPolicyContext {
    *  platform view: it sees the whole tenant but writes exactly as a bound
    *  context does, so it can never mutate another subject's rows. */
   readonly reach?: ExecutorReach;
+  /**
+   * Write permission; defaults to `"allowed"`. `"denied"` makes the context
+   * read-only at the STORAGE boundary, independently of reach.
+   *
+   * WHY THIS IS SEPARATE FROM `reach`. A tenant-reach context is always
+   * write-denied (a widened write would hit every subject in the tenant), so
+   * `reach: "tenant"` implies this. But the converse does not hold: the
+   * platform executor needs its ORDINARY, bound-reach surfaces to be read-only
+   * too, and it must NOT get tenant reach on them — widening those reads would
+   * hand every subject's `connection` row, credential item ids included, to a
+   * surface that only ever needed the admin projection. So read-only-ness is
+   * its own axis rather than a side effect of reach.
+   */
+  readonly writes?: ExecutorWrites;
 }
 
 type AnyConditionBuilder = ConditionBuilder<Record<string, AnyColumn>>;
@@ -93,20 +115,30 @@ export const ownerVisibilityCondition = (
 };
 
 /**
- * THE security property of the platform view: reach widens reads and NOTHING
- * else. `ownerVisibilityCondition` is also what filters `onUpdate`/`onDelete`,
- * so a widened context reaching any mutation would silently mutate every
- * subject in the tenant. Every write path calls this first and fails loudly
- * instead — a tenant-reach context is rejected outright rather than quietly
- * demoted to bound behavior, because a write arriving on the read-only platform
- * handle is a programmer error and should not be papered over.
+ * THE security property of the platform view: it never mutates. Two contexts
+ * are read-only, for two different reasons, and this one guard covers both:
+ *
+ *   - `reach: "tenant"` — `ownerVisibilityCondition` is also what filters
+ *     `onUpdate`/`onDelete`, so a widened context reaching any mutation would
+ *     silently mutate EVERY subject in the tenant.
+ *   - `writes: "denied"` — an explicitly read-only context. The platform
+ *     executor's ordinary (bound-reach) surfaces carry this: they are not
+ *     widened, so the reach clause above would not catch them, yet a
+ *     subject-less platform executor still binds to the tenant's org partition
+ *     and could otherwise create, update and delete every `owner: "org"` row
+ *     in it through `connections` / `policies` / `integrations` / `oauth`.
+ *
+ * Every write path calls this first and fails loudly — a write arriving on a
+ * read-only handle is a programmer error, not something to quietly demote to
+ * bound behavior.
  */
 export const assertReachReadOnly = (
   tableName: string,
   access: string,
   context: ExecutorOwnerPolicyContext | undefined,
 ): void => {
-  if (context?.reach !== "tenant") return;
+  if (context === undefined) return;
+  if (context.reach !== "tenant" && context.writes !== "denied") return;
   policyViolation(
     `Storage ${access} on table "${tableName}" is not allowed: the platform view is read-only.`,
   );

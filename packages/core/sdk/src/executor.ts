@@ -444,9 +444,54 @@ export interface AdminListSubjectsOptions {
   readonly offset?: number;
 }
 
+/**
+ * Page size applied when a caller names none. Every admin list is BOUNDED:
+ * `listSubjects()` with no arguments is the obvious call, and unbounded it
+ * returns every subject in the tenant — which `listSubjectsWithConnections`
+ * then turns into one sequential connection query PER SUBJECT, inside a single
+ * request, over a per-request socket on cloud. A default is what keeps the
+ * no-args call honest; a caller who wants more asks for more, up to
+ * {@link ADMIN_MAX_PAGE_SIZE}.
+ *
+ * 100 rather than the maximum: large enough that no realistic operator UI pages
+ * twice for a first screen, small enough that the joined read's fan-out stays a
+ * bounded cost even at its worst.
+ */
+export const ADMIN_DEFAULT_PAGE_SIZE = 100;
+
+/** Hard ceiling on an admin page, matching the HTTP contract's `limit` maximum.
+ *  A larger `limit` is clamped rather than honored. */
+export const ADMIN_MAX_PAGE_SIZE = 500;
+
+/**
+ * Normalize paging for every admin list.
+ *
+ * THREE things happen here, each fixing a real failure:
+ *   - a `limit` is ALWAYS produced. Drizzle's SQLite dialect emits OFFSET only
+ *     alongside LIMIT, and SQLite rejects a bare OFFSET, so `{ offset: 25 }`
+ *     was a syntax error on every SQLite host (local, self-host, D1).
+ *   - the limit is clamped to `[1, ADMIN_MAX_PAGE_SIZE]`, so no caller can ask
+ *     for an unbounded scan.
+ *   - both values are floored to integers. The HTTP contract rejects a
+ *     fractional `?limit=` outright (a 400, not a coerced value); this is the
+ *     SDK-level backstop so no driver ever receives a fraction and answers with
+ *     `datatype mismatch`.
+ */
+const normalizeAdminPaging = (
+  options: AdminListSubjectsOptions | undefined,
+): { readonly limit: number; readonly offset: number } => {
+  const requested = options?.limit ?? ADMIN_DEFAULT_PAGE_SIZE;
+  const limit = Math.min(Math.max(Math.floor(requested), 1), ADMIN_MAX_PAGE_SIZE);
+  const offset = Math.max(Math.floor(options?.offset ?? 0), 0);
+  return { limit, offset };
+};
+
 export interface ExecutorAdmin {
-  /** Every subject under the tenant, oldest first (stable: ties break on
-   *  `external_id`). */
+  /** One page of subjects under the tenant, oldest first (stable: ties break on
+   *  `external_id`). ALWAYS bounded: no arguments means
+   *  {@link ADMIN_DEFAULT_PAGE_SIZE} rows from offset 0, and `limit` is clamped
+   *  to {@link ADMIN_MAX_PAGE_SIZE}. There is no way to ask for every subject
+   *  in one call. */
   readonly listSubjects: (
     options?: AdminListSubjectsOptions,
   ) => Effect.Effect<readonly AdminSubject[], StorageFailure>;
@@ -467,7 +512,12 @@ export interface ExecutorAdmin {
   readonly listSubjectConnections: (
     externalId: string,
   ) => Effect.Effect<readonly AdminConnection[], StorageFailure>;
-  /** `listSubjects` joined with each subject's connections. */
+  /** `listSubjects` joined with each subject's connections — one connection
+   *  query per subject IN THE PAGE, sequentially. The paging bound is what
+   *  makes that fan-out affordable: it is capped at
+   *  {@link ADMIN_DEFAULT_PAGE_SIZE} round trips by default and
+   *  {@link ADMIN_MAX_PAGE_SIZE} at worst, never "every subject in the
+   *  tenant". */
   readonly listSubjectsWithConnections: (
     options?: AdminListSubjectsOptions,
   ) => Effect.Effect<readonly AdminSubjectWithConnections[], StorageFailure>;
@@ -554,9 +604,18 @@ export interface ExecutorConfig<TPlugins extends readonly AnyPlugin[] = readonly
    * surface that reads across every subject in the tenant (see
    * {@link ExecutorAdmin}). Default OFF — `admin` is simply absent, so the
    * escape hatch has to be asked for by a host that has authorized an
-   * org-level caller. Enabling it never changes the product view: every other
-   * surface stays bound to `{ tenant, subject }`, and the platform handle
-   * cannot write (the owner policy rejects writes at `reach: "tenant"`).
+   * org-level caller.
+   *
+   * Enabling it makes the WHOLE executor read-only, not just `admin`: the base
+   * owner context carries `writes: "denied"`, so `connections`, `policies`,
+   * `integrations` and `oauth` refuse every create/update/delete at the storage
+   * boundary. An executor built for an org-level caller is an observer, and
+   * `admin` being its only tenant-wide surface is not the same as it being its
+   * only guarded one.
+   *
+   * READS still differ by surface: only `admin` is tenant-wide. Every other
+   * surface stays bound to `{ tenant, subject }` — widening them would expose
+   * every subject's connection rows, credential item ids included.
    */
   readonly platformView?: boolean;
 }
@@ -1481,7 +1540,22 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
       catch: (cause) => storageFailureFromUnknown("Failed to validate executor tables", cause),
     });
 
-    const ownerContext: ExecutorOwnerPolicyContext = { tenant, subject };
+    // The platform view is read-only ACROSS THE WHOLE EXECUTOR, not just on the
+    // `admin` handle: `writes: "denied"` rides on the base context, so
+    // `connections`, `policies`, `integrations` and `oauth` are guarded by the
+    // owner policy too. Without it a platform executor is subject-less but
+    // still bound to the tenant's ORG partition, and could create/update/delete
+    // every `owner: "org"` row through those ordinary surfaces.
+    //
+    // Deliberately NOT `reach: "tenant"` here — that would widen this context's
+    // reads to every subject's `connection` rows, credential item ids included.
+    // Reach stays "bound"; only the write axis changes. See
+    // `ExecutorOwnerPolicyContext.writes`.
+    const ownerContext: ExecutorOwnerPolicyContext = {
+      tenant,
+      subject,
+      ...(config.platformView === true ? { writes: "denied" as const } : {}),
+    };
     const rootDb = withQueryContext(rootDbUntyped, ownerContext);
     const fuma = makeFumaClient(rootDb);
     const core = makeCoreDb(fuma);
@@ -4291,6 +4365,11 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
     // about reach, so it cannot drift into the platform view. Writes through
     // this handle are rejected by the owner policy, so "read-only" is enforced
     // at the storage boundary, not by this module's discipline.
+    //
+    // The base context is ALREADY `writes: "denied"` whenever the platform view
+    // is on (see `ownerContext`); this handle adds tenant reach on top. The two
+    // axes are separate on purpose — this is the only surface that gets the
+    // widened reads, while read-only covers all of them.
     // ------------------------------------------------------------------
 
     const makeAdmin = (): ExecutorAdmin => {
@@ -4327,8 +4406,12 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
 
       const listSubjects = (
         options?: AdminListSubjectsOptions,
-      ): Effect.Effect<readonly AdminSubject[], StorageFailure> =>
-        platformCore
+      ): Effect.Effect<readonly AdminSubject[], StorageFailure> => {
+        // Always both, always integers — see `normalizeAdminPaging`. Passing
+        // them through independently produced a bare OFFSET, which SQLite
+        // rejects outright.
+        const { limit, offset } = normalizeAdminPaging(options);
+        return platformCore
           .findMany("subject", {
             // Oldest first, ties broken on the unique key so the order is
             // total and paging can't repeat or skip a row.
@@ -4336,10 +4419,11 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
               ["created_at", "asc"],
               ["external_id", "asc"],
             ],
-            ...(options?.limit === undefined ? {} : { limit: options.limit }),
-            ...(options?.offset === undefined ? {} : { offset: options.offset }),
+            limit,
+            offset,
           })
           .pipe(Effect.map((rows) => rows.map(rowToAdminSubject)));
+      };
 
       // Keyed on `(tenant, external_id)` — the table's unique index. No
       // `tenant` clause here: the tenant policy adds it to every read, the
