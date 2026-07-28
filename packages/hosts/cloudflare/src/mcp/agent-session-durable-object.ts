@@ -33,6 +33,13 @@ import {
   pausedLeaseExtensionLog,
   runningLeaseExtensionLog,
 } from "./session-alarm-policy";
+import {
+  McpRestartReapedExecutions,
+  asRestartReapAgent,
+  asRestartReapEventStore,
+  reapOrphanedRequests,
+  restartReapLog,
+} from "./restart-reaper";
 
 export type IncomingTraceHeaders = IncomingPropagationHeaders;
 
@@ -618,7 +625,95 @@ export abstract class McpAgentSessionDOBase<
         yield* self.closeRuntime();
         return yield* Effect.failCause(started.cause);
       }
+      yield* self.reapRestartOrphanedRequests();
     });
+  }
+
+  /**
+   * Fail loudly for tool calls the previous isolate was killed mid-flight.
+   *
+   * Runs on every runtime start, immediately after `closeRuntime()` has torn
+   * down whatever ran before and the fresh transport is up. That ordering IS
+   * the safety argument: at this instant no execution from any earlier runtime
+   * survives, so a POST stream that still carries persisted in-flight request
+   * ids can only be work that is already dead — a deploy that reset the
+   * isolate, or an idle disposal that outlived its running lease. Reaping is
+   * therefore never racing live work, and the same code covers both causes.
+   *
+   * The client half of the fix is the priming SSE event the patched agents
+   * transport writes at the head of every POST tools/call stream: without it
+   * the MCP SDK never reconnects a cleanly-closed POST stream, and the error
+   * written here would sit in storage unread while the client hangs to its own
+   * timeout. See `restart-reaper.ts` and `patches/agents@0.17.3.patch`.
+   *
+   * Failures here are logged and swallowed: a session must still start even if
+   * the event store rejects a write, and the pre-existing behavior (a hang) is
+   * no worse than before.
+   */
+  private reapRestartOrphanedRequests(): Effect.Effect<void> {
+    const self = this;
+    return Effect.gen(function* () {
+      yield* self.prepareErrorCaptureScope();
+      // `getEventStore()` is the agents SDK's documented override point for
+      // resumability, so it is the supported way to reach the same store the
+      // transport writes through. A subclass that disables resumability gets
+      // `undefined` here and the reaper stands down — correctly, since with no
+      // event store there is no replay for a client to collect.
+      const agent = asRestartReapAgent(self);
+      const eventStore = asRestartReapEventStore(self.getEventStore());
+      if (!agent || !eventStore) {
+        console.warn(
+          JSON.stringify({
+            event: "mcp_session_restart_reap_unavailable",
+            sessionId: self.sessionId,
+            reason: agent ? "no_event_store" : "agent_api_missing",
+          }),
+        );
+        return;
+      }
+
+      const outcome = yield* reapOrphanedRequests({ agent, eventStore });
+      if (outcome.kind === "unavailable" || outcome.requestCount === 0) return;
+
+      console.error(
+        JSON.stringify(
+          restartReapLog({
+            sessionId: self.sessionId,
+            streamIds: outcome.streamIds,
+            requestCount: outcome.requestCount,
+          }),
+        ),
+      );
+      // Fail the span deliberately. Killed executions export NOTHING today —
+      // that invisibility is half the bug — so the reap is surfaced as a real
+      // span failure, which the OTEL tracer renders as status ERROR with a
+      // recorded exception. The failure is caught immediately below, so DO
+      // startup still succeeds.
+      return yield* new McpRestartReapedExecutions({
+        streamCount: outcome.streamIds.length,
+        requestCount: outcome.requestCount,
+      });
+    }).pipe(
+      // Inside the span, so the annotations land on `restart_reap` itself. The
+      // OTEL tracer additionally sets status ERROR and records the exception
+      // when the span ends on a failure, which is what makes the reap
+      // queryable in the trace store.
+      Effect.tapCause((cause) =>
+        Effect.gen(function* () {
+          yield* self.captureCauseEffect(cause);
+          yield* self.recordCauseOnSpan(cause);
+        }),
+      ),
+      Effect.withSpan("McpSessionDO.restart_reap"),
+      // Restart reaping starts a fresh trace: the isolate that owned the
+      // original request's trace context died with it, and a start carries no
+      // incoming propagation. Without the telemetry layer these spans land in
+      // Effect's no-op tracer and never export — which is the invisibility
+      // this whole change exists to remove.
+      (effect) => self.withTelemetry(effect),
+      Effect.ignore,
+      (effect) => self.withSpanFlush(effect),
+    );
   }
 
   protected runMcpAgentOnStart(props?: McpSessionProps): Promise<void> {

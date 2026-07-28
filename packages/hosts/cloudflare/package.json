@@ -23,6 +23,10 @@
     "./mcp/session-stub": {
       "types": "./src/mcp/session-stub.ts",
       "default": "./src/mcp/session-stub.ts"
+    },
+    "./mcp/restart-reaper": {
+      "types": "./src/mcp/restart-reaper.ts",
+      "default": "./src/mcp/restart-reaper.ts"
     }
   },
   "scripts": {
