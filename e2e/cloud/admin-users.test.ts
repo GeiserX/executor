@@ -33,7 +33,7 @@ import { AuthTemplateSlug, ConnectionName, IntegrationSlug } from "@executor-js/
 
 import { scenario } from "../src/scenario";
 import { Api, Target } from "../src/services";
-import type { Identity, Target as TargetShape } from "../src/target";
+import { accountIdOf, cookieOf, joinOrg } from "./support/session";
 
 const api = composePluginApi([openApiHttpPlugin()] as const);
 type Client = HttpApiClient.ForApi<typeof api>;
@@ -73,58 +73,6 @@ const registerIntegration = (client: Client) =>
   });
 
 const freshConnectionName = () => ConnectionName.make(`conn${randomBytes(4).toString("hex")}`);
-
-const cookieOf = (identity: Identity): string => identity.headers?.["cookie"] ?? "";
-
-const postJson = (target: TargetShape, path: string, identity: Identity, body: unknown) =>
-  Effect.promise(async () => {
-    const response = await fetch(new URL(path, target.baseUrl), {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        origin: new URL(target.baseUrl).origin,
-        cookie: cookieOf(identity),
-      },
-      body: JSON.stringify(body),
-    });
-    if (!response.ok) {
-      throw new Error(`${path} failed (${response.status}): ${await response.text()}`);
-    }
-    return response;
-  });
-
-/** The identity re-bound to the refreshed session cookie a response set. */
-const withRefreshedSession = (identity: Identity, response: Response): Identity => {
-  const refreshed = (response.headers.getSetCookie?.() ?? [])
-    .find((header) => header.startsWith("wos-session="))
-    ?.split(";")[0];
-  if (!refreshed) throw new Error("response did not refresh the session cookie");
-  return { ...identity, headers: { cookie: refreshed } };
-};
-
-/** Invite `member` into `admin`'s org and accept — the real invite flow. */
-const joinOrg = (target: TargetShape, admin: Identity, member: Identity) =>
-  Effect.gen(function* () {
-    const inviteResponse = yield* postJson(target, "/api/account/members/invite", admin, {
-      email: member.credentials?.email,
-    });
-    const invitation = (yield* Effect.promise(() => inviteResponse.json())) as { id: string };
-    const acceptResponse = yield* postJson(target, "/api/auth/accept-invitation", member, {
-      invitationId: invitation.id,
-    });
-    return withRefreshedSession(member, acceptResponse);
-  });
-
-/** The caller's own account id — the `externalId` the admin plane reports. */
-const accountIdOf = (target: TargetShape, identity: Identity) =>
-  Effect.promise(async () => {
-    const response = await fetch(new URL("/api/account/me", target.baseUrl), {
-      headers: { cookie: cookieOf(identity) },
-    });
-    if (!response.ok) throw new Error(`/api/account/me failed (${response.status})`);
-    const body = (await response.json()) as { user: { id: string } };
-    return body.user.id;
-  });
 
 scenario(
   "Admin · the owner sees every member of the workspace and what each has connected",

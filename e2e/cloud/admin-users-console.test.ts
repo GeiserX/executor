@@ -9,9 +9,9 @@
 // access rather than shown an empty workspace.
 //
 // Two members are built through the REAL flows (login → create-organization →
-// invite → accept-invitation) and each connects their own credential, so the
-// two rows differ in what they've connected and the summary has something to
-// be right about.
+// invite → accept-invitation, in `./support/session`) and each connects their
+// own credential, so the two rows differ in what they've connected and the
+// summary has something to be right about.
 import { randomBytes } from "node:crypto";
 
 import { expect } from "@effect/vitest";
@@ -23,7 +23,7 @@ import { AuthTemplateSlug, ConnectionName, IntegrationSlug } from "@executor-js/
 
 import { scenario } from "../src/scenario";
 import { Api, Browser, Target } from "../src/services";
-import type { Identity, Target as TargetShape } from "../src/target";
+import { accountIdOf, forBrowser, joinOrg } from "./support/session";
 
 const api = composePluginApi([openApiHttpPlugin()] as const);
 type Client = HttpApiClient.ForApi<typeof api>;
@@ -72,75 +72,6 @@ const registerIntegration = (client: Client, label: string) =>
   });
 
 const freshConnectionName = () => ConnectionName.make(`conn${randomBytes(4).toString("hex")}`);
-
-const cookieOf = (identity: Identity): string => identity.headers?.["cookie"] ?? "";
-
-/** The identity re-bound so the BROWSER carries the same session the API calls
- *  do. `joinOrg` refreshes `headers.cookie` (the org is baked into the sealed
- *  session) but leaves `cookies` on the pre-join value, and the browser context
- *  is seeded from `cookies`. */
-const forBrowser = (identity: Identity): Identity => {
-  const cookie = cookieOf(identity);
-  const separator = cookie.indexOf("=");
-  if (separator < 0) throw new Error("identity carries no session cookie");
-  return {
-    ...identity,
-    cookies: [{ name: cookie.slice(0, separator), value: cookie.slice(separator + 1) }],
-  };
-};
-
-const postJson = (target: TargetShape, path: string, identity: Identity, body: unknown) =>
-  Effect.promise(async () => {
-    const response = await fetch(new URL(path, target.baseUrl), {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        origin: new URL(target.baseUrl).origin,
-        cookie: cookieOf(identity),
-      },
-      body: JSON.stringify(body),
-    });
-    if (!response.ok) {
-      throw new Error(`${path} failed (${response.status}): ${await response.text()}`);
-    }
-    return response;
-  });
-
-/** The identity re-bound to the refreshed session cookie a response set. */
-const withRefreshedSession = (identity: Identity, response: Response): Identity => {
-  const refreshed = (response.headers.getSetCookie?.() ?? [])
-    .find((header) => header.startsWith("wos-session="))
-    ?.split(";")[0];
-  if (!refreshed) throw new Error("response did not refresh the session cookie");
-  return { ...identity, headers: { cookie: refreshed } };
-};
-
-/** Invite `member` into `admin`'s org and accept — the real invite flow. The
- *  invite carries no roleSlug, so the joiner lands as a plain member: exactly
- *  the actor the denial half of this scenario needs. */
-const joinOrg = (target: TargetShape, admin: Identity, member: Identity) =>
-  Effect.gen(function* () {
-    const inviteResponse = yield* postJson(target, "/api/account/members/invite", admin, {
-      email: member.credentials?.email,
-    });
-    const invitation = (yield* Effect.promise(() => inviteResponse.json())) as { id: string };
-    const acceptResponse = yield* postJson(target, "/api/auth/accept-invitation", member, {
-      invitationId: invitation.id,
-    });
-    return withRefreshedSession(member, acceptResponse);
-  });
-
-/** The caller's own account id — the `externalId` the admin plane reports and
- *  the page renders in mono. */
-const accountIdOf = (target: TargetShape, identity: Identity) =>
-  Effect.promise(async () => {
-    const response = await fetch(new URL("/api/account/me", target.baseUrl), {
-      headers: { cookie: cookieOf(identity) },
-    });
-    if (!response.ok) throw new Error(`/api/account/me failed (${response.status})`);
-    const body = (await response.json()) as { user: { id: string } };
-    return body.user.id;
-  });
 
 scenario(
   "Admin · the Users page shows every member and what each has connected, and refuses a plain member",
@@ -339,17 +270,11 @@ scenario(
             const origin = new URL(target.baseUrl).origin;
             // The link carries THIS admin's org slug. A recipient who belongs
             // to several orgs would otherwise resolve the bare form against
-            // their default org and connect in the wrong workspace.
-            //
-            // The URL is asserted as a rendered string rather than navigated:
-            // the `/connect/...` route lands on the sibling connect-deep-links
-            // branch (#1466) and does not exist in this build.
-            //
-            // TODO(connect-deep-links #1466): once that route is merged, add the
-            // signed-out multi-org round trip — open this URL as a recipient who
-            // belongs to two orgs and assert the connection lands in the SENDING
-            // org, not their default. That test belongs on the deep-link branch
-            // or post-merge, since it needs the route to resolve.
+            // their default org and connect in the wrong workspace. That
+            // multi-org round trip is its own scenario
+            // (`connect-link-multi-org.test.ts`), which needs a second org to
+            // land in by mistake; here the concern is what this page RENDERS,
+            // plus that the rendered link actually resolves (below).
             await detail
               .getByText(`${origin}/${slug}/connect/${availableIntegration}`, { exact: true })
               .waitFor({ state: "visible", timeout: 30_000 });
@@ -369,6 +294,27 @@ scenario(
               await detail.getByText("/connect/executor", { exact: false }).count(),
               "the built-in integration is never offered as a connect link",
             ).toBe(0);
+          });
+
+          await step("The rendered connect link actually resolves", async () => {
+            // Following the link the page just rendered, rather than only
+            // reading it back. A rendered string proves the page composed a URL;
+            // it cannot tell a working link from a 404 — which is the failure an
+            // operator would discover only after sending it to someone.
+            const origin = new URL(target.baseUrl).origin;
+            await page.goto(`${origin}/${slug}/connect/${availableIntegration}`, {
+              waitUntil: "domcontentloaded",
+            });
+            // It forwards into that integration's own detail route with the
+            // add-account handoff, still inside this admin's org.
+            await page.waitForURL(
+              (url) => url.pathname === `/${slug}/integrations/${availableIntegration}`,
+              { timeout: 30_000 },
+            );
+            expect(
+              new URL(page.url()).searchParams.get("addAccount"),
+              "the link lands in the connect flow, not just on the page",
+            ).toBe("1");
           });
         });
 

@@ -165,9 +165,8 @@ const resolveJwtPrincipal = (token: string, jwt: JwtBearerConfig) =>
  * can accidentally treat it as a member, and the executor built from it binds
  * `subject: null` + the read-only tenant reach rather than inventing a subject.
  *
- * PR 1.5 turns this into an executor at the `/admin/*` mount:
- * `makeScopedExecutor`-equivalent with `{ tenant: organizationId, subject:
- * undefined, platformView: true }`.
+ * The `/admin/*` mount turns this into an executor with `{ tenant:
+ * organizationId, subject: undefined, platformView: true }`.
  */
 export interface PlatformAuth {
   readonly kind: "platform";
@@ -261,8 +260,8 @@ export const resolveBearerAuth = (
  * The PRODUCT-view bearer resolver: as {@link resolveBearerAuth}, but an
  * org-level key is REJECTED rather than downgraded. The product endpoints are
  * bound to one acting subject, so there is no honest way to serve them an
- * org key — PR 1.5 routes those to the `/admin/*` mount instead. (Kept the
- * historical name; the re-export and resolver tests reference it.)
+ * org key — those belong at the `/admin/*` mount instead. (Kept the historical
+ * name; the re-export and resolver tests reference it.)
  */
 export const resolveApiKeyPrincipal = (
   request: Request,

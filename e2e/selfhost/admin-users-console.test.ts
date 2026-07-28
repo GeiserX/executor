@@ -220,14 +220,11 @@ scenario(
             // segment at all would produce, and it is covered by the display
             // unit tests rather than pinned to a host here.
             //
-            // Asserted as a rendered string, not navigated: the `/connect/...`
-            // route lands on the sibling connect-deep-links branch (#1466) and
-            // is not in this build.
-            //
-            // TODO(connect-deep-links #1466): once that route exists, add the
-            // signed-out round trip — open this link as a recipient and assert
-            // it reaches the connect flow in the SENDING org. It belongs on the
-            // deep-link branch or post-merge, since the route must resolve.
+            // The SHAPE of every rendered link is what this step pins; that the
+            // link resolves is asserted by following one in the next step, and
+            // the multi-org "lands in the sending workspace" round trip is
+            // cloud's `connect-link-multi-org.test.ts` (it needs a second org,
+            // which self-host's single turnkey org cannot provide).
             const detail = page.getByRole("dialog");
             const origin = new URL(target.baseUrl).origin;
             // The console's own org prefix, read from the URL the page settled
@@ -262,6 +259,31 @@ scenario(
                 `exactly one slug after /connect/: ${link}`,
               ).toBe(1);
             }
+          });
+
+          await step("The rendered connect link actually resolves", async () => {
+            // Following the link the page just rendered. A rendered string
+            // proves the page composed a URL; it cannot distinguish a working
+            // link from a 404 — which an operator would only discover after
+            // sending it to someone.
+            const origin = new URL(target.baseUrl).origin;
+            const consolePath = new URL(page.url()).pathname;
+            const orgPrefix = consolePath.endsWith("/users")
+              ? consolePath.slice(0, -"/users".length)
+              : "";
+            await page.goto(`${origin}${orgPrefix}/connect/${availableIntegration}`, {
+              waitUntil: "domcontentloaded",
+            });
+            // It forwards into that integration's own detail route with the
+            // add-account handoff, still inside the console's own org.
+            await page.waitForURL(
+              (url) => url.pathname === `${orgPrefix}/integrations/${availableIntegration}`,
+              { timeout: 30_000 },
+            );
+            expect(
+              new URL(page.url()).searchParams.get("addAccount"),
+              "the link lands in the connect flow, not just on the page",
+            ).toBe("1");
           });
         });
 
