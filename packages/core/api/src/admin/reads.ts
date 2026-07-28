@@ -170,19 +170,41 @@ const toUser = (subject: AdminSubject, identities: ReadonlyMap<string, AdminUser
 };
 
 /**
+ * The stored health verdict → the admin plane's `AdminConnectionHealth`.
+ *
+ * NESTED OBJECTS GET THE SAME TREATMENT AS COLUMNS. `HealthCheckResult` is the
+ * owner's view of their own probe and carries content taken from the UPSTREAM
+ * provider's response: `identity` (the value at the configured `identityField`
+ * — usually the account's email at the provider), `detail` (a raw diagnostic
+ * that can quote an upstream error body), and `responseSample` (a bounded
+ * sample of the real response body's scalar leaves). This plane reports on
+ * OTHER people's connections, so none of that may travel; forwarding
+ * `connection.lastHealth` whole is exactly the leak this function exists to
+ * prevent — the column allowlist below would still have "passed" while every
+ * upstream field rode along inside it.
+ *
+ * Two fields survive, both of them verdicts ABOUT the connection rather than
+ * content FROM it: `status` and `checkedAt`. Written as an explicit
+ * construction, never a spread, for the same reason the row mappings are.
+ */
+const toHealth = (health: AdminConnection["lastHealth"]) =>
+  health === null ? null : { status: health.status, checkedAt: health.checkedAt };
+
+/**
  * `AdminConnection` → the public `AdminUserConnection` shape.
  *
  * `subject` is dropped: on `/admin/users/:externalId/connections` it is the
  * path parameter, and on the joined view it is the enclosing user's own id, so
  * carrying it would be redundant on both. Everything kept here is either an
- * identifier or a health/access summary — never credential material.
+ * identifier or a health/access summary — never credential material, and never
+ * upstream account content (see `toHealth`).
  */
 const toConnection = (connection: AdminConnection) => ({
   owner: connection.owner,
   integration: connection.integration,
   name: connection.name,
   oauthScope: connection.oauthScope,
-  lastHealth: connection.lastHealth,
+  lastHealth: toHealth(connection.lastHealth),
 });
 
 const toUserWithConnections = (

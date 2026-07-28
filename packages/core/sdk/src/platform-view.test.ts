@@ -36,6 +36,29 @@ const FORBIDDEN_CONNECTION_FIELDS = [
   "token",
 ] as const;
 
+/**
+ * The upstream-derived halves of a stored health verdict: the account identity
+ * extracted from the configured `identityField` (typically the user's email AT
+ * the provider), a raw diagnostic that can quote an upstream error body, and a
+ * bounded sample of the real response body.
+ *
+ * These are NOT on the list above, and that is deliberate rather than an
+ * oversight. This layer is the in-process platform view, not a wire shape:
+ * `AdminConnection.lastHealth` is the full `HealthCheckResult`, and the
+ * narrowing to status + checkedAt happens where the response is BUILT, in
+ * `@executor-js/api`'s `admin/reads.ts` → `AdminConnectionHealth`. Listing them
+ * as forbidden top-level connection keys would pass without testing anything,
+ * because they never were top-level keys — they live nested inside
+ * `lastHealth`. That vacuous-green assertion is precisely the failure mode this
+ * comment exists to prevent.
+ *
+ * So the assertion below pins the SEAM instead: this layer DOES carry them, and
+ * anyone who "fixes" the leak here rather than at the projection has moved the
+ * boundary. The absence assertions live in `packages/core/api`'s
+ * `admin-users.test.ts`, against real HTTP responses.
+ */
+const UPSTREAM_HEALTH_FIELDS = ["identity", "detail", "responseSample"] as const;
+
 const withDb = <A, E>(body: (db: SqliteTestFumaDb) => Effect.Effect<A, E>): Effect.Effect<A, E> =>
   Effect.acquireUseRelease(
     Effect.promise(() => createSqliteTestFumaDb({ tables: collectTables() })),
@@ -75,7 +98,17 @@ const insertConnection = (
         JSON.stringify({ token: `SECRET-item-${row.rowId}` }),
         `SECRET-refresh-${row.rowId}`,
         row.oauthScope ?? null,
-        JSON.stringify({ status: "healthy", checkedAt: 1_700_000_000_000 }),
+        // A full stored verdict, upstream-derived fields included — that is
+        // what a real health check writes. This layer is entitled to read them
+        // back (see UPSTREAM_HEALTH_FIELDS); the API's projection is what keeps
+        // them off the wire.
+        JSON.stringify({
+          status: "healthy",
+          checkedAt: 1_700_000_000_000,
+          identity: `UPSTREAM-identity-${row.rowId}@provider.test`,
+          detail: `UPSTREAM-detail-${row.rowId}`,
+          responseSample: [{ path: "user.email", value: `UPSTREAM-sample-${row.rowId}` }],
+        }),
         Date.now(),
         Date.now(),
       ],
@@ -269,6 +302,22 @@ describe("platform view — admin.listSubjectConnections", () => {
           // Belt and braces: no seeded secret value appears anywhere in the
           // serialized shape, whatever it is keyed under.
           expect(JSON.stringify(connection)).not.toContain("SECRET-");
+        }
+
+        // The SEAM, pinned. This layer carries the whole stored verdict —
+        // upstream account content and all — because it is in-process and the
+        // caller is the platform itself. The narrowing to status + checkedAt is
+        // `@executor-js/api`'s `AdminConnectionHealth`, applied where the
+        // RESPONSE is built. If this assertion ever fails because the fields
+        // stopped arriving here, the projection in `admin/reads.ts` is no
+        // longer the thing holding the line and the API's own absence tests
+        // have quietly become vacuous.
+        const health = connections[0]?.lastHealth;
+        for (const field of UPSTREAM_HEALTH_FIELDS) {
+          expect(
+            Object.keys(health ?? {}),
+            `the platform view still carries "${field}"; the API projection is the boundary`,
+          ).toContain(field);
         }
       }),
     ),

@@ -64,6 +64,18 @@ const FORBIDDEN_FIELDS = [
   // neither the raw column name nor the tenant may leak onto the wire.
   "subject",
   "tenant",
+  // The upstream-derived halves of a stored health verdict. These are not
+  // CREDENTIALS — they are the provider's own response content: the account
+  // identity extracted from `identityField` (another user's email at the
+  // provider), a raw diagnostic that can quote an upstream error body, and a
+  // sample of the real response body. `lastHealth` is an allowed COLUMN, which
+  // is exactly why these need naming: the per-column allowlist passed while the
+  // whole nested object rode along inside it. `AdminConnectionHealth` narrows
+  // it to status + checkedAt; this list is what keeps it narrow.
+  "identity",
+  "detail",
+  "responseSample",
+  "httpStatus",
 ] as const;
 
 // The bodies below acquire a scoped web handler, so `R` carries `Scope` rather
@@ -111,7 +123,27 @@ const insertConnection = (
         JSON.stringify({ token: `SECRET-item-${row.rowId}` }),
         `SECRET-refresh-${row.rowId}`,
         row.oauthScope ?? null,
-        JSON.stringify({ status: "healthy", checkedAt: 1_700_000_000_000 }),
+        // A REAL stored health verdict, including the parts that come from the
+        // upstream provider's own response. `identity` is the value pulled from
+        // the configured `identityField` (typically the account's email AT the
+        // provider), `detail` is a raw diagnostic that can quote an upstream
+        // body, and `responseSample` is a bounded sample of the actual response
+        // body's scalar leaves. All three are legitimate on the product plane,
+        // where the caller owns the credential — and none may cross onto the
+        // ADMIN plane, which reports on other people's connections. Seeded here
+        // so the assertions below have ground truth to catch rather than
+        // asserting the absence of something that was never present.
+        JSON.stringify({
+          status: "healthy",
+          checkedAt: 1_700_000_000_000,
+          httpStatus: 200,
+          identity: `UPSTREAM-identity-${row.rowId}@provider.test`,
+          detail: `UPSTREAM-detail-${row.rowId}`,
+          responseSample: [
+            { path: "user.email", value: `UPSTREAM-sample-${row.rowId}@provider.test` },
+            { path: "user.login", value: `UPSTREAM-login-${row.rowId}` },
+          ],
+        }),
         Date.now(),
         Date.now(),
       ],
@@ -473,6 +505,11 @@ describe("admin users API", () => {
           // The seeded secrets are the ground truth: nothing derived from a
           // credential may appear, whatever it is called.
           expect(raw, `${path} must not leak a stored secret`).not.toContain("SECRET-");
+          // And the same test for upstream ACCOUNT data, which is a different
+          // kind of leak from a credential and was reaching the wire inside
+          // `lastHealth`. Matching on the seeded marker rather than on field
+          // names catches a rename, a re-nesting, or a stringified blob.
+          expect(raw, `${path} must not leak upstream account data`).not.toContain("UPSTREAM-");
         }
       }),
     ),
@@ -560,6 +597,19 @@ describe("admin users API", () => {
           Object.keys(connections[0] ?? {}).sort(),
           "the connection projection is exactly the allowlist",
         ).toEqual(["integration", "lastHealth", "name", "oauthScope", "owner"]);
+
+        // `lastHealth` is an allowed column holding a nested object, so the
+        // allowlist has to reach INSIDE it — a whole-object forward is what let
+        // the provider's `identity` / `detail` / `responseSample` onto the
+        // wire. The stored verdict here carries all of them (see the seed), so
+        // this is a projection assertion, not a vacuous one.
+        expect(
+          Object.keys(connections[0]?.lastHealth ?? {}).sort(),
+          "the health projection is exactly status + checkedAt",
+        ).toEqual(["checkedAt", "status"]);
+        expect(connections[0]?.lastHealth?.status, "and the verdict itself survives").toBe(
+          "healthy",
+        );
 
         const { users } = yield* listUsers(admin, {});
         expect(

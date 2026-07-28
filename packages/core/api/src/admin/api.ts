@@ -20,6 +20,13 @@
 // a deliberate act that has to be argued against `platform-view.test.ts`'s
 // forbidden-field list.
 //
+// The allowlist is applied per FIELD, not per column: a column may be allowed
+// while the object inside it is not. `lastHealth` is the live case — the SDK's
+// `HealthCheckResult` carries upstream-derived content (`identity`, `detail`,
+// `responseSample`), so this contract narrows it to `AdminConnectionHealth`
+// rather than forwarding the nested object. Any future nested field arrives
+// under the same rule: project it, don't re-export it.
+//
 // Auth is applied by each host's own admin middleware (cloud: an org-scoped API
 // key or an admin session member; self-host: a Better Auth owner/admin member),
 // so this contract carries no provider-specific auth scheme — the same shape
@@ -29,7 +36,7 @@
 import { HttpApi, HttpApiEndpoint, HttpApiGroup } from "effect/unstable/httpapi";
 import { Schema } from "effect";
 
-import { ConnectionName, HealthCheckResult, IntegrationSlug, Owner } from "@executor-js/sdk/shared";
+import { ConnectionName, HealthStatus, IntegrationSlug, Owner } from "@executor-js/sdk/shared";
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -113,9 +120,43 @@ export const AdminUser = Schema.Struct({
 });
 
 /**
+ * The admin plane's view of a stored health verdict — a deliberate PROJECTION
+ * of the SDK's `HealthCheckResult`, not that type re-exported.
+ *
+ * WHY THIS IS ITS OWN SCHEMA. `HealthCheckResult` is the OWNER's view of their
+ * own probe, and it carries content lifted from the upstream provider's actual
+ * response: `identity` (the display value extracted from `identityField` —
+ * typically the account's email AT THE PROVIDER), `detail` (a raw diagnostic
+ * message, which for an HTTP failure can quote the upstream body), and
+ * `responseSample` (up to 25 scalar leaves of the real response body, ~120
+ * chars each, via `extractResponseFields`). That is fine on the product plane,
+ * where the caller IS the credential's owner. It is not fine here: this plane
+ * reports on OTHER people's connections, so forwarding the whole nested object
+ * would hand an operator another user's upstream account identity and sampled
+ * response content. The per-column allowlist in `admin/reads.ts` cannot catch
+ * that on its own — it allowlists the COLUMN and then forwards everything
+ * inside it — so the narrowing is expressed here, in the contract.
+ *
+ * WHAT SURVIVES. `status` answers the only question this plane asks ("is it
+ * healthy"), and `checkedAt` says how stale that answer is. Both are derived
+ * verdicts about the connection, never content from the provider's response.
+ * `httpStatus` is deliberately dropped as well: it is a diagnostic for the
+ * credential's owner, and adding fields here has to be argued against the
+ * forbidden-field lists in `platform-view.test.ts` and `admin-users.test.ts`.
+ */
+export const AdminConnectionHealth = Schema.Struct({
+  /** The stored verdict: healthy / expired / degraded / unknown. */
+  status: HealthStatus,
+  /** Epoch ms the check ran, so an operator can tell a fresh verdict from a
+   *  stale one. */
+  checkedAt: Schema.Number,
+});
+
+/**
  * A connection as the platform view sees it: enough to answer "what has this
  * user connected, and is it healthy", and nothing that could resolve a
- * credential. Mirrors `AdminConnection`.
+ * credential — or name the upstream account. Mirrors `AdminConnection`, except
+ * that `lastHealth` is narrowed to `AdminConnectionHealth` (see above).
  */
 export const AdminUserConnection = Schema.Struct({
   owner: Owner,
@@ -125,7 +166,9 @@ export const AdminUserConnection = Schema.Struct({
    *  at connect/refresh. Null for static credentials. A summary of ACCESS —
    *  never a token. */
   oauthScope: Schema.NullOr(Schema.String),
-  lastHealth: Schema.NullOr(HealthCheckResult),
+  /** The stored health verdict, PROJECTED to status + checkedAt. Never the
+   *  SDK's full `HealthCheckResult`: see `AdminConnectionHealth`. */
+  lastHealth: Schema.NullOr(AdminConnectionHealth),
 });
 
 /** A user joined with every connection they own in the tenant. */
@@ -186,9 +229,20 @@ const AdminUserIdentifierParams = { identifier: Schema.String };
 
 // Paging, mirroring `AdminListSubjectsOptions`. Query params arrive as strings,
 // so decode them here rather than making every handler interpret raw strings —
-// an out-of-range or non-numeric value is a 400 from the contract, not a
-// silently-ignored filter. The joined endpoint reads per-user connections, so
-// its page size is bounded harder than the flat list's.
+// a non-numeric, FRACTIONAL, or out-of-range value is a 400 from the contract,
+// not a silently-ignored filter and not a value handed to the driver.
+//
+// `isInt` is load-bearing, not decoration: `FiniteFromString` alone accepts
+// "1.5", and a fractional limit reached the driver as a `datatype mismatch`
+// 500. A row count is an integer by nature, so rejecting the fraction is the
+// honest answer rather than rounding a caller's request into something they
+// did not ask for.
+//
+// OMITTING these is not the same as passing 0. The SDK applies its own default
+// page size (`ADMIN_DEFAULT_PAGE_SIZE`, 100) and clamps to
+// `ADMIN_MAX_PAGE_SIZE` (500, the `maximum` below), so every response is a
+// bounded page — including `?offset=` with no `limit=`, which is a valid
+// request that pages through the default-sized window.
 //
 // `email` is an exact-match FILTER on the fixed list shape (the response is
 // still a `users` array, empty when nothing matches), which is how every other
@@ -202,10 +256,11 @@ const AdminUserIdentifierParams = { identifier: Schema.String };
 // schema transform on one and hand-rolled code on the other.
 const AdminListQuery = Schema.Struct({
   limit: Schema.optional(
-    Schema.FiniteFromString.check(Schema.isBetween({ minimum: 1, maximum: 500 })),
+    Schema.FiniteFromString.check(Schema.isInt(), Schema.isBetween({ minimum: 1, maximum: 500 })),
   ),
   offset: Schema.optional(
     Schema.FiniteFromString.check(
+      Schema.isInt(),
       Schema.isBetween({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
     ),
   ),
