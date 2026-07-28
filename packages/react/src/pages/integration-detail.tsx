@@ -38,7 +38,6 @@ import { ErrorState } from "../components/error-state";
 import { isAsyncResultLoading } from "../lib/async-result";
 import {
   integrationDetailInternalTabFromSearch,
-  integrationDetailSearchTabForInternal,
   type IntegrationDetailInternalTab,
   type IntegrationDetailSearchTab,
 } from "../lib/integration-detail-tabs";
@@ -119,7 +118,6 @@ export function IntegrationDetailPage(props: {
   const integrationData = AsyncResult.isSuccess(integration) ? integration.value : null;
   useExecutorDocumentTitle(integrationData?.name || namespace);
   const isBuiltInIntegration = namespace === "executor" || integrationData?.kind === "built-in";
-  const isAppsIntegration = integrationData?.kind === "apps";
   const currentTab = isBuiltInIntegration ? "tools" : activeTab;
   const canRefresh = integrationData?.canRefresh ?? false;
   const canRemove = integrationData?.canRemove ?? false;
@@ -169,9 +167,6 @@ export function IntegrationDetailPage(props: {
   // Find the plugin edit component based on integration kind
   const editPlugin = useMemo(() => {
     if (!integrationData) return null;
-    if (integrationData.kind === "apps") {
-      return integrationPlugins.find((p) => p.key === "apps") ?? null;
-    }
     return integrationPlugins.find((p) => p.key === integrationData.kind) ?? null;
   }, [integrationData, integrationPlugins]);
 
@@ -373,7 +368,7 @@ export function IntegrationDetailPage(props: {
       to: "/{-$orgSlug}/integrations/$namespace",
       params: { namespace },
       search: {
-        tab: integrationDetailSearchTabForInternal(integrationData?.kind, nextTab),
+        tab: nextTab,
       },
     });
   };
@@ -394,7 +389,7 @@ export function IntegrationDetailPage(props: {
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
-          {!confirmDelete && !isBuiltInIntegration && !isAppsIntegration && integrationData && (
+          {!confirmDelete && !isBuiltInIntegration && integrationData && (
             <Button variant="outline" size="sm" onClick={() => setEditSheetOpen(true)}>
               Edit
             </Button>
@@ -412,7 +407,6 @@ export function IntegrationDetailPage(props: {
           )}
 
           {canRemove &&
-            !isAppsIntegration &&
             (confirmDelete ? (
               <div className="flex items-center gap-2">
                 <Button
@@ -452,11 +446,7 @@ export function IntegrationDetailPage(props: {
       >
         <div className="shrink-0 border-b border-border/60 px-4 py-2">
           <TabsList variant="line">
-            {!isBuiltInIntegration && (
-              <TabsTrigger value="accounts">
-                {isAppsIntegration ? "Source" : "Accounts"}
-              </TabsTrigger>
-            )}
+            {!isBuiltInIntegration && <TabsTrigger value="accounts">Accounts</TabsTrigger>}
             <TabsTrigger value="tools">Tools</TabsTrigger>
           </TabsList>
         </div>
