@@ -406,17 +406,20 @@ describe("platform view — admin.listSubjects", () => {
  * missing credential provider), and such a failure would let the assertion pass
  * without the policy ever having been consulted.
  */
-const expectWriteRefused = <A, E extends { readonly _tag: string }>(effect: Effect.Effect<A, E>) =>
-  effect.pipe(
-    // A write that SUCCEEDS dies here rather than reaching an assertion, so the
-    // hole this pins can never be reported as a pass.
+const expectWriteRefused = <A, E extends { readonly _tag: string }>(
+  effect: Effect.Effect<A, E | StorageError>,
+) =>
+  // The surfaces under test fail with different unions (StorageFailure,
+  // ConnectionNotFoundError, …). The refusal this pins is always a
+  // StorageError, so the effect is widened for the catch; `orDie` below still
+  // turns every OTHER tag into a test failure, and a write that SUCCEEDS dies
+  // rather than reaching an assertion — so the hole can never pass silently.
+  (effect as Effect.Effect<A, StorageError>).pipe(
     Effect.flatMap(() => Effect.die("expected the platform view to refuse this write")),
     Effect.catchTag("StorageError", (error: StorageError) => {
       expect(error.message).toContain("read-only");
       return Effect.void;
     }),
-    // Any OTHER failure means the call never reached the owner policy — an
-    // absent row, a missing provider — which would leave the refusal untested.
     Effect.orDie,
   );
 
