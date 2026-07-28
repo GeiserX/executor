@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useAtomRefresh, useAtomValue } from "@effect/atom-react";
+import { useParams } from "@tanstack/react-router";
 import * as AsyncResult from "effect/unstable/reactivity/AsyncResult";
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
@@ -42,6 +43,7 @@ import {
   pageNumber,
   shortenExternalId,
   splitPage,
+  type AdminCatalogRow,
   type AdminConnectionRow,
 } from "../lib/admin-users-display";
 import {
@@ -172,14 +174,16 @@ const useIntegrationIcons = (): IconLookup => {
   };
 };
 
-/** The catalog slugs, for the available-vs-connected view. Empty while the
- *  catalog loads, which degrades to "connected only" rather than blocking the
- *  users table on a second request. */
-const useCatalogSlugs = (): readonly IntegrationSlug[] => {
+/** The catalog rows this view needs — slug plus kind, since `kind` is what says
+ *  whether an integration can be connected at all (see
+ *  `isConnectableIntegration`). Empty while the catalog loads, which degrades to
+ *  "connected only" rather than blocking the users table on a second request. */
+const useCatalogRows = (): readonly AdminCatalogRow[] => {
   const catalog = useAtomValue(integrationsOptimisticAtom);
   return Option.match(AsyncResult.value(catalog), {
-    onNone: () => [],
-    onSome: (integrations: readonly Integration[]) => integrations.map((row) => row.slug),
+    onNone: (): readonly AdminCatalogRow[] => [],
+    onSome: (integrations: readonly Integration[]) =>
+      integrations.map((row) => ({ slug: row.slug, kind: row.kind })),
   });
 };
 
@@ -192,7 +196,7 @@ const useCatalogSlugs = (): readonly IntegrationSlug[] => {
  * their connections cannot.
  */
 function ConnectionGrid(props: {
-  readonly catalog: readonly IntegrationSlug[];
+  readonly catalog: readonly AdminCatalogRow[];
   readonly connections: readonly AdminConnectionRow[];
   readonly icons: IconLookup;
 }) {
@@ -248,13 +252,16 @@ function ConnectionGrid(props: {
 
 function UserDetail(props: {
   readonly user: AdminUserRow;
-  readonly catalog: readonly IntegrationSlug[];
+  readonly catalog: readonly AdminCatalogRow[];
   readonly icons: IconLookup;
+  readonly orgSlug: string | undefined;
 }) {
   const result = useAtomValue(adminUserConnectionsAtom(props.user.externalId));
   const refresh = useAtomRefresh(adminUserConnectionsAtom(props.user.externalId));
   // The connect link targets the recipient's own session, so it is built for
-  // this deployment's origin and copied out — never navigated to from here.
+  // this deployment's origin and copied out — never navigated to from here. It
+  // carries THIS admin's org so a multi-org recipient connects in the workspace
+  // the link came from, not whichever one their session defaults to.
   const origin = globalThis.window?.location?.origin ?? "";
 
   if (isAsyncResultLoading(result)) {
@@ -366,7 +373,7 @@ function UserDetail(props: {
               <div className="mt-3 overflow-hidden rounded-lg border border-border bg-card">
                 {available.map((state) => {
                   const { icon, url, name } = props.icons(state.integration);
-                  const link = connectLinkUrl(state.integration, origin);
+                  const link = connectLinkUrl(state.integration, origin, props.orgSlug);
                   return (
                     <div
                       key={state.integration}
@@ -382,7 +389,10 @@ function UserDetail(props: {
                       </span>
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-sm text-foreground">{name}</p>
-                        <p className="truncate font-mono text-[11px] text-muted-foreground">
+                        <p
+                          data-slot="admin-user-connect-link"
+                          className="truncate font-mono text-[11px] text-muted-foreground"
+                        >
                           {link}
                         </p>
                       </div>
@@ -409,8 +419,14 @@ export function AdminUsersPage() {
   const page = { limit: ADMIN_USERS_PAGE_SIZE, offset };
   const result = useAtomValue(adminUsersWithConnectionsAtom(page));
   const refresh = useAtomRefresh(adminUsersWithConnectionsAtom(page));
-  const catalog = useCatalogSlugs();
+  const catalog = useCatalogRows();
   const icons = useIntegrationIcons();
+  // The route is `/{-$orgSlug}/users`: the segment is OPTIONAL, so this reads
+  // `undefined` on any host that renders no segment and the link falls back to
+  // the bare form. Both cloud and self-host do canonicalize onto a slug (self-
+  // host onto `default`), so in practice the prefixed form is what ships — but
+  // the optional param is the contract, not an assumption about the host.
+  const { orgSlug } = useParams({ strict: false }) as { orgSlug?: string };
 
   const header = (
     <PageHeader
@@ -564,7 +580,7 @@ export function AdminUsersPage() {
                   </span>
                 </SheetDescription>
               </SheetHeader>
-              <UserDetail user={selected} catalog={catalog} icons={icons} />
+              <UserDetail user={selected} catalog={catalog} icons={icons} orgSlug={orgSlug} />
             </>
           )}
         </SheetContent>

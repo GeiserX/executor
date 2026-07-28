@@ -37,9 +37,9 @@ const pingSpec = JSON.stringify({
   },
 });
 
-const registerIntegration = (client: Client) =>
+const registerIntegration = (client: Client, label = "admin-ui-sh") =>
   Effect.gen(function* () {
-    const slug = IntegrationSlug.make(`admin-ui-sh-${randomBytes(4).toString("hex")}`);
+    const slug = IntegrationSlug.make(`${label}-${randomBytes(4).toString("hex")}`);
     yield* client.openapi.addSpec({
       payload: {
         spec: { kind: "blob", value: pingSpec },
@@ -78,6 +78,9 @@ scenario(
     const ownerClient = yield* apiClient(api, owner);
     const memberClient = yield* apiClient(api, member);
     const integration = yield* registerIntegration(ownerClient);
+    // A second, deliberately unconnected integration, so the member's detail is
+    // guaranteed to render at least one connect link to assert the shape of.
+    const availableIntegration = yield* registerIntegration(ownerClient, "admin-ui-sh-avail");
     const memberConnection = ConnectionName.make(`conn${randomBytes(4).toString("hex")}`);
 
     yield* Effect.ensuring(
@@ -125,6 +128,81 @@ scenario(
               .getByText(memberConnection, { exact: true })
               .waitFor({ state: "visible", timeout: 30_000 });
           });
+
+          await step(
+            "The built-in integration is never offered as something to connect",
+            async () => {
+              // It is a static, credential-free source: there is no connect flow
+              // to send anyone to, so it is neither a slot nor a link. This is the
+              // reported bug — it used to appear under "not connected" with a
+              // copyable link to a route that would do nothing.
+              const detail = page.getByRole("dialog");
+              expect(
+                await detail.locator("[data-integration='executor']").count(),
+                "the built-in gets no slot in the detail sheet",
+              ).toBe(0);
+              expect(
+                await detail.getByText("/connect/executor", { exact: false }).count(),
+                "and no connect link is rendered for it",
+              ).toBe(0);
+            },
+          );
+
+          await step("A connect link is scoped to the org the admin is viewing", async () => {
+            // The invariant is a round trip, not a fixed shape: whatever org the
+            // console is currently scoped to is the org the link carries, so a
+            // recipient cannot be sent into a different workspace than the one
+            // the admin was looking at.
+            //
+            // Self-host DOES have an org segment — it canonicalizes onto a
+            // `default` org — so this host exercises the prefixed form just as
+            // cloud does. The org-free form is what a host that renders no
+            // segment at all would produce, and it is covered by the display
+            // unit tests rather than pinned to a host here.
+            //
+            // Asserted as a rendered string, not navigated: the `/connect/...`
+            // route lands on the sibling connect-deep-links branch (#1466) and
+            // is not in this build.
+            //
+            // TODO(connect-deep-links #1466): once that route exists, add the
+            // signed-out round trip — open this link as a recipient and assert
+            // it reaches the connect flow in the SENDING org. It belongs on the
+            // deep-link branch or post-merge, since the route must resolve.
+            const detail = page.getByRole("dialog");
+            const origin = new URL(target.baseUrl).origin;
+            // The console's own org prefix, read from the URL the page settled
+            // on — "" when this host renders no segment.
+            const consolePath = new URL(page.url()).pathname;
+            const orgPrefix = consolePath.endsWith("/users")
+              ? consolePath.slice(0, -"/users".length)
+              : "";
+
+            // The integration nobody connected is the one whose link must be here.
+            await detail
+              .getByText(`${origin}${orgPrefix}/connect/${availableIntegration}`, { exact: true })
+              .waitFor({ state: "visible", timeout: 30_000 });
+
+            // And EVERY rendered link agrees with the console's own scope — one
+            // link pointing at another org would silently misroute a recipient.
+            const links = await detail
+              .locator("[data-slot='admin-user-connect-link']")
+              .allTextContents();
+            expect(links.length, "the owner sees at least one link to send").toBeGreaterThanOrEqual(
+              1,
+            );
+            for (const link of links) {
+              const parsed = new URL(link);
+              expect(parsed.origin, `absolute for this deployment: ${link}`).toBe(origin);
+              expect(
+                parsed.pathname.startsWith(`${orgPrefix}/connect/`),
+                `scoped to the console's own org (${orgPrefix || "<none>"}): ${link}`,
+              ).toBe(true);
+              expect(
+                parsed.pathname.slice(`${orgPrefix}/connect/`.length).split("/").length,
+                `exactly one slug after /connect/: ${link}`,
+              ).toBe(1);
+            }
+          });
         });
 
         yield* browser.session(member, async ({ page, step }) => {
@@ -159,6 +237,9 @@ scenario(
             .remove({ params: { owner: "user", integration, name: memberConnection } })
             .pipe(Effect.ignore),
           ownerClient.openapi.removeSpec({ params: { slug: integration } }).pipe(Effect.ignore),
+          ownerClient.openapi
+            .removeSpec({ params: { slug: availableIntegration } })
+            .pipe(Effect.ignore),
         ],
         { discard: true },
       ),

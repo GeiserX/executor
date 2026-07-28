@@ -97,14 +97,52 @@ export const shortenExternalId = (externalId: string, max = 28): string => {
 export const connectionHealthStatus = (connection: AdminConnectionRow): HealthStatus =>
   connection.lastHealth?.status ?? "unknown";
 
+/** The catalog row this view needs: the slug it marks, plus the `kind` that
+ *  says whether connecting is even a thing one can do to it. Structural so
+ *  these helpers stay independent of the catalog schema module. */
+export interface AdminCatalogRow {
+  readonly slug: IntegrationSlug;
+  readonly kind: string;
+}
+
+/** The built-in integration's reserved slug. `kind` is the general signal, but
+ *  the product page pins the slug too, so this mirrors it exactly. */
+const BUILT_IN_INTEGRATION_SLUG = "executor";
+
 /**
- * The available-vs-connected view for one user: every integration in the
- * tenant's catalog, marked with whether this user has connected it.
+ * Whether an integration has a connect flow at all.
+ *
+ * Deliberately NOT "declares no auth methods": an openapi/mcp/graphql
+ * integration can carry `authMethods: []` and still be connectable, because its
+ * accounts panel passes `createCustomMethod` and the user defines the method
+ * themselves (`accounts-section.tsx`: `canAddConnection = methods.length > 0 ||
+ * createCustomMethod !== undefined`). Empty auth methods therefore means "no
+ * method declared yet", not "cannot be connected".
+ *
+ * The real gate is the one the product's integration detail page applies before
+ * any of that — `integration-detail.tsx`: `isBuiltInIntegration = namespace ===
+ * "executor" || integrationData?.kind === "built-in"`, which removes the whole
+ * Accounts tab rather than merely disabling a button. A built-in integration is
+ * a plugin-declared static source with a synthetic connection and no
+ * credential: there is nothing to connect and no flow to send anyone to.
+ */
+export const isConnectableIntegration = (row: AdminCatalogRow): boolean =>
+  row.kind !== "built-in" && String(row.slug) !== BUILT_IN_INTEGRATION_SLUG;
+
+/**
+ * The available-vs-connected view for one user: every *connectable* integration
+ * in the tenant's catalog, marked with whether this user has connected it.
  *
  * "Available" is the catalog, so an integration nobody has connected still gets
  * a (greyed) slot — that absence is the point of the view. Sorted connected
  * first so a dense grid leads with signal, then by slug for a stable order
  * across users.
+ *
+ * Non-connectable integrations are dropped entirely — from the slots, from the
+ * counts, and from the connect links. Listing the built-in under "not
+ * connected" would invite an admin to send a link to a flow that doesn't exist.
+ * The one exception is data honesty: if a user somehow HOLDS a connection on
+ * one, it is reported as connected rather than hidden.
  *
  * Org-owned connections are deliberately excluded from the API's per-user
  * results, so anything appearing here is genuinely this user's own.
@@ -116,7 +154,7 @@ export interface IntegrationConnectionState {
 }
 
 export const integrationConnectionStates = (
-  catalog: readonly IntegrationSlug[],
+  catalog: readonly AdminCatalogRow[],
   connections: readonly AdminConnectionRow[],
 ): readonly IntegrationConnectionState[] => {
   const byIntegration = new Map<IntegrationSlug, AdminConnectionRow[]>();
@@ -127,8 +165,13 @@ export const integrationConnectionStates = (
   }
   // A user can hold a connection on an integration the catalog read didn't
   // return (a catalog the viewer can't see, or one removed since). Showing it
-  // as connected is more honest than dropping the user's own credential.
-  const slugs = new Set<IntegrationSlug>([...catalog, ...byIntegration.keys()]);
+  // as connected is more honest than dropping the user's own credential — and
+  // an unknown slug is assumed connectable, since only the catalog can say
+  // otherwise.
+  const slugs = new Set<IntegrationSlug>([
+    ...catalog.filter(isConnectableIntegration).map((row) => row.slug),
+    ...byIntegration.keys(),
+  ]);
   return [...slugs]
     .map((integration) => ({
       integration,
@@ -147,13 +190,29 @@ export const integrationConnectionStates = (
  * The connect deep link for an integration, as an absolute URL for THIS
  * deployment — something an admin can paste to a user who needs to connect.
  *
- * Bare `/connect/<slug>`: no org segment. The link is for a person who may not
- * be signed in yet, and the deployment resolves their org at the auth gate. It
- * is rendered as a copyable URL rather than an in-console link because it
- * targets the recipient's session, not the admin's.
+ * The org segment is load-bearing and must be the SENDING admin's org. A
+ * recipient who belongs to several orgs would otherwise land in whichever one
+ * their session defaults to and connect the credential in the wrong workspace —
+ * silently, since the flow itself would succeed. The admin page is org-scoped,
+ * so the correct org is known at the call site and is carried in the link
+ * rather than left to the recipient's session to guess.
+ *
+ * The slug is optional because the route's `{-$orgSlug}` segment is: a host that
+ * renders no segment yields the bare `/connect/<slug>` form, which is the whole
+ * route there. (Both cloud and self-host do canonicalize onto a slug in
+ * practice — self-host onto `default` — so the prefixed form is the common
+ * case.) It is rendered as a copyable URL rather than an in-console link
+ * because it targets the recipient's session, not the admin's.
  */
-export const connectLinkUrl = (integration: IntegrationSlug, origin: string): string =>
-  `${origin.replace(/\/+$/, "")}/connect/${integration}`;
+export const connectLinkUrl = (
+  integration: IntegrationSlug,
+  origin: string,
+  orgSlug?: string | undefined,
+): string => {
+  const base = origin.replace(/\/+$/, "");
+  const org = orgSlug?.trim();
+  return org ? `${base}/${org}/connect/${integration}` : `${base}/connect/${integration}`;
+};
 
 // ── Paging ──────────────────────────────────────────────────────────────────
 

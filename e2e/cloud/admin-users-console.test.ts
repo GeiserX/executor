@@ -224,20 +224,21 @@ scenario(
               .locator("[data-slot='admin-user-row']")
               .filter({ has: page.locator(`[data-slot='admin-user-id'][title='${memberId}']`) });
             await memberRow.waitFor({ state: "visible", timeout: 30_000 });
-            // This member connected exactly one integration. The denominator is
-            // the tenant's whole catalog (which also carries the built-in), so
-            // it is read rather than pinned — what this scenario owns is the
-            // numerator and which slots are lit.
+            // A fresh cloud org's catalog is exactly the two integrations this
+            // scenario registered: the built-in Executor integration is not
+            // connectable, so it is neither a slot nor a denominator. The
+            // denominator is therefore pinned, not read — a third slot here
+            // would mean the built-in leaked back into the view.
             const summary = memberRow.locator("[data-slot='admin-user-connection-count']");
             await summary.waitFor({ state: "visible", timeout: 30_000 });
-            const [connected, total] = ((await summary.textContent()) ?? "").split("/");
-            expect(connected, "the member is counted as having connected one integration").toBe(
-              "1",
-            );
             expect(
-              Number(total),
-              "the catalog denominator covers at least the two integrations this scenario registered",
-            ).toBeGreaterThanOrEqual(2);
+              await summary.textContent(),
+              "one of the two connectable integrations, with the built-in out of both numbers",
+            ).toBe("1/2");
+            expect(
+              await memberRow.locator("[data-integration='executor']").count(),
+              "the built-in integration has no connect flow, so it gets no slot",
+            ).toBe(0);
             expect(
               await memberRow
                 .locator(`[data-integration='${connectedIntegration}'][data-connected='true']`)
@@ -279,18 +280,38 @@ scenario(
           await step("The not-connected integration offers a copyable connect link", async () => {
             const detail = page.getByRole("dialog");
             const origin = new URL(target.baseUrl).origin;
-            // A bare /connect/<slug> URL: it opens in the RECIPIENT's session,
-            // so it carries no org segment and is copied rather than followed.
+            // The link carries THIS admin's org slug. A recipient who belongs
+            // to several orgs would otherwise resolve the bare form against
+            // their default org and connect in the wrong workspace.
+            //
+            // The URL is asserted as a rendered string rather than navigated:
+            // the `/connect/...` route lands on the sibling connect-deep-links
+            // branch (#1466) and does not exist in this build.
+            //
+            // TODO(connect-deep-links #1466): once that route is merged, add the
+            // signed-out multi-org round trip — open this URL as a recipient who
+            // belongs to two orgs and assert the connection lands in the SENDING
+            // org, not their default. That test belongs on the deep-link branch
+            // or post-merge, since it needs the route to resolve.
             await detail
-              .getByText(`${origin}/connect/${availableIntegration}`, { exact: true })
+              .getByText(`${origin}/${slug}/connect/${availableIntegration}`, { exact: true })
               .waitFor({ state: "visible", timeout: 30_000 });
-            // One per not-connected integration — the catalog also carries the
-            // built-in, so this is "at least the one we registered", not a
-            // pinned count of the tenant's catalog.
+            expect(
+              await detail
+                .getByText(`${origin}/connect/${availableIntegration}`, { exact: true })
+                .count(),
+              "the org-free form is never rendered on a host that has orgs",
+            ).toBe(0);
+            // Exactly one: the member connected one of the two connectable
+            // integrations, and the built-in offers no link at all.
             expect(
               await detail.getByRole("button", { name: "Copy link" }).count(),
-              "every not-connected integration offers its link to copy",
-            ).toBeGreaterThanOrEqual(1);
+              "one link per not-connected connectable integration, and none for the built-in",
+            ).toBe(1);
+            expect(
+              await detail.getByText("/connect/executor", { exact: false }).count(),
+              "the built-in integration is never offered as a connect link",
+            ).toBe(0);
           });
         });
 

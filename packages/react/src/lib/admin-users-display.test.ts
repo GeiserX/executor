@@ -6,15 +6,29 @@ import {
   connectLinkUrl,
   formatLastSeen,
   integrationConnectionStates,
+  isConnectableIntegration,
   isLocalSubject,
   lastSeenTitle,
   pageNumber,
   shortenExternalId,
   splitPage,
+  type AdminCatalogRow,
   type AdminConnectionRow,
 } from "./admin-users-display";
 
 const slug = (value: string): IntegrationSlug => value as IntegrationSlug;
+
+/** A catalog row for a normal, connectable integration. `kind` is the owning
+ *  plugin's key on a real row, so "openapi" is what the catalog actually says. */
+const catalogRow = (value: string, kind = "openapi"): AdminCatalogRow => ({
+  slug: slug(value),
+  kind,
+});
+
+/** The built-in Executor row, exactly as a real catalog read returns it:
+ *  `kind: "built-in"` with `authMethods: []` (verified against
+ *  `executor.integrations.list()`). */
+const builtInRow: AdminCatalogRow = { slug: slug("executor"), kind: "built-in" };
 
 const connection = (overrides: Partial<AdminConnectionRow> = {}): AdminConnectionRow => ({
   owner: "user",
@@ -91,10 +105,29 @@ describe("connectionHealthStatus", () => {
   });
 });
 
+describe("isConnectableIntegration", () => {
+  it("a built-in integration has no connect flow to send anyone to", () => {
+    expect(isConnectableIntegration(builtInRow)).toBe(false);
+    // The product page pins the reserved slug as well as the kind
+    // (`integration-detail.tsx`), so both spellings are refused.
+    expect(isConnectableIntegration({ slug: slug("executor"), kind: "openapi" })).toBe(false);
+  });
+
+  // The trap: an openapi/mcp/graphql integration can carry `authMethods: []`
+  // and STILL be connectable, because its accounts panel supplies
+  // `createCustomMethod`. Empty auth methods must never be read as "no connect
+  // flow" — only `built-in` means that.
+  it("a normal integration stays connectable regardless of declared auth methods", () => {
+    expect(isConnectableIntegration(catalogRow("acme"))).toBe(true);
+    expect(isConnectableIntegration(catalogRow("beta", "mcp"))).toBe(true);
+    expect(isConnectableIntegration(catalogRow("gamma", "graphql"))).toBe(true);
+  });
+});
+
 describe("integrationConnectionStates", () => {
   it("shows the whole catalog, marking what this user has connected", () => {
     const states = integrationConnectionStates(
-      [slug("acme"), slug("beta"), slug("gamma")],
+      [catalogRow("acme"), catalogRow("beta"), catalogRow("gamma")],
       [connection({ integration: slug("beta") })],
     );
     expect(states.map((state) => state.integration)).toEqual(["beta", "acme", "gamma"]);
@@ -102,8 +135,34 @@ describe("integrationConnectionStates", () => {
   });
 
   it("keeps an available integration listed even when nobody connected it", () => {
-    const states = integrationConnectionStates([slug("acme")], []);
+    const states = integrationConnectionStates([catalogRow("acme")], []);
     expect(states).toEqual([{ integration: "acme", connected: false, connections: [] }]);
+  });
+
+  // The reported bug: the built-in Executor integration appeared under "not
+  // connected" with a copyable link to a flow that does not exist. It is not a
+  // slot, not a denominator, and not a link.
+  it("drops a non-connectable integration from the view and the counts entirely", () => {
+    const states = integrationConnectionStates(
+      [catalogRow("acme"), builtInRow],
+      [connection({ integration: slug("acme") })],
+    );
+    expect(states.map((state) => state.integration)).toEqual(["acme"]);
+  });
+
+  it("a catalog of nothing but non-connectable integrations yields no slots at all", () => {
+    expect(integrationConnectionStates([builtInRow], [])).toEqual([]);
+  });
+
+  // Data honesty beats the filter: if a user somehow HOLDS a connection on a
+  // non-connectable integration, hiding it would misreport what they have.
+  it("still reports a held connection on a non-connectable integration, as connected", () => {
+    const states = integrationConnectionStates(
+      [catalogRow("acme"), builtInRow],
+      [connection({ integration: slug("executor"), name: "coreTools" })],
+    );
+    expect(states.map((state) => state.integration)).toEqual(["executor", "acme"]);
+    expect(states.map((state) => state.connected)).toEqual([true, false]);
   });
 
   // Dropping the user's own credential because the catalog read missed it would
@@ -116,7 +175,7 @@ describe("integrationConnectionStates", () => {
 
   it("groups every connection a user holds on one integration", () => {
     const states = integrationConnectionStates(
-      [slug("acme")],
+      [catalogRow("acme")],
       [
         connection({ integration: slug("acme"), name: "work" }),
         connection({ integration: slug("acme"), name: "personal" }),
@@ -127,7 +186,7 @@ describe("integrationConnectionStates", () => {
 
   it("orders connected first, then alphabetically, so the order is stable per user", () => {
     const states = integrationConnectionStates(
-      [slug("zulu"), slug("alpha"), slug("mike")],
+      [catalogRow("zulu"), catalogRow("alpha"), catalogRow("mike")],
       [connection({ integration: slug("zulu") })],
     );
     expect(states.map((state) => state.integration)).toEqual(["zulu", "alpha", "mike"]);
@@ -135,10 +194,30 @@ describe("integrationConnectionStates", () => {
 });
 
 describe("connectLinkUrl", () => {
-  // Bare /connect/<slug>: the link is for the recipient's own session, which
-  // resolves their org at the auth gate — an admin's org segment would be wrong.
-  it("builds an absolute, org-free connect URL for this deployment", () => {
+  // The org segment is the SENDING admin's. A recipient in several orgs would
+  // otherwise land in whichever their session defaults to and connect the
+  // credential in the wrong workspace — succeeding, silently, in the wrong place.
+  it("carries the sending admin's org so a multi-org recipient lands in the right one", () => {
+    expect(connectLinkUrl(slug("acme"), "https://console.example.com", "north-wind")).toBe(
+      "https://console.example.com/north-wind/connect/acme",
+    );
+  });
+
+  // Self-host and local have no orgs, so there is no segment to carry and the
+  // bare form is the whole route.
+  it("builds the bare form on a host with no org slug", () => {
     expect(connectLinkUrl(slug("acme"), "https://console.example.com")).toBe(
+      "https://console.example.com/connect/acme",
+    );
+    expect(connectLinkUrl(slug("acme"), "https://console.example.com", undefined)).toBe(
+      "https://console.example.com/connect/acme",
+    );
+    // An empty or whitespace slug is absence, not an empty path segment — it
+    // must never render "//connect/acme".
+    expect(connectLinkUrl(slug("acme"), "https://console.example.com", "")).toBe(
+      "https://console.example.com/connect/acme",
+    );
+    expect(connectLinkUrl(slug("acme"), "https://console.example.com", "  ")).toBe(
       "https://console.example.com/connect/acme",
     );
   });
@@ -146,6 +225,9 @@ describe("connectLinkUrl", () => {
   it("does not double the separator when the origin carries a trailing slash", () => {
     expect(connectLinkUrl(slug("acme"), "https://console.example.com/")).toBe(
       "https://console.example.com/connect/acme",
+    );
+    expect(connectLinkUrl(slug("acme"), "https://console.example.com/", "north-wind")).toBe(
+      "https://console.example.com/north-wind/connect/acme",
     );
   });
 });
