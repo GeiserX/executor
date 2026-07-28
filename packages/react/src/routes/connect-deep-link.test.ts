@@ -54,7 +54,7 @@ describe("connect deep link", () => {
     expect(CONSOLE_ROUTE_PATHS).toContain("/connect/$integrationSlug");
   });
 
-  it("matches the bare link owner.com would generate", () => {
+  it("matches the bare link a customer would generate", () => {
     const matches = make().matchRoutes("/connect/linear");
     const match = matches.find((m) => m.routeId === CONNECT_ROUTE_ID);
     expect(match?.params).toEqual({ integrationSlug: "linear" });
