@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
+import { Redacted } from "effect";
 
 import { renderAuthTemplate } from "./config";
 import { migrateOpenApiAuthConfig } from "./migrate-config";
@@ -172,7 +173,7 @@ describe("legacy render equivalence", () => {
       type: "apiKey",
       headers: { Authorization: ["Bearer ", { type: "variable", name: "token" }] },
     });
-    expect(renderAuthTemplate(template, { token: "tok_1" })).toEqual({
+    expect(renderAuthTemplate(template, { token: Redacted.make("tok_1") })).toEqual({
       headers: { Authorization: "Bearer tok_1" },
       queryParams: {},
     });
@@ -189,7 +190,11 @@ describe("legacy render equivalence", () => {
       queryParams: { team: [{ type: "variable", name: "team" }] },
     });
     expect(
-      renderAuthTemplate(template, { dd_api_key: "a", dd_application_key: "b", team: "t" }),
+      renderAuthTemplate(template, {
+        dd_api_key: Redacted.make("a"),
+        dd_application_key: Redacted.make("b"),
+        team: Redacted.make("t"),
+      }),
     ).toEqual({
       headers: { "DD-API-KEY": "a", "DD-APPLICATION-KEY": "b" },
       queryParams: { team: "t" },
@@ -205,7 +210,7 @@ describe("legacy render equivalence", () => {
         Authorization: ["Bearer ", { type: "variable", name: "token" }],
       },
     });
-    expect(renderAuthTemplate(template, { token: "tok_1" })).toEqual({
+    expect(renderAuthTemplate(template, { token: Redacted.make("tok_1") })).toEqual({
       headers: { "X-Api-Version": "2023-01-01", Authorization: "Bearer tok_1" },
       queryParams: {},
     });
@@ -217,7 +222,7 @@ describe("legacy render equivalence", () => {
       type: "apiKey",
       queryParams: { api_key: [{ type: "variable", name: "token" }] },
     });
-    expect(renderAuthTemplate(template, { token: "k1" })).toEqual({
+    expect(renderAuthTemplate(template, { token: Redacted.make("k1") })).toEqual({
       headers: {},
       queryParams: { api_key: "k1" },
     });

@@ -1486,7 +1486,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
     // the refresh token; the second request would race on a consumed token).
     const refreshInFlight = new Map<
       string,
-      Effect.Effect<string | null, StorageFailure | CredentialResolutionError>
+      Effect.Effect<Redacted.Redacted<string> | null, StorageFailure | CredentialResolutionError>
     >();
 
     const connectionKey = (row: ConnectionRow): string =>
@@ -1504,7 +1504,10 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
     const performTokenRefresh = (
       row: ConnectionRow,
       provider: CredentialProvider,
-    ): Effect.Effect<string | null, StorageFailure | CredentialResolutionError> =>
+    ): Effect.Effect<
+      Redacted.Redacted<string> | null,
+      StorageFailure | CredentialResolutionError
+    > =>
       Effect.gen(function* () {
         const owner = row.owner as Owner;
         const reauth = (message: string): CredentialResolutionError =>
@@ -1528,9 +1531,10 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         // Null means "public client, send no client_secret" — both for a row
         // that never had one and for a confidential row whose vault item is
         // gone, which the AS then rejects loudly instead of us guessing.
-        // unwrap: migrated in stage 3. Unwrap BEFORE presence-normalizing —
-        // `Redacted.make("")` is truthy, so an emptiness test on the wrapper
-        // would read a public client as confidential.
+        // Boundary: the OAuth 2.1 helpers take a bare `client_secret` (it is
+        // posted to the token endpoint by oauth4webapi). Unwrap BEFORE
+        // presence-normalizing — `Redacted.make("")` is truthy, so an emptiness
+        // test on the wrapper would read a public client as confidential.
         const storedClientSecret =
           clientRow.client_secret_item_id == null
             ? null
@@ -1596,7 +1600,8 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
                   tokenUrl,
                   clientId: String(clientRow.client_id),
                   clientSecret,
-                  // unwrap: migrated in stage 3
+                  // Boundary: the refresh-token grant posts the token as a form
+                  // field, so the helper takes it bare.
                   refreshToken: Redacted.value(refreshToken),
                   scopes: grantedScopes,
                   // RFC 8707: keep the re-minted token bound to the same resource
@@ -1665,13 +1670,16 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
           set,
         });
 
-        return token.access_token;
+        return Redacted.make(token.access_token);
       });
 
     const refreshConnectionToken = (
       row: ConnectionRow,
       provider: CredentialProvider,
-    ): Effect.Effect<string | null, StorageFailure | CredentialResolutionError> =>
+    ): Effect.Effect<
+      Redacted.Redacted<string> | null,
+      StorageFailure | CredentialResolutionError
+    > =>
       // Share a single refresh per connection so concurrent resolves of the same
       // connection all await one refresh-token grant (the AS rotates the refresh
       // token; parallel grants would race on a consumed token — v1's refresh
@@ -1700,7 +1708,10 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
     // first (always single-input → `{ token: <access> }`).
     const resolveConnectionValues = (
       row: ConnectionRow,
-    ): Effect.Effect<Record<string, string | null>, StorageFailure | CredentialResolutionError> =>
+    ): Effect.Effect<
+      Record<string, Redacted.Redacted<string> | null>,
+      StorageFailure | CredentialResolutionError
+    > =>
       Effect.gen(function* () {
         const provider = credentialProviders.get(row.provider);
         if (!provider) {
@@ -1715,11 +1726,9 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
           const access = yield* refreshConnectionToken(row, provider);
           return { [PRIMARY_INPUT_VARIABLE]: access };
         }
-        const out: Record<string, string | null> = {};
+        const out: Record<string, Redacted.Redacted<string> | null> = {};
         for (const [variable, itemId] of Object.entries(connectionItemIds(row))) {
-          // unwrap: migrated in stage 3
-          const value = yield* provider.get(ProviderItemId.make(itemId));
-          out[variable] = value === null ? null : Redacted.value(value);
+          out[variable] = yield* provider.get(ProviderItemId.make(itemId));
         }
         return out;
       }).pipe(
@@ -1739,7 +1748,10 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
      *  callers that only ever need one value. */
     const resolveConnectionValue = (
       row: ConnectionRow,
-    ): Effect.Effect<string | null, StorageFailure | CredentialResolutionError> =>
+    ): Effect.Effect<
+      Redacted.Redacted<string> | null,
+      StorageFailure | CredentialResolutionError
+    > =>
       resolveConnectionValues(row).pipe(
         Effect.map((values) => values[PRIMARY_INPUT_VARIABLE] ?? null),
       );
@@ -1764,7 +1776,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
 
     const resolveConnectionValueByRef = (
       ref: ConnectionRef,
-    ): Effect.Effect<string | null, StorageFailure> =>
+    ): Effect.Effect<Redacted.Redacted<string> | null, StorageFailure> =>
       foldResolutionFailure(
         Effect.gen(function* () {
           const row = yield* findConnectionRow(ref);
@@ -1775,7 +1787,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
 
     const resolveConnectionValuesByRef = (
       ref: ConnectionRef,
-    ): Effect.Effect<Record<string, string | null>, StorageFailure> =>
+    ): Effect.Effect<Record<string, Redacted.Redacted<string> | null>, StorageFailure> =>
       foldResolutionFailure(
         Effect.gen(function* () {
           const row = yield* findConnectionRow(ref);
@@ -2808,12 +2820,15 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
     // their provider. Single-secret sugar lands on the `token` variable.
     const resolveInFlightValues = (
       input: ConnectionValueInput,
-    ): Effect.Effect<Record<string, string | null>, StorageFailure> =>
+    ): Effect.Effect<Record<string, Redacted.Redacted<string> | null>, StorageFailure> =>
       Effect.gen(function* () {
-        const out: Record<string, string | null> = {};
+        const out: Record<string, Redacted.Redacted<string> | null> = {};
         for (const { variable, origin } of normalizeConnectionInputs(input)) {
           if ("value" in origin) {
-            out[variable] = origin.value;
+            // A pasted value never went through a provider, so it arrives bare;
+            // wrap it here so the probe sees the same shape a saved connection
+            // produces. Nothing on this path is persisted.
+            out[variable] = Redacted.make(origin.value);
             continue;
           }
           const provider = credentialProviders.get(String(origin.from.provider));
@@ -2823,9 +2838,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
               cause: undefined,
             });
           }
-          // unwrap: migrated in stage 3
-          const value = yield* provider.get(origin.from.id);
-          out[variable] = value === null ? null : Redacted.value(value);
+          out[variable] = yield* provider.get(origin.from.id);
         }
         return out;
       });
@@ -3379,7 +3392,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
 
     const providersSetDefault = (
       id: ProviderItemId,
-      value: string,
+      value: string | Redacted.Redacted<string>,
     ): Effect.Effect<ProviderKey, CredentialProviderNotRegisteredError | StorageFailure> =>
       Effect.gen(function* () {
         const provider = defaultWritableProvider();

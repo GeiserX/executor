@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Redacted } from "effect";
 
 import { AuthTemplateSlug, ConnectionName, IntegrationSlug, ToolName } from "./ids";
 import { definePlugin } from "./plugin";
@@ -41,7 +41,10 @@ const demoPlugin = definePlugin(() => ({
   // generics; annotating them over-constrains the inferred shape (the canonical
   // `connections.test.ts` relies on the same inference).
   invokeTool: ({ toolRow, credential }) =>
-    Effect.succeed({ ran: toolRow.name, value: credential.value }),
+    Effect.succeed({
+      ran: toolRow.name,
+      value: credential.value === null ? null : Redacted.value(credential.value),
+    }),
   extension: (ctx) => ({
     seed: () =>
       ctx.core.integrations.register({

@@ -346,7 +346,10 @@ const oauthErrorPlugin = definePlugin(() => ({
         },
       ],
     }),
-  invokeTool: ({ credential }) => Effect.succeed({ token: credential.value }),
+  invokeTool: ({ credential }) =>
+    Effect.succeed({
+      token: credential.value === null ? null : Redacted.value(credential.value),
+    }),
   extension: (ctx) => ({
     seed: () =>
       ctx.core.integrations.register({

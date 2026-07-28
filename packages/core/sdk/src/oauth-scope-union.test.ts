@@ -1,6 +1,6 @@
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import { describe, expect, it } from "@effect/vitest";
-import { Context, Effect, Exit, Layer, Predicate, type Scope } from "effect";
+import { Context, Effect, Exit, Layer, Predicate, Redacted, type Scope } from "effect";
 import { HttpServer, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 
 import {
@@ -46,7 +46,10 @@ const makeScopePluginWithId = <const TId extends string>(
       Effect.succeed({
         tools: [{ name: ToolName.make("whoami"), description: "whoami" }],
       }),
-    invokeTool: ({ credential }) => Effect.succeed({ token: credential.value }),
+    invokeTool: ({ credential }) =>
+      Effect.succeed({
+        token: credential.value === null ? null : Redacted.value(credential.value),
+      }),
     describeAuthMethods: (record: IntegrationRecord): readonly AuthMethodDescriptor[] => {
       const cfg = record.config as { readonly scopes?: readonly string[] | null } | null;
       const scopes = cfg?.scopes;

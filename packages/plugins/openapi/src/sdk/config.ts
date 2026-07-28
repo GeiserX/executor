@@ -1,7 +1,8 @@
-import { Option, Schema } from "effect";
+import { Option, Schema, type Redacted } from "effect";
 import {
   ApiKeyAuthMethod,
   TOKEN_VARIABLE,
+  oauthBearerPlacement,
   renderAuthPlacements,
   requiredPlacementVariables,
 } from "@executor-js/sdk/http-auth";
@@ -100,13 +101,17 @@ export interface RenderedAuth {
  *  different value. */
 export const renderAuthTemplate = (
   template: Authentication,
-  values: Record<string, string | null>,
+  values: Record<string, Redacted.Redacted<string> | null>,
 ): RenderedAuth => {
   if (template.kind === "oauth2") {
-    return {
-      headers: { authorization: `Bearer ${values[TOKEN_VARIABLE] ?? ""}` },
-      queryParams: {},
-    };
+    // An oauth2 template declares no placements, so route it through the
+    // canonical bearer placement rather than interpolating the token here:
+    // interpolating a `Redacted` renders the literal "<redacted>" onto the
+    // wire, and the failure is a 401 with no trace back to this line.
+    // An unresolved token yields no header at all — callers gate on
+    // `requiredTemplateVariables` and fail with `oauth_connection_missing`
+    // before reaching here, so an empty `Bearer ` must never be sent.
+    return renderAuthPlacements([oauthBearerPlacement("authorization")], values);
   }
   return renderAuthPlacements(template.placements, values);
 };

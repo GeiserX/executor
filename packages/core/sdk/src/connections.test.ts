@@ -59,8 +59,13 @@ const demoPlugin = definePlugin(() => ({
         { name: ToolName.make("list"), description: "list" },
       ],
     }),
+  // A tool result is a wire payload, so the plugin unwraps here — the same
+  // move a real plugin makes when it renders the credential onto a request.
   invokeTool: ({ toolRow, credential }) =>
-    Effect.succeed({ ran: toolRow.name, value: credential.value }),
+    Effect.succeed({
+      ran: toolRow.name,
+      value: credential.value === null ? null : Redacted.value(credential.value),
+    }),
   extension: (ctx) => ({
     seed: () =>
       ctx.core.integrations.register({
@@ -99,9 +104,10 @@ describe("connections.create", () => {
       const tools = yield* executor.tools.list();
       expect(tools.map((t) => String(t.name)).sort()).toEqual(["deploy", "list"]);
 
-      // The inline value is resolvable via the connection's provider.
+      // The inline value is resolvable via the connection's provider, and
+      // arrives wrapped — the plugin contract hands out `Redacted`.
       const value = yield* executor.demo.resolveValue("org", "main");
-      expect(value).toBe("secret-token");
+      expect(value === null ? null : Redacted.value(value)).toBe("secret-token");
     }),
   );
 
@@ -126,7 +132,7 @@ describe("connections.create", () => {
       ]);
 
       const value = yield* executor.demo.resolveValue("org", "myApiKey");
-      expect(value).toBe("secret-token");
+      expect(value === null ? null : Redacted.value(value)).toBe("secret-token");
     }),
   );
 

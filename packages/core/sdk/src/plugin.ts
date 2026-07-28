@@ -238,8 +238,12 @@ export interface PluginCtx<TStore = unknown> {
      *  tool — where an inline `refresh` would block the caller. */
     readonly markToolsStale: (ref: ConnectionRef) => Effect.Effect<void, StorageFailure>;
     /** Resolve a connection's value through its provider (and OAuth refresh).
-     *  null if the provider can't produce one. */
-    readonly resolveValue: (ref: ConnectionRef) => Effect.Effect<string | null, StorageFailure>;
+     *  null if the provider can't produce one. `Redacted` so the value cannot
+     *  reach a log or a serialized payload without an explicit unwrap at the
+     *  point it goes on the wire. */
+    readonly resolveValue: (
+      ref: ConnectionRef,
+    ) => Effect.Effect<Redacted.Redacted<string> | null, StorageFailure>;
   };
 
   /** Registered credential backends — for discovery (browse a backend's items). */
@@ -263,7 +267,7 @@ export interface PluginCtx<TStore = unknown> {
      *  provider key that owns the item. */
     readonly setDefault: (
       id: ProviderItemId,
-      value: string,
+      value: string | Redacted.Redacted<string>,
     ) => Effect.Effect<ProviderKey, CredentialProviderNotRegisteredError | StorageFailure>;
     readonly remove: (
       provider: ProviderKey,
@@ -315,11 +319,14 @@ export interface ResolveToolsInput<TStore = unknown> {
   readonly template: AuthTemplateSlug | null;
   /** Lazily resolve the connection's credential value via its provider — only
    *  the kinds that actually call out (mcp) pay for it. */
-  readonly getValue: () => Effect.Effect<string | null, StorageFailure>;
+  readonly getValue: () => Effect.Effect<Redacted.Redacted<string> | null, StorageFailure>;
   /** Lazily resolve every credential input (`variable → value`) — the
    *  multi-input analog of `getValue`, for methods whose placements reference
    *  more than one variable. Empty map when the connection isn't persisted. */
-  readonly getValues: () => Effect.Effect<Record<string, string | null>, StorageFailure>;
+  readonly getValues: () => Effect.Effect<
+    Record<string, Redacted.Redacted<string> | null>,
+    StorageFailure
+  >;
 }
 
 export interface ResolveToolsResult {
@@ -362,12 +369,18 @@ export interface ToolInvocationCredential {
   readonly template: AuthTemplateSlug;
   /** The primary (`token`) resolved value — for OAuth (the access token) and
    *  single-input apiKey methods. Equals `values.token`. */
-  readonly value: string | null;
+  readonly value: Redacted.Redacted<string> | null;
   /** Every resolved credential input (`variable → value`) for the connection.
    *  Single-input methods have just `{ token }`; an apiKey method with two
    *  distinct inputs (e.g. Datadog) has one entry per template variable. The
-   *  render layer substitutes each `variable("<name>")` from this map. */
-  readonly values: Record<string, string | null>;
+   *  render layer substitutes each `variable("<name>")` from this map.
+   *
+   *  `Redacted` all the way to the render layer: this whole record is routinely
+   *  stringified into pool keys, span attributes, and error payloads, and a
+   *  wrapper renders "<redacted>" in every one of them. Unwrap only where the
+   *  value goes on the wire — `renderPlacementValue` in
+   *  `@executor-js/sdk/http-auth` is that boundary for HTTP plugins. */
+  readonly values: Record<string, Redacted.Redacted<string> | null>;
   /** The integration's stored config, for template rendering. */
   readonly config: IntegrationConfig;
   /** The OAuth scopes the connection's grant actually covers, from the

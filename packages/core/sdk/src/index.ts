@@ -101,6 +101,7 @@ export type { Tool, ToolDef, ToolListFilter, ToolAnnotations } from "./tool";
 // Credential providers.
 export type { CredentialProvider, ProviderEntry } from "./provider";
 export { credentialValueToWrite } from "./provider";
+export { makeCredentialScrubber, type CredentialScrubber } from "./credential-scrub";
 
 // Public projections / detection.
 export { ToolSchemaView, IntegrationDetectionResult } from "./types";

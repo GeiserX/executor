@@ -1029,7 +1029,8 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
             if (row.client_secret_item_id != null) {
               const provider = deps.defaultWritableProvider();
               if (provider) {
-                // unwrap: migrated in stage 3. Unwrap BEFORE
+                // Boundary: the OAuth 2.1 helpers take a bare `client_secret`
+                // (it is posted to the token endpoint). Unwrap BEFORE
                 // presence-normalizing — `Redacted.make("")` is truthy, so an
                 // emptiness test on the wrapper would read a public client as
                 // confidential.

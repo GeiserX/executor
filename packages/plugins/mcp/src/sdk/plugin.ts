@@ -1,4 +1,4 @@
-import { Effect, Layer, Option, Result, Schema } from "effect";
+import { Effect, Layer, Option, Redacted, Result, Schema } from "effect";
 import type { HttpClient } from "effect/unstable/http";
 
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
@@ -13,6 +13,7 @@ import {
   endpointTelemetryAttributes,
   IntegrationAlreadyExistsError,
   IntegrationSlug,
+  makeCredentialScrubber,
   mergeAuthTemplates,
   OAuthClientSlug,
   tool,
@@ -497,7 +498,7 @@ export const userFacingProbeMessage = (
 // a new flow and fails loudly if the SDK tries to.
 // ---------------------------------------------------------------------------
 
-const makeOAuthProvider = (accessToken: string): OAuthClientProvider => ({
+const makeOAuthProvider = (accessToken: Redacted.Redacted<string>): OAuthClientProvider => ({
   get redirectUrl() {
     return "http://localhost/oauth/callback";
   },
@@ -512,7 +513,11 @@ const makeOAuthProvider = (accessToken: string): OAuthClientProvider => ({
   },
   clientInformation: () => undefined,
   saveClientInformation: () => undefined,
-  tokens: () => ({ access_token: accessToken, token_type: "Bearer" }),
+  // Boundary: the MCP SDK's OAuthClientProvider hands `access_token` straight
+  // to the transport's Authorization header and its type is a plain string, so
+  // the token must be unwrapped to cross into third-party code. Kept inside the
+  // accessor so the unwrapped value exists only for the duration of a dial.
+  tokens: () => ({ access_token: Redacted.value(accessToken), token_type: "Bearer" }),
   saveTokens: () => undefined,
   redirectToAuthorization: async () => {
     // oxlint-disable-next-line executor/no-try-catch-or-throw -- boundary: MCP SDK OAuthClientProvider callback can only signal reauthorization by throwing
@@ -554,7 +559,7 @@ const selectAuthMethod = (
 
 const buildConnectorInput = (
   config: McpIntegrationConfigType,
-  values: Record<string, string | null>,
+  values: Record<string, Redacted.Redacted<string> | null>,
   templateSlug: string | null,
   allowStdio: boolean,
   httpClientLayer?: Layer.Layer<HttpClient.HttpClient>,
@@ -578,7 +583,9 @@ const buildConnectorInput = (
     if (method?.kind === "stdio_env") {
       for (const variable of method.vars) {
         const value = values[variable];
-        if (value != null) env[variable] = value;
+        // Boundary: the child process's environment block is a wire format —
+        // it takes strings. This is the stdio twin of `renderPlacementValue`.
+        if (value != null) env[variable] = Redacted.value(value);
       }
     }
     return Effect.succeed({
@@ -629,10 +636,32 @@ const sortedRecord = (
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
   );
 
+// Boundary: the key is an in-process Map key that decides whether two
+// invocations may SHARE an open session, so it must distinguish two accounts on
+// the same endpoint. `Redacted` renders "<redacted>" under JSON.stringify, which
+// would make every credential on an endpoint look identical — and for an oauth2
+// method the token appears nowhere else in the key (it is carried by the
+// authProvider, not the rendered headers), so distinct users would be served
+// each other's pooled connection. Unwrapped deliberately: the key never leaves
+// this process and is never logged or spanned, and the pooled connection it
+// indexes already holds the same credential in its live transport, so the key
+// opens no exposure window the pool did not already have.
+const credentialIdentity = (
+  values: Record<string, Redacted.Redacted<string> | null>,
+): Record<string, string | null> =>
+  sortedRecord(
+    Object.fromEntries(
+      Object.entries(values).map(([variable, value]) => [
+        variable,
+        value === null ? null : Redacted.value(value),
+      ]),
+    ),
+  );
+
 const connectionPoolKey = (
   input: Extract<ConnectorInput, { readonly transport: "remote" }>,
   template: string,
-  values: Record<string, string | null>,
+  values: Record<string, Redacted.Redacted<string> | null>,
 ): string =>
   JSON.stringify({
     endpoint: input.endpoint,
@@ -641,7 +670,7 @@ const connectionPoolKey = (
     headers: sortedRecord(input.headers),
     queryParams: sortedRecord(input.queryParams),
     template,
-    values: sortedRecord(values),
+    values: credentialIdentity(values),
   });
 
 // ---------------------------------------------------------------------------
@@ -1226,7 +1255,7 @@ export const mcpPlugin = definePlugin((options?: McpPluginOptions) => {
         // Discovery tolerates unresolved credentials (an open server lists
         // tools unauthenticated; a bad value just yields zero tools).
         const values = yield* getValues().pipe(
-          Effect.orElseSucceed(() => ({}) as Record<string, string | null>),
+          Effect.orElseSucceed(() => ({}) as Record<string, Redacted.Redacted<string> | null>),
         );
 
         const built = yield* buildConnectorInput(
@@ -1527,6 +1556,11 @@ export const mcpPlugin = definePlugin((options?: McpPluginOptions) => {
     // light up.
     checkHealth: ({ ctx, credential }) =>
       Effect.gen(function* () {
+        // A dial failure's message can echo the request back (the endpoint with
+        // its query token, a rejected header), and the message lands verbatim in
+        // the persisted `detail`. Scrub it with the same helper the OpenAPI
+        // probe uses.
+        const scrub = makeCredentialScrubber(credential.values);
         const parsed = parseMcpIntegrationConfig(credential.config);
         if (!parsed) {
           return { status: "unknown" as const, checkedAt: Date.now() } satisfies HealthCheckResult;
@@ -1549,12 +1583,14 @@ export const mcpPlugin = definePlugin((options?: McpPluginOptions) => {
               status: mcpLivenessFailureStatus(error),
               checkedAt: Date.now(),
               ...(error.httpStatus !== undefined ? { httpStatus: error.httpStatus } : {}),
-              detail: error.message,
+              detail: scrub.text(error.message),
             } satisfies HealthCheckResult),
           ),
         );
       }).pipe(
         // buildConnectorInput rejects (e.g. stdio disabled / missing config).
+        // Reached before the scrubber above exists, and these messages are
+        // plugin-authored configuration errors carrying no resolved value.
         Effect.catchTag("McpConnectionError", (error) =>
           Effect.succeed({
             status: mcpLivenessFailureStatus(error),

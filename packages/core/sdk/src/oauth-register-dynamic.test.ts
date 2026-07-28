@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, Predicate } from "effect";
+import { Effect, Predicate, Redacted } from "effect";
 
 import {
   AuthTemplateSlug,
@@ -44,7 +44,10 @@ const oauthPlugin = definePlugin(() => ({
     Effect.succeed({
       tools: [{ name: ToolName.make("whoami"), description: "whoami" }],
     }),
-  invokeTool: ({ credential }) => Effect.succeed({ token: credential.value }),
+  invokeTool: ({ credential }) =>
+    Effect.succeed({
+      token: credential.value === null ? null : Redacted.value(credential.value),
+    }),
   extension: (ctx) => ({
     seed: () =>
       ctx.core.integrations.register({

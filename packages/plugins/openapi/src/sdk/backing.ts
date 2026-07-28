@@ -1,4 +1,4 @@
-import { Effect, Option, Schema } from "effect";
+import { Effect, Option, Redacted, Schema } from "effect";
 import type { Layer } from "effect";
 import { HttpClient } from "effect/unstable/http";
 
@@ -12,6 +12,7 @@ import {
   sortHealthCheckCandidatesByIdentity,
   extractIdentity,
   extractResponseFields,
+  makeCredentialScrubber,
   projectResponseFields,
   type HealthCheckCandidate,
   type HealthCheckResponseField,
@@ -678,7 +679,7 @@ export const invokeOpenApiBackedTool = (input: {
     if (template) {
       const missing = requiredTemplateVariables(template).filter((name) => {
         const value = input.credential.values[name];
-        return value == null || value === "";
+        return value == null || Redacted.value(value) === "";
       });
       if (missing.length > 0) {
         return openApiAuthToolFailure({
@@ -696,6 +697,13 @@ export const invokeOpenApiBackedTool = (input: {
       Object.assign(queryParams, rendered.queryParams);
     }
 
+    // An upstream error body or transport failure can echo the request back
+    // (the URL with its query string, the rejected Authorization header), so
+    // every message and raw `details` payload leaving this path is scrubbed of
+    // the values it authenticated with. Same guarantee the health probe below
+    // makes; both build the scrubber from the same resolved credential.
+    const scrub = makeCredentialScrubber(input.credential.values);
+
     const invocation = yield* invokeWithLayer(
       binding,
       (input.args ?? {}) as Record<string, unknown>,
@@ -712,8 +720,8 @@ export const invokeOpenApiBackedTool = (input: {
               ok: false as const,
               failure: ToolResult.fail({
                 code: "upstream_response_headers_timeout",
-                message: error.message,
-                details: error.cause ?? error,
+                message: scrub.text(error.message),
+                details: scrub.payload(error.cause ?? error),
               }),
             })
           : error.reason === "response_body_timeout"
@@ -721,8 +729,8 @@ export const invokeOpenApiBackedTool = (input: {
                 ok: false as const,
                 failure: ToolResult.fail({
                   code: "upstream_response_body_timeout",
-                  message: error.message,
-                  details: error.cause ?? error,
+                  message: scrub.text(error.message),
+                  details: scrub.payload(error.cause ?? error),
                 }),
               })
             : Effect.fail(error),
@@ -767,7 +775,7 @@ export const invokeOpenApiBackedTool = (input: {
             connection: String(input.credential.connection),
             credentialKind: "oauth",
             credentialLabel: "Upstream authorization",
-            details: result.error,
+            details: scrub.payload(result.error),
           });
         }
         return openApiAuthToolFailure({
@@ -779,14 +787,14 @@ export const invokeOpenApiBackedTool = (input: {
           connection: String(input.credential.connection),
           credentialKind: "upstream",
           credentialLabel: "Upstream authorization",
-          details: result.error,
+          details: scrub.payload(result.error),
         });
       }
       return ToolResult.fail({
         code: "upstream_http_error",
         status: result.status,
-        message: extractOpenApiUpstreamMessage(result.error, result.status),
-        details: result.error,
+        message: scrub.text(extractOpenApiUpstreamMessage(result.error, result.status)),
+        details: scrub.payload(result.error),
       });
     }
     return ToolResult.ok(result.data, {
@@ -925,7 +933,7 @@ export const checkHealthOpenApi = (input: {
     if (template) {
       const missing = requiredTemplateVariables(template).filter((name) => {
         const value = input.credential.values[name];
-        return value == null || value === "";
+        return value == null || Redacted.value(value) === "";
       });
       if (missing.length > 0) {
         return {
@@ -957,17 +965,13 @@ export const checkHealthOpenApi = (input: {
     // Upstream error text can echo the request back (URLs with query params,
     // auth headers), so scrub every credential value out of anything that leaves
     // as `detail` so a probe can never leak the secret it authenticated with.
-    const secretValues = Object.values(input.credential.values).filter(
-      (value): value is string => typeof value === "string" && value.length > 0,
-    );
-    const scrubSecrets = (text: string): string =>
-      secretValues.reduce((out, secret) => out.split(secret).join("[redacted]"), text);
+    const scrub = makeCredentialScrubber(input.credential.values);
 
     if (!probe.ok) {
       return {
         status: "degraded",
         checkedAt,
-        detail: scrubSecrets(`Health check request failed: ${probe.failure.message}`),
+        detail: scrub.text(`Health check request failed: ${probe.failure.message}`),
       } satisfies HealthCheckResult;
     }
 
@@ -988,7 +992,7 @@ export const checkHealthOpenApi = (input: {
       ...(status === "healthy"
         ? {}
         : {
-            detail: scrubSecrets(
+            detail: scrub.text(
               extractOpenApiUpstreamMessage(probe.result.error, probe.result.status),
             ),
           }),

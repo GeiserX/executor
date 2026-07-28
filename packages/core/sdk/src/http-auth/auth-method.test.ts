@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
+import { Redacted } from "effect";
 
 import {
   type ApiKeyAuthMethod,
@@ -16,15 +17,17 @@ describe("renderAuthPlacements", () => {
   it("renders a bearer header from the implicit token variable", () => {
     expect(
       renderAuthPlacements([{ carrier: "header", name: "Authorization", prefix: "Bearer " }], {
-        token: "tok_1",
+        token: Redacted.make("tok_1"),
       }),
     ).toEqual({ headers: { Authorization: "Bearer tok_1" }, queryParams: {} });
   });
 
   it("renders a query param (the ui.sh '?token=' case)", () => {
-    expect(renderAuthPlacements([{ carrier: "query", name: "token" }], { token: "tok_1" })).toEqual(
-      { headers: {}, queryParams: { token: "tok_1" } },
-    );
+    expect(
+      renderAuthPlacements([{ carrier: "query", name: "token" }], {
+        token: Redacted.make("tok_1"),
+      }),
+    ).toEqual({ headers: {}, queryParams: { token: "tok_1" } });
   });
 
   it("mixes header and query placements in one method", () => {
@@ -34,7 +37,7 @@ describe("renderAuthPlacements", () => {
           { carrier: "header", name: "Authorization", prefix: "Bearer ", variable: "api_token" },
           { carrier: "query", name: "team_id", variable: "team_id" },
         ],
-        { api_token: "tok_1", team_id: "team_9" },
+        { api_token: Redacted.make("tok_1"), team_id: Redacted.make("team_9") },
       ),
     ).toEqual({
       headers: { Authorization: "Bearer tok_1" },
@@ -49,7 +52,7 @@ describe("renderAuthPlacements", () => {
           { carrier: "header", name: "DD-API-KEY", variable: "dd_api_key" },
           { carrier: "header", name: "DD-APPLICATION-KEY", variable: "dd_application_key" },
         ],
-        { dd_api_key: "a", dd_application_key: "b" },
+        { dd_api_key: Redacted.make("a"), dd_application_key: Redacted.make("b") },
       ),
     ).toEqual({
       headers: { "DD-API-KEY": "a", "DD-APPLICATION-KEY": "b" },
@@ -64,7 +67,7 @@ describe("renderAuthPlacements", () => {
           { carrier: "header", name: "X-Token" },
           { carrier: "query", name: "token" },
         ],
-        { token: "shared" },
+        { token: Redacted.make("shared") },
       ),
     ).toEqual({ headers: { "X-Token": "shared" }, queryParams: { token: "shared" } });
   });
@@ -76,7 +79,7 @@ describe("renderAuthPlacements", () => {
           { carrier: "header", name: "X-Api-Version", literal: "2023-01-01" },
           { carrier: "header", name: "Authorization", prefix: "Bearer " },
         ],
-        { token: "tok_1" },
+        { token: Redacted.make("tok_1") },
       ),
     ).toEqual({
       headers: { "X-Api-Version": "2023-01-01", Authorization: "Bearer tok_1" },
@@ -91,7 +94,7 @@ describe("renderAuthPlacements", () => {
           { carrier: "header", name: "Authorization", prefix: "Bearer " },
           { carrier: "query", name: "team_id", variable: "team_id" },
         ],
-        { token: "tok_1", team_id: null },
+        { token: Redacted.make("tok_1"), team_id: null },
       ),
     ).toEqual({ headers: { Authorization: "Bearer tok_1" }, queryParams: {} });
   });
@@ -124,7 +127,9 @@ describe("requiredPlacementVariables", () => {
 
 describe("oauthBearerPlacement", () => {
   it("defaults to the conventional Authorization: Bearer header", () => {
-    expect(renderAuthPlacements([oauthBearerPlacement()], { token: "at_1" })).toEqual({
+    expect(
+      renderAuthPlacements([oauthBearerPlacement()], { token: Redacted.make("at_1") }),
+    ).toEqual({
       headers: { Authorization: "Bearer at_1" },
       queryParams: {},
     });
@@ -132,7 +137,9 @@ describe("oauthBearerPlacement", () => {
 
   it("honors a custom header and prefix (graphql oauth override)", () => {
     expect(
-      renderAuthPlacements([oauthBearerPlacement("X-Access-Token", "")], { token: "at_1" }),
+      renderAuthPlacements([oauthBearerPlacement("X-Access-Token", "")], {
+        token: Redacted.make("at_1"),
+      }),
     ).toEqual({ headers: { "X-Access-Token": "at_1" }, queryParams: {} });
   });
 });

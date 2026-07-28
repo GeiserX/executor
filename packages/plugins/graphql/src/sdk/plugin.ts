@@ -1,5 +1,5 @@
 import { Effect, Match, Option, Schema } from "effect";
-import type { Layer } from "effect";
+import type { Layer, Redacted } from "effect";
 import { HttpClient } from "effect/unstable/http";
 
 import {
@@ -433,7 +433,7 @@ const annotationsFor = (binding: OperationBinding): ToolAnnotations => {
 
 const renderGraphqlAuthMethod = (
   method: GraphqlAuthMethod,
-  values: Record<string, string | null>,
+  values: Record<string, Redacted.Redacted<string> | null>,
 ): RenderedAuthPlacements => {
   if (method.kind === "apikey") return renderAuthPlacements(method.placements, values);
   if (method.kind === "oauth2") {
@@ -470,7 +470,7 @@ const toStoredOperations = (
  *  auth-required endpoint introspects successfully here rather than at add-time. */
 const introspectHeadersForConnection = (
   config: GraphqlIntegrationConfig,
-  values: Record<string, string | null>,
+  values: Record<string, Redacted.Redacted<string> | null>,
   templateSlug: AuthTemplateSlug | null,
 ): RenderedAuthPlacements => {
   const headers: Record<string, string> = { ...(config.headers ?? {}) };
@@ -511,7 +511,7 @@ const loadIntrospectionJson = (
 const introspectForConnection = (
   config: GraphqlIntegrationConfig,
   introspectionJson: string | null,
-  values: Record<string, string | null>,
+  values: Record<string, Redacted.Redacted<string> | null>,
   templateSlug: AuthTemplateSlug | null,
   httpClientLayer: Layer.Layer<HttpClient.HttpClient>,
 ): Effect.Effect<IntrospectionResult, GraphqlIntrospectionError> => {
@@ -536,7 +536,7 @@ const materializeOperations = (
   config: GraphqlIntegrationConfig,
   credential: {
     readonly template: AuthTemplateSlug;
-    readonly values: Record<string, string | null>;
+    readonly values: Record<string, Redacted.Redacted<string> | null>;
   },
   httpClientLayer: Layer.Layer<HttpClient.HttpClient>,
 ): Effect.Effect<readonly StoredOperation[], GraphqlIntrospectionError | StorageFailure> =>
@@ -972,7 +972,10 @@ export const graphqlPlugin = definePlugin((options?: GraphqlPluginOptions) => {
       readonly config: IntegrationConfig;
       readonly template: AuthTemplateSlug | null;
       readonly storage: GraphqlStore;
-      readonly getValues: () => Effect.Effect<Record<string, string | null>, unknown>;
+      readonly getValues: () => Effect.Effect<
+        Record<string, Redacted.Redacted<string> | null>,
+        unknown
+      >;
       readonly httpClientLayer: Layer.Layer<HttpClient.HttpClient>;
     }) =>
       Effect.gen(function* () {
@@ -992,9 +995,11 @@ export const graphqlPlugin = definePlugin((options?: GraphqlPluginOptions) => {
         const values =
           introspectionJson == null
             ? yield* getValues().pipe(
-                Effect.catch(() => Effect.succeed({} as Record<string, string | null>)),
+                Effect.catch(() =>
+                  Effect.succeed({} as Record<string, Redacted.Redacted<string> | null>),
+                ),
               )
-            : ({} as Record<string, string | null>);
+            : ({} as Record<string, Redacted.Redacted<string> | null>);
         const introspection = yield* introspectForConnection(
           graphqlConfig,
           introspectionJson,

@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import { Redacted, Schema } from "effect";
 import type { AuthMethodDescriptor, AuthPlacementDescriptor } from "../integration";
 
 // ---------------------------------------------------------------------------
@@ -78,13 +78,21 @@ export interface RenderedAuthPlacements {
   readonly queryParams: Record<string, string>;
 }
 
+/** THE credential unwrap boundary for HTTP plugins: a placement is by
+ *  definition a spot on the outbound request, so the string produced here goes
+ *  straight onto the wire and nowhere else. Every consumer (mcp, openapi,
+ *  graphql) renders through this, which is why none of them unwrap themselves.
+ *
+ *  Absence is `null`, never falsiness — `Redacted.make("")` is truthy, and an
+ *  empty credential is a value a no-auth integration legitimately binds. */
 const renderPlacementValue = (
   placement: AuthPlacement,
-  values: Record<string, string | null>,
+  values: Record<string, Redacted.Redacted<string> | null>,
 ): string | null => {
   if (placement.literal !== undefined) return placement.literal;
-  const value = values[placement.variable ?? TOKEN_VARIABLE];
-  if (value == null) return null;
+  const wrapped = values[placement.variable ?? TOKEN_VARIABLE];
+  if (wrapped == null) return null;
+  const value = Redacted.value(wrapped);
   return placement.prefix ? `${placement.prefix}${value}` : value;
 };
 
@@ -94,7 +102,7 @@ const renderPlacementValue = (
  *  unauthenticated, …) and should gate on `requiredPlacementVariables`. */
 export const renderAuthPlacements = (
   placements: readonly AuthPlacement[],
-  values: Record<string, string | null>,
+  values: Record<string, Redacted.Redacted<string> | null>,
 ): RenderedAuthPlacements => {
   const headers: Record<string, string> = {};
   const queryParams: Record<string, string> = {};

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Option, Schema } from "effect";
+import { Option, Redacted, Schema } from "effect";
 
 import { ApiKeyAuthTemplate, apiKeyMethodFromAuthTemplate, variable } from "./authoring";
 import { renderAuthPlacements } from "./auth-method";
@@ -32,7 +32,12 @@ describe("request-shaped authoring", () => {
       { carrier: "query", name: "team_id", variable: "team_id" },
     ]);
     // …and the expansion renders exactly like the template reads.
-    expect(renderAuthPlacements(method.placements, { api_token: "tok", team_id: "t42" })).toEqual({
+    expect(
+      renderAuthPlacements(method.placements, {
+        api_token: Redacted.make("tok"),
+        team_id: Redacted.make("t42"),
+      }),
+    ).toEqual({
       headers: { Authorization: "Bearer tok" },
       queryParams: { team_id: "t42" },
     });

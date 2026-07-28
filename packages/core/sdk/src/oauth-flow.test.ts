@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, Predicate } from "effect";
+import { Effect, Predicate, Redacted } from "effect";
 import { HttpServerResponse } from "effect/unstable/http";
 
 import {
@@ -47,8 +47,13 @@ const oauthPlugin = definePlugin(() => ({
       },
     ];
   },
-  // Echo the resolved credential value (the OAuth access token) back out.
-  invokeTool: ({ credential }) => Effect.succeed({ token: credential.value }),
+  // Echo the resolved credential value (the OAuth access token) back out. The
+  // result is a wire payload, so unwrap — a `Redacted` would serialize as the
+  // literal "<redacted>" and the assertions below would pass on nothing.
+  invokeTool: ({ credential }) =>
+    Effect.succeed({
+      token: credential.value === null ? null : Redacted.value(credential.value),
+    }),
   checkHealth: ({ credential }) =>
     Effect.succeed({
       status: credential.value === null ? "expired" : "healthy",

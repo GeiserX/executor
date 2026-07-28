@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "@effect/vitest"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Effect } from "effect";
+import { Effect, Redacted } from "effect";
 
 import {
   AuthTemplateSlug,
@@ -105,7 +105,7 @@ describe("file secrets data directory", () => {
           // Regression: auth.json follows XDG_DATA_HOME instead of EXECUTOR_DATA_DIR.
           // After the fix it must live with test.db under dataDir and survive this home swap.
           expect(
-            resolved,
+            resolved === null ? null : Redacted.value(resolved),
             `credential persisted in ${firstAuthPath} was not available after recreating the sandbox with ${dataDir}`,
           ).toBe(CREDENTIAL);
         }),
