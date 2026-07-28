@@ -40,6 +40,7 @@ export const CONSOLE_ROUTE_PATHS = [
   "/policies",
   "/secrets",
   "/tools",
+  "/users",
   "/toolkits",
   "/toolkits/$toolkitSlug",
   "/resume/$executionId",
@@ -78,6 +79,10 @@ export const consoleRoutes = (options: ConsoleRoutesOptions): Array<VirtualRoute
     ["/policies", route("/policies", file("policies.tsx"))],
     ["/secrets", route("/secrets", file("secrets.tsx"))],
     ["/tools", route("/tools", file("tools.tsx"))],
+    // The admin users view. Hosts that don't serve `/admin/users*` (local /
+    // desktop, cloudflare) exclude it — the page would only ever render its
+    // denied state there.
+    ["/users", route("/users", file("users.tsx"))],
     ["/toolkits", route("/toolkits", file("toolkits.tsx"))],
     ["/toolkits/$toolkitSlug", route("/toolkits/$toolkitSlug", file("toolkits.$toolkitSlug.tsx"))],
     ["/resume/$executionId", route("/resume/$executionId", file("resume.$executionId.tsx"))],

@@ -36,6 +36,10 @@ export const ReactivityKey = {
   orgInfo: "org:info",
   apiKeys: "api-keys",
   auth: "auth",
+  /** The tenant-wide admin users view. Read-only today (the admin plane has no
+   *  writes), so nothing invalidates it — it exists so the pages refresh
+   *  together and so a future lifecycle mutation has a key to publish. */
+  adminUsers: "admin:users",
 } as const;
 
 /** Mutations that add/remove/refresh an integration also affect tool listings. */

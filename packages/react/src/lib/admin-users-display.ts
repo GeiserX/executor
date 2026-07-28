@@ -1,0 +1,175 @@
+import type { HealthStatus, IntegrationSlug, Owner } from "@executor-js/sdk/shared";
+
+// ---------------------------------------------------------------------------
+// Pure display logic for the admin Users section.
+//
+// Everything here is a plain function over wire data so it can be tested
+// without mounting the console (the package's testing doctrine: extract the
+// logic, test the logic). The components below it only arrange the results.
+// ---------------------------------------------------------------------------
+
+/** The connection shape the admin plane returns (`AdminUserConnection`), typed
+ *  structurally so these helpers don't depend on the schema module. */
+export interface AdminConnectionRow {
+  readonly owner: Owner;
+  readonly integration: IntegrationSlug;
+  readonly name: string;
+  readonly oauthScope: string | null;
+  readonly lastHealth: { readonly status: HealthStatus } | null;
+}
+
+// ── Last seen ───────────────────────────────────────────────────────────────
+
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+
+/**
+ * Relative "last seen", phrased no more precisely than the field deserves.
+ *
+ * The writer throttles `lastSeenAt` to roughly an hour, so a sub-hour delta is
+ * NOT evidence the user was here five minutes ago — it only means the sighting
+ * landed within the last throttle window. Everything under an hour therefore
+ * collapses to one honest bucket instead of counting minutes, and `null` (never
+ * seen on a request — a user earns a row at connection-create, before any
+ * sighting) reads as "Never", not "unknown".
+ */
+export const formatLastSeen = (lastSeenAt: number | null, now: number = Date.now()): string => {
+  if (lastSeenAt === null) return "Never";
+  const delta = now - lastSeenAt;
+  if (delta < HOUR) return "Within the hour";
+  if (delta < DAY) {
+    const hours = Math.floor(delta / HOUR);
+    return hours === 1 ? "About 1 hour ago" : `About ${hours} hours ago`;
+  }
+  const days = Math.floor(delta / DAY);
+  if (days === 1) return "About 1 day ago";
+  if (days < 30) return `About ${days} days ago`;
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(new Date(lastSeenAt));
+};
+
+/** The tooltip behind {@link formatLastSeen}: the exact recorded instant plus
+ *  the coarseness caveat, so an operator reading "Within the hour" can see what
+ *  the row actually stores. */
+export const lastSeenTitle = (lastSeenAt: number | null): string =>
+  lastSeenAt === null
+    ? "Never seen on a request"
+    : `Recorded ${new Date(lastSeenAt).toLocaleString()} — updated at most once an hour`;
+
+/** Absolute date, for the created column. */
+export const formatAdminDate = (epochMs: number): string =>
+  new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(
+    new Date(epochMs),
+  );
+
+// ── Identity ────────────────────────────────────────────────────────────────
+
+/**
+ * How a user's opaque `externalId` is shown.
+ *
+ * The id is opaque by contract — nothing may parse it — so it is rendered whole,
+ * in mono, and only visually shortened when it is long enough to break the
+ * column. The full value stays available via the title attribute and the copy
+ * button. `"local"` is a host sentinel for the single-player subject and reads
+ * better spelled out.
+ */
+export const LOCAL_SUBJECT_ID = "local";
+
+export const isLocalSubject = (externalId: string): boolean => externalId === LOCAL_SUBJECT_ID;
+
+/** Visual truncation only — never a parse. Keeps both ends so two ids that
+ *  differ in the middle stay distinguishable. */
+export const shortenExternalId = (externalId: string, max = 28): string => {
+  if (externalId.length <= max) return externalId;
+  const head = Math.ceil((max - 1) / 2);
+  const tail = Math.floor((max - 1) / 2);
+  return `${externalId.slice(0, head)}…${externalId.slice(externalId.length - tail)}`;
+};
+
+// ── Connections ─────────────────────────────────────────────────────────────
+
+/** The health status a row displays. A connection that was never probed carries
+ *  no verdict, which is `unknown` in the shared vocabulary. */
+export const connectionHealthStatus = (connection: AdminConnectionRow): HealthStatus =>
+  connection.lastHealth?.status ?? "unknown";
+
+/**
+ * The available-vs-connected view for one user: every integration in the
+ * tenant's catalog, marked with whether this user has connected it.
+ *
+ * "Available" is the catalog, so an integration nobody has connected still gets
+ * a (greyed) slot — that absence is the point of the view. Sorted connected
+ * first so a dense grid leads with signal, then by slug for a stable order
+ * across users.
+ *
+ * Org-owned connections are deliberately excluded from the API's per-user
+ * results, so anything appearing here is genuinely this user's own.
+ */
+export interface IntegrationConnectionState {
+  readonly integration: IntegrationSlug;
+  readonly connected: boolean;
+  readonly connections: readonly AdminConnectionRow[];
+}
+
+export const integrationConnectionStates = (
+  catalog: readonly IntegrationSlug[],
+  connections: readonly AdminConnectionRow[],
+): readonly IntegrationConnectionState[] => {
+  const byIntegration = new Map<IntegrationSlug, AdminConnectionRow[]>();
+  for (const connection of connections) {
+    const existing = byIntegration.get(connection.integration);
+    if (existing) existing.push(connection);
+    else byIntegration.set(connection.integration, [connection]);
+  }
+  // A user can hold a connection on an integration the catalog read didn't
+  // return (a catalog the viewer can't see, or one removed since). Showing it
+  // as connected is more honest than dropping the user's own credential.
+  const slugs = new Set<IntegrationSlug>([...catalog, ...byIntegration.keys()]);
+  return [...slugs]
+    .map((integration) => ({
+      integration,
+      connected: byIntegration.has(integration),
+      connections: byIntegration.get(integration) ?? [],
+    }))
+    .sort((a, b) => {
+      if (a.connected !== b.connected) return a.connected ? -1 : 1;
+      return a.integration.localeCompare(b.integration);
+    });
+};
+
+// ── Connect links ───────────────────────────────────────────────────────────
+
+/**
+ * The connect deep link for an integration, as an absolute URL for THIS
+ * deployment — something an admin can paste to a user who needs to connect.
+ *
+ * Bare `/connect/<slug>`: no org segment. The link is for a person who may not
+ * be signed in yet, and the deployment resolves their org at the auth gate. It
+ * is rendered as a copyable URL rather than an in-console link because it
+ * targets the recipient's session, not the admin's.
+ */
+export const connectLinkUrl = (integration: IntegrationSlug, origin: string): string =>
+  `${origin.replace(/\/+$/, "")}/connect/${integration}`;
+
+// ── Paging ──────────────────────────────────────────────────────────────────
+
+/**
+ * Split an over-fetched page into the rows to render plus whether another page
+ * exists. The contract returns no total count, so "is there a next page" is
+ * answered by asking for one row more than the page holds.
+ */
+export const splitPage = <A>(
+  rows: readonly A[],
+  pageSize: number,
+): { readonly rows: readonly A[]; readonly hasNext: boolean } => ({
+  rows: rows.slice(0, pageSize),
+  hasNext: rows.length > pageSize,
+});
+
+/** The 1-based page number an offset lands on, for the mono pager label. */
+export const pageNumber = (offset: number, pageSize: number): number =>
+  Math.floor(offset / pageSize) + 1;

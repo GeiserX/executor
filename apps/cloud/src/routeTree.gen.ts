@@ -13,6 +13,7 @@ import { Route as SetupMcpRouteImport } from './routes/bare/setup-mcp'
 import { Route as LoginRouteImport } from './routes/bare/login'
 import { Route as CreateOrgRouteImport } from './routes/bare/create-org'
 import { Route as DotDotDotDotDotDotDotDotPackagesReactSrcRoutesIndexRouteImport } from './../../../packages/react/src/routes/index'
+import { Route as DotDotDotDotDotDotDotDotPackagesReactSrcRoutesUsersRouteImport } from './../../../packages/react/src/routes/users'
 import { Route as DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolsRouteImport } from './../../../packages/react/src/routes/tools'
 import { Route as DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolkitsRouteImport } from './../../../packages/react/src/routes/toolkits'
 import { Route as SecretsRouteImport } from './routes/app/secrets'
@@ -46,6 +47,12 @@ const DotDotDotDotDotDotDotDotPackagesReactSrcRoutesIndexRoute =
   DotDotDotDotDotDotDotDotPackagesReactSrcRoutesIndexRouteImport.update({
     id: '/{-$orgSlug}/',
     path: '/{-$orgSlug}/',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const DotDotDotDotDotDotDotDotPackagesReactSrcRoutesUsersRoute =
+  DotDotDotDotDotDotDotDotPackagesReactSrcRoutesUsersRouteImport.update({
+    id: '/{-$orgSlug}/users',
+    path: '/{-$orgSlug}/users',
     getParentRoute: () => rootRouteImport,
   } as any)
 const DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolsRoute =
@@ -141,6 +148,7 @@ export interface FileRoutesByFullPath {
   '/{-$orgSlug}/secrets': typeof SecretsRoute
   '/{-$orgSlug}/toolkits': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolkitsRouteWithChildren
   '/{-$orgSlug}/tools': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolsRoute
+  '/{-$orgSlug}/users': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesUsersRoute
   '/{-$orgSlug}/': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesIndexRoute
   '/{-$orgSlug}/billing/plans': typeof Billing_DotplansRoute
   '/{-$orgSlug}/connect/$integrationSlug': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesConnectDotintegrationSlugRoute
@@ -160,6 +168,7 @@ export interface FileRoutesByTo {
   '/{-$orgSlug}/secrets': typeof SecretsRoute
   '/{-$orgSlug}/toolkits': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolkitsRouteWithChildren
   '/{-$orgSlug}/tools': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolsRoute
+  '/{-$orgSlug}/users': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesUsersRoute
   '/{-$orgSlug}': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesIndexRoute
   '/{-$orgSlug}/billing/plans': typeof Billing_DotplansRoute
   '/{-$orgSlug}/connect/$integrationSlug': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesConnectDotintegrationSlugRoute
@@ -180,6 +189,7 @@ export interface FileRoutesById {
   '/{-$orgSlug}/secrets': typeof SecretsRoute
   '/{-$orgSlug}/toolkits': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolkitsRouteWithChildren
   '/{-$orgSlug}/tools': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolsRoute
+  '/{-$orgSlug}/users': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesUsersRoute
   '/{-$orgSlug}/': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesIndexRoute
   '/{-$orgSlug}/billing_/plans': typeof Billing_DotplansRoute
   '/{-$orgSlug}/connect/$integrationSlug': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesConnectDotintegrationSlugRoute
@@ -201,6 +211,7 @@ export interface FileRouteTypes {
     | '/{-$orgSlug}/secrets'
     | '/{-$orgSlug}/toolkits'
     | '/{-$orgSlug}/tools'
+    | '/{-$orgSlug}/users'
     | '/{-$orgSlug}/'
     | '/{-$orgSlug}/billing/plans'
     | '/{-$orgSlug}/connect/$integrationSlug'
@@ -220,6 +231,7 @@ export interface FileRouteTypes {
     | '/{-$orgSlug}/secrets'
     | '/{-$orgSlug}/toolkits'
     | '/{-$orgSlug}/tools'
+    | '/{-$orgSlug}/users'
     | '/{-$orgSlug}'
     | '/{-$orgSlug}/billing/plans'
     | '/{-$orgSlug}/connect/$integrationSlug'
@@ -239,6 +251,7 @@ export interface FileRouteTypes {
     | '/{-$orgSlug}/secrets'
     | '/{-$orgSlug}/toolkits'
     | '/{-$orgSlug}/tools'
+    | '/{-$orgSlug}/users'
     | '/{-$orgSlug}/'
     | '/{-$orgSlug}/billing_/plans'
     | '/{-$orgSlug}/connect/$integrationSlug'
@@ -259,6 +272,7 @@ export interface RootRouteChildren {
   SecretsRoute: typeof SecretsRoute
   DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolkitsRoute: typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolkitsRouteWithChildren
   DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolsRoute: typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolsRoute
+  DotDotDotDotDotDotDotDotPackagesReactSrcRoutesUsersRoute: typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesUsersRoute
   DotDotDotDotDotDotDotDotPackagesReactSrcRoutesIndexRoute: typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesIndexRoute
   Billing_DotplansRoute: typeof Billing_DotplansRoute
   DotDotDotDotDotDotDotDotPackagesReactSrcRoutesConnectDotintegrationSlugRoute: typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesConnectDotintegrationSlugRoute
@@ -295,6 +309,13 @@ declare module '@tanstack/react-router' {
       path: '/{-$orgSlug}'
       fullPath: '/{-$orgSlug}/'
       preLoaderRoute: typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/{-$orgSlug}/users': {
+      id: '/{-$orgSlug}/users'
+      path: '/{-$orgSlug}/users'
+      fullPath: '/{-$orgSlug}/users'
+      preLoaderRoute: typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesUsersRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/{-$orgSlug}/tools': {
@@ -420,6 +441,8 @@ const rootRouteChildren: RootRouteChildren = {
     DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolkitsRouteWithChildren,
   DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolsRoute:
     DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolsRoute,
+  DotDotDotDotDotDotDotDotPackagesReactSrcRoutesUsersRoute:
+    DotDotDotDotDotDotDotDotPackagesReactSrcRoutesUsersRoute,
   DotDotDotDotDotDotDotDotPackagesReactSrcRoutesIndexRoute:
     DotDotDotDotDotDotDotDotPackagesReactSrcRoutesIndexRoute,
   Billing_DotplansRoute: Billing_DotplansRoute,

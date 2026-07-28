@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as DotDotDotDotDotDotDotDotPackagesReactSrcRoutesIndexRouteImport } from './../../../packages/react/src/routes/index'
+import { Route as DotDotDotDotDotDotDotDotPackagesReactSrcRoutesUsersRouteImport } from './../../../packages/react/src/routes/users'
 import { Route as DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolsRouteImport } from './../../../packages/react/src/routes/tools'
 import { Route as DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolkitsRouteImport } from './../../../packages/react/src/routes/toolkits'
 import { Route as DotDotDotDotDotDotDotDotPackagesReactSrcRoutesSecretsRouteImport } from './../../../packages/react/src/routes/secrets'
@@ -28,6 +29,12 @@ const DotDotDotDotDotDotDotDotPackagesReactSrcRoutesIndexRoute =
   DotDotDotDotDotDotDotDotPackagesReactSrcRoutesIndexRouteImport.update({
     id: '/{-$orgSlug}/',
     path: '/{-$orgSlug}/',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const DotDotDotDotDotDotDotDotPackagesReactSrcRoutesUsersRoute =
+  DotDotDotDotDotDotDotDotPackagesReactSrcRoutesUsersRouteImport.update({
+    id: '/{-$orgSlug}/users',
+    path: '/{-$orgSlug}/users',
     getParentRoute: () => rootRouteImport,
   } as any)
 const DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolsRoute =
@@ -127,6 +134,7 @@ export interface FileRoutesByFullPath {
   '/{-$orgSlug}/secrets': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesSecretsRoute
   '/{-$orgSlug}/toolkits': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolkitsRouteWithChildren
   '/{-$orgSlug}/tools': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolsRoute
+  '/{-$orgSlug}/users': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesUsersRoute
   '/{-$orgSlug}/': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesIndexRoute
   '/{-$orgSlug}/connect/$integrationSlug': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesConnectDotintegrationSlugRoute
   '/{-$orgSlug}/integrations/$namespace': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesIntegrationsDotnamespaceRoute
@@ -143,6 +151,7 @@ export interface FileRoutesByTo {
   '/{-$orgSlug}/secrets': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesSecretsRoute
   '/{-$orgSlug}/toolkits': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolkitsRouteWithChildren
   '/{-$orgSlug}/tools': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolsRoute
+  '/{-$orgSlug}/users': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesUsersRoute
   '/{-$orgSlug}': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesIndexRoute
   '/{-$orgSlug}/connect/$integrationSlug': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesConnectDotintegrationSlugRoute
   '/{-$orgSlug}/integrations/$namespace': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesIntegrationsDotnamespaceRoute
@@ -160,6 +169,7 @@ export interface FileRoutesById {
   '/{-$orgSlug}/secrets': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesSecretsRoute
   '/{-$orgSlug}/toolkits': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolkitsRouteWithChildren
   '/{-$orgSlug}/tools': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolsRoute
+  '/{-$orgSlug}/users': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesUsersRoute
   '/{-$orgSlug}/': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesIndexRoute
   '/{-$orgSlug}/connect/$integrationSlug': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesConnectDotintegrationSlugRoute
   '/{-$orgSlug}/integrations/$namespace': typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesIntegrationsDotnamespaceRoute
@@ -178,6 +188,7 @@ export interface FileRouteTypes {
     | '/{-$orgSlug}/secrets'
     | '/{-$orgSlug}/toolkits'
     | '/{-$orgSlug}/tools'
+    | '/{-$orgSlug}/users'
     | '/{-$orgSlug}/'
     | '/{-$orgSlug}/connect/$integrationSlug'
     | '/{-$orgSlug}/integrations/$namespace'
@@ -194,6 +205,7 @@ export interface FileRouteTypes {
     | '/{-$orgSlug}/secrets'
     | '/{-$orgSlug}/toolkits'
     | '/{-$orgSlug}/tools'
+    | '/{-$orgSlug}/users'
     | '/{-$orgSlug}'
     | '/{-$orgSlug}/connect/$integrationSlug'
     | '/{-$orgSlug}/integrations/$namespace'
@@ -210,6 +222,7 @@ export interface FileRouteTypes {
     | '/{-$orgSlug}/secrets'
     | '/{-$orgSlug}/toolkits'
     | '/{-$orgSlug}/tools'
+    | '/{-$orgSlug}/users'
     | '/{-$orgSlug}/'
     | '/{-$orgSlug}/connect/$integrationSlug'
     | '/{-$orgSlug}/integrations/$namespace'
@@ -227,6 +240,7 @@ export interface RootRouteChildren {
   DotDotDotDotDotDotDotDotPackagesReactSrcRoutesSecretsRoute: typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesSecretsRoute
   DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolkitsRoute: typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolkitsRouteWithChildren
   DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolsRoute: typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolsRoute
+  DotDotDotDotDotDotDotDotPackagesReactSrcRoutesUsersRoute: typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesUsersRoute
   DotDotDotDotDotDotDotDotPackagesReactSrcRoutesIndexRoute: typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesIndexRoute
   DotDotDotDotDotDotDotDotPackagesReactSrcRoutesConnectDotintegrationSlugRoute: typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesConnectDotintegrationSlugRoute
   DotDotDotDotDotDotDotDotPackagesReactSrcRoutesIntegrationsDotnamespaceRoute: typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesIntegrationsDotnamespaceRoute
@@ -242,6 +256,13 @@ declare module '@tanstack/react-router' {
       path: '/{-$orgSlug}'
       fullPath: '/{-$orgSlug}/'
       preLoaderRoute: typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/{-$orgSlug}/users': {
+      id: '/{-$orgSlug}/users'
+      path: '/{-$orgSlug}/users'
+      fullPath: '/{-$orgSlug}/users'
+      preLoaderRoute: typeof DotDotDotDotDotDotDotDotPackagesReactSrcRoutesUsersRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/{-$orgSlug}/tools': {
@@ -365,6 +386,8 @@ const rootRouteChildren: RootRouteChildren = {
     DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolkitsRouteWithChildren,
   DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolsRoute:
     DotDotDotDotDotDotDotDotPackagesReactSrcRoutesToolsRoute,
+  DotDotDotDotDotDotDotDotPackagesReactSrcRoutesUsersRoute:
+    DotDotDotDotDotDotDotDotPackagesReactSrcRoutesUsersRoute,
   DotDotDotDotDotDotDotDotPackagesReactSrcRoutesIndexRoute:
     DotDotDotDotDotDotDotDotPackagesReactSrcRoutesIndexRoute,
   DotDotDotDotDotDotDotDotPackagesReactSrcRoutesConnectDotintegrationSlugRoute:

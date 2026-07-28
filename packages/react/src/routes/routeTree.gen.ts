@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './__root'
 import { Route as DotIndexRouteImport } from './index'
+import { Route as DotUsersRouteImport } from './users'
 import { Route as DotToolsRouteImport } from './tools'
 import { Route as DotToolkitsRouteImport } from './toolkits'
 import { Route as DotSecretsRouteImport } from './secrets'
@@ -24,6 +25,11 @@ import { Route as DotIntegrationsDotaddDotpluginKeyRouteImport } from './integra
 const DotIndexRoute = DotIndexRouteImport.update({
   id: '/{-$orgSlug}/',
   path: '/{-$orgSlug}/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DotUsersRoute = DotUsersRouteImport.update({
+  id: '/{-$orgSlug}/users',
+  path: '/{-$orgSlug}/users',
   getParentRoute: () => rootRouteImport,
 } as any)
 const DotToolsRoute = DotToolsRouteImport.update({
@@ -87,6 +93,7 @@ export interface FileRoutesByFullPath {
   '/{-$orgSlug}/secrets': typeof DotSecretsRoute
   '/{-$orgSlug}/toolkits': typeof DotToolkitsRouteWithChildren
   '/{-$orgSlug}/tools': typeof DotToolsRoute
+  '/{-$orgSlug}/users': typeof DotUsersRoute
   '/{-$orgSlug}/': typeof DotIndexRoute
   '/{-$orgSlug}/connect/$integrationSlug': typeof DotConnectDotintegrationSlugRoute
   '/{-$orgSlug}/integrations/$namespace': typeof DotIntegrationsDotnamespaceRoute
@@ -100,6 +107,7 @@ export interface FileRoutesByTo {
   '/{-$orgSlug}/secrets': typeof DotSecretsRoute
   '/{-$orgSlug}/toolkits': typeof DotToolkitsRouteWithChildren
   '/{-$orgSlug}/tools': typeof DotToolsRoute
+  '/{-$orgSlug}/users': typeof DotUsersRoute
   '/{-$orgSlug}': typeof DotIndexRoute
   '/{-$orgSlug}/connect/$integrationSlug': typeof DotConnectDotintegrationSlugRoute
   '/{-$orgSlug}/integrations/$namespace': typeof DotIntegrationsDotnamespaceRoute
@@ -114,6 +122,7 @@ export interface FileRoutesById {
   '/{-$orgSlug}/secrets': typeof DotSecretsRoute
   '/{-$orgSlug}/toolkits': typeof DotToolkitsRouteWithChildren
   '/{-$orgSlug}/tools': typeof DotToolsRoute
+  '/{-$orgSlug}/users': typeof DotUsersRoute
   '/{-$orgSlug}/': typeof DotIndexRoute
   '/{-$orgSlug}/connect/$integrationSlug': typeof DotConnectDotintegrationSlugRoute
   '/{-$orgSlug}/integrations/$namespace': typeof DotIntegrationsDotnamespaceRoute
@@ -129,6 +138,7 @@ export interface FileRouteTypes {
     | '/{-$orgSlug}/secrets'
     | '/{-$orgSlug}/toolkits'
     | '/{-$orgSlug}/tools'
+    | '/{-$orgSlug}/users'
     | '/{-$orgSlug}/'
     | '/{-$orgSlug}/connect/$integrationSlug'
     | '/{-$orgSlug}/integrations/$namespace'
@@ -142,6 +152,7 @@ export interface FileRouteTypes {
     | '/{-$orgSlug}/secrets'
     | '/{-$orgSlug}/toolkits'
     | '/{-$orgSlug}/tools'
+    | '/{-$orgSlug}/users'
     | '/{-$orgSlug}'
     | '/{-$orgSlug}/connect/$integrationSlug'
     | '/{-$orgSlug}/integrations/$namespace'
@@ -155,6 +166,7 @@ export interface FileRouteTypes {
     | '/{-$orgSlug}/secrets'
     | '/{-$orgSlug}/toolkits'
     | '/{-$orgSlug}/tools'
+    | '/{-$orgSlug}/users'
     | '/{-$orgSlug}/'
     | '/{-$orgSlug}/connect/$integrationSlug'
     | '/{-$orgSlug}/integrations/$namespace'
@@ -169,6 +181,7 @@ export interface RootRouteChildren {
   DotSecretsRoute: typeof DotSecretsRoute
   DotToolkitsRoute: typeof DotToolkitsRouteWithChildren
   DotToolsRoute: typeof DotToolsRoute
+  DotUsersRoute: typeof DotUsersRoute
   DotIndexRoute: typeof DotIndexRoute
   DotConnectDotintegrationSlugRoute: typeof DotConnectDotintegrationSlugRoute
   DotIntegrationsDotnamespaceRoute: typeof DotIntegrationsDotnamespaceRoute
@@ -184,6 +197,13 @@ declare module '@tanstack/react-router' {
       path: '/{-$orgSlug}'
       fullPath: '/{-$orgSlug}/'
       preLoaderRoute: typeof DotIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/{-$orgSlug}/users': {
+      id: '/{-$orgSlug}/users'
+      path: '/{-$orgSlug}/users'
+      fullPath: '/{-$orgSlug}/users'
+      preLoaderRoute: typeof DotUsersRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/{-$orgSlug}/tools': {
@@ -276,6 +296,7 @@ const rootRouteChildren: RootRouteChildren = {
   DotSecretsRoute: DotSecretsRoute,
   DotToolkitsRoute: DotToolkitsRouteWithChildren,
   DotToolsRoute: DotToolsRoute,
+  DotUsersRoute: DotUsersRoute,
   DotIndexRoute: DotIndexRoute,
   DotConnectDotintegrationSlugRoute: DotConnectDotintegrationSlugRoute,
   DotIntegrationsDotnamespaceRoute: DotIntegrationsDotnamespaceRoute,
