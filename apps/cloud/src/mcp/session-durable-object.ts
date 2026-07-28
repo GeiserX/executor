@@ -25,6 +25,8 @@ import {
   createExecutorMcpServer,
 } from "@executor-js/host-mcp/tool-server";
 import { buildResumeApprovalUrl } from "@executor-js/host-mcp/browser-approval";
+import { artifactUrlFor } from "@executor-js/host-mcp/render-ui";
+import { loadMcpAppsShellHtml } from "@executor-js/mcp-apps-shell";
 import {
   McpAgentSessionDOBase,
   type BuiltMcpServer,
@@ -250,6 +252,9 @@ export class McpSessionDOSqlite extends McpAgentSessionDOBase<Env, CloudSessionD
       const mcpServer = yield* createExecutorMcpServer({
         engine,
         description,
+        artifacts: executor.artifacts,
+        loadAppShellHtml: loadMcpAppsShellHtml,
+        artifactUrl: artifactUrlFor(env.VITE_PUBLIC_SITE_URL ?? "https://executor.sh"),
         parentSpan: () => self.currentParentSpan(),
         debug: env.EXECUTOR_MCP_DEBUG === "true",
         browserApprovalStore: self.browserApprovalStore,

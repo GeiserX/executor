@@ -1,0 +1,74 @@
+{
+  "name": "@executor-js/mcp-apps-shell",
+  "version": "1.4.4",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./shell-html": {
+      "types": "./src/shell-html.ts",
+      "default": "./src/shell-html.ts"
+    },
+    "./shell/components": {
+      "types": "./src/shell/components.ts",
+      "default": "./src/shell/components.ts"
+    },
+    "./shell/shell-app": {
+      "types": "./src/shell/shell-app.tsx",
+      "default": "./src/shell/shell-app.tsx"
+    },
+    "./shell/proxy": {
+      "types": "./src/shell/proxy.ts",
+      "default": "./src/shell/proxy.ts"
+    },
+    "./shell/component-runtime": {
+      "types": "./src/shell/component-runtime.ts",
+      "default": "./src/shell/component-runtime.ts"
+    },
+    "./globals.css": "./src/shell/globals.css"
+  },
+  "scripts": {
+    "build:shell": "vite build --config vite.config.shell.ts",
+    "typecheck": "tsgo --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck:slow": "bunx tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@executor-js/react": "workspace:*",
+    "@modelcontextprotocol/ext-apps": "^1.7.4",
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@tanstack/react-query": "^5.99.0",
+    "esbuild": "^0.27.7",
+    "sucrase": "^3.35.1"
+  },
+  "devDependencies": {
+    "@effect/vitest": "catalog:",
+    "@executor-js/execution": "workspace:*",
+    "@executor-js/host-mcp": "workspace:*",
+    "@executor-js/runtime-quickjs": "workspace:*",
+    "@executor-js/sdk": "workspace:*",
+    "@tailwindcss/browser": "^4.2.2",
+    "@tailwindcss/vite": "catalog:",
+    "@types/node": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@vitejs/plugin-react": "catalog:",
+    "bun-types": "catalog:",
+    "effect": "catalog:",
+    "lucide-react": "^1.7.0",
+    "playwright-core": "^1.59.1",
+    "react": "catalog:",
+    "react-dom": "catalog:",
+    "recharts": "3.8.0",
+    "tailwindcss": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vite-plugin-singlefile": "^2.3.2",
+    "vitest": "catalog:",
+    "zod": "4.3.6"
+  }
+}

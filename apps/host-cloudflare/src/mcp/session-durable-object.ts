@@ -5,6 +5,8 @@ import {
   createExecutorMcpServer,
 } from "@executor-js/host-mcp/tool-server";
 import { buildResumeApprovalUrl } from "@executor-js/host-mcp/browser-approval";
+import { artifactUrlFor } from "@executor-js/host-mcp/render-ui";
+import { loadMcpAppsShellHtml } from "@executor-js/mcp-apps-shell";
 import type { ExecutorDbHandle } from "@executor-js/api/server";
 import {
   McpAgentSessionDOBase,
@@ -113,7 +115,7 @@ export class McpSessionDO extends McpAgentSessionDOBase<CloudflareEnv, CfSession
       // QuickJS-WASM must be loaded before the executor layer builds it (the
       // default variant can't fetch its .wasm on Workers). Idempotent per isolate.
       yield* Effect.promise(() => preloadQuickJs());
-      const { engine } = yield* makeExecutionStack(
+      const { engine, executor } = yield* makeExecutionStack(
         sessionMeta.userId,
         sessionMeta.organizationId,
         sessionMeta.organizationName,
@@ -124,8 +126,15 @@ export class McpSessionDO extends McpAgentSessionDOBase<CloudflareEnv, CfSession
       // the console resume page. The URL origin is the create request's origin
       // (captured by the base), falling back to the configured site URL.
       const elicitationMode = sessionMeta.elicitationMode ?? "model";
+      // Same origin story as the approval URL below: an artifact deep link is
+      // only offered when this deployment knows its own public URL. Without one
+      // the artifact is still saved, and the tool says so.
+      const artifactOrigin = sessionMeta.webOrigin ?? config.webBaseUrl;
       const mcpServer = yield* createExecutorMcpServer({
         engine,
+        artifacts: executor.artifacts,
+        loadAppShellHtml: loadMcpAppsShellHtml,
+        ...(artifactOrigin ? { artifactUrl: artifactUrlFor(artifactOrigin) } : {}),
         browserApprovalStore: self.browserApprovalStore,
         pausedExecutionHooks: self.pausedExecutionHooks,
         pausedExecutionLeaseMs: PAUSED_APPROVAL_TIMEOUT_MS,

@@ -70,8 +70,95 @@ export const EXECUTE_SKILL: Skill = {
   body: EXECUTE_SKILL_BODY,
 };
 
+// The `render-ui` how-to. Same reasoning as `execute`: the discovery-vs-render
+// protocol, the TanStack rules and the component inventory are a page of prose
+// that only matters once a model decides to build a UI, so the tool description
+// stays short and points here.
+const SHADCN_COMPONENTS =
+  "Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter, Button, Input, Textarea, Label, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, Checkbox, Switch, Slider, Toggle, Tabs, TabsList, TabsTrigger, TabsContent, Table, TableHeader, TableBody, TableRow, TableHead, TableCell, Badge, Avatar, AvatarFallback, Alert, AlertTitle, AlertDescription, Dialog, Sheet, Popover, Tooltip, Separator, ScrollArea, Skeleton, Progress, Accordion, AccordionItem, AccordionTrigger, AccordionContent, DropdownMenu + sub-components";
+
+const RECHARTS_COMPONENTS =
+  "BarChart, Bar, LineChart, Line, AreaChart, Area, PieChart, Pie, XAxis, YAxis, CartesianGrid, ResponsiveContainer, Legend, ChartContainer, ChartTooltip, ChartTooltipContent";
+
+const LUCIDE_ICONS =
+  "Plus, Minus, Check, X, Search, Loader2, AlertCircle, ExternalLink, Copy, Trash2, Edit, Settings, User, Globe, Star, TrendingUp, Activity, Database, Shield, Package, and more";
+
+const RENDER_UI_SKILL_BODY = [
+  "# render-ui",
+  "",
+  "Render an interactive React UI component as an MCP app, and save it as an artifact.",
+  "",
+  "Every successful render is persisted under the `title` you supply, so the user can",
+  "reopen it later and you can find it again with `list-artifacts` / `show-artifact`.",
+  "Give it a short human-readable name (`Active users dashboard`), and a `description`",
+  "describing what it shows — that description is what a later request like",
+  '"show me my active users dashboard" is matched against.',
+  "",
+  "## Workflow",
+  "",
+  "1. If you need to understand tool names, query syntax, required arguments, response shapes, IDs, or mutation inputs, first use the regular `execute` tool to inspect them.",
+  "2. Then call `render-ui` with a component named `App` in the `code` parameter.",
+  "3. Recreate every read from the discovery step inside `App` with `useQuery(tools.<namespace>.<tool>.queryOptions(args))` so the UI stays live.",
+  "4. Use `useMutation(tools.<namespace>.<tool>.mutationOptions({ onSuccess }))` for user-triggered writes or actions.",
+  "5. Return only the component code.",
+  "",
+  "## Using Execute For Discovery",
+  "",
+  "- `execute` is for exploration: list datasets, inspect schemas, test a query, fetch one small sample row, or learn the exact mutation input shape.",
+  "- `render-ui` is for the final interactive surface. Do not paste discovery results into JSX as literal rows, cards, summaries, metrics, or chart series.",
+  "- After discovering an API call with `execute`, put the same call in TanStack Query options inside the generated component.",
+  "- Example discovery: call `execute` with `return await tools.axiom_mcp.querydataset({ ... })` to confirm columns, then call `render-ui` with `useQuery(tools.axiom_mcp.querydataset.queryOptions({ ... }))`.",
+  "- Use discovered result shapes exactly. If a sample or schema returns `{ renew, expiresAt }`, read `data?.renew`, not `data?.domain?.renew`.",
+  "- Keep discovery small. Use limits, narrow time ranges, or schema/list tools when possible.",
+  "",
+  "## TanStack Query State",
+  "",
+  "- The component is already wrapped in a `QueryClientProvider`; do not create your own.",
+  "- Use `const queryClient = useQueryClient()` when a mutation changes data shown by a query.",
+  "- For simple writes, invalidate with `queryClient.invalidateQueries(tools.<namespace>.<queryTool>.queryFilter(args))` in `onSuccess` or `onSettled`.",
+  "- For toggles and switches, pass the new checked value into `mutate`: `onCheckedChange={(checked) => mutation.mutate({ body: { enabled: checked } })}`.",
+  "- For optimistic UI, use `onMutate` to `cancelQueries`, snapshot `getQueryData`, and `setQueryData`; return the snapshot, restore it in `onError`, and invalidate in `onSettled`.",
+  "- Tool proxy helpers are TanStack-native: `.queryOptions(args, options)`, `.mutationOptions(options)`, `.queryKey(args)`, `.queryFilter(args, filters)`, `.pathKey()`, `.pathFilter(filters)`, and `.mutationKey()`.",
+  "",
+  "## What Is Already In Scope",
+  "",
+  "**Write no imports.** Everything below is bound before your code runs:",
+  "",
+  "- React: `useState`, `useEffect`, `useRef`, `useCallback`, `useMemo`, `useContext`, `createContext`, `Fragment`.",
+  "- TanStack Query v5: `useQuery`, `useMutation`, `useQueryClient`, `queryOptions`, `mutationOptions`, `skipToken`.",
+  "- The tool proxy `tools` and the multi-step escape hatch `run(code)`.",
+  `- shadcn/ui components available by name: ${SHADCN_COMPONENTS}`,
+  `- Recharts components available by name: ${RECHARTS_COMPONENTS}`,
+  `- Lucide icons available by name: ${LUCIDE_ICONS}`,
+  "- The class-name helper `cn`.",
+  "",
+  "## Rules",
+  "",
+  "- Use this tool instead of `execute` whenever the output should be an interactive UI.",
+  "- Export a component named `App`. A top-level `const config = { maxHeight }` sets the frame height.",
+  "- Do not call API tools first and paste returned data into JSX.",
+  "- Do not embed tool response rows, API results, summaries, dashboard data, or copied query output as literals. Fetch them with `useQuery` so the UI stays live; only hardcode display constants like labels, colors, tab names, and chart configuration.",
+  "- Always render the loading and error states from `useQuery` / `useMutation`; do not replace them with hardcoded fallback data.",
+  "- Do not redeclare or destructure provided globals. `const { useState } = React` and `const Card = ...` are rejected by the server before the UI reaches the iframe — use them directly.",
+  "- `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource` and workers are blocked inside the frame. Every read and write goes through `tools`.",
+  "- Give `title` a short human-readable name and `description` enough detail that you can find the artifact again later.",
+  "",
+  "## Retrieving Saved Artifacts",
+  "",
+  "- `list-artifacts` returns every saved artifact's id, title, description and last-updated time.",
+  "- `show-artifact({ id })` re-renders one. Match the user's phrasing against the titles and descriptions from `list-artifacts` rather than guessing an id.",
+  "- Clients that cannot display MCP apps get a link to the artifact in the web app instead; pass that URL on to the user verbatim.",
+].join("\n");
+
+export const RENDER_UI_SKILL: Skill = {
+  name: "render-ui",
+  summary:
+    "How to write a React component for the render-ui tool: discover data with execute, keep it live with TanStack Query, and what is already in scope.",
+  body: RENDER_UI_SKILL_BODY,
+};
+
 /** The full skill catalog. Hand-curated; keep it small. */
-export const SKILLS: readonly Skill[] = [EXECUTE_SKILL];
+export const SKILLS: readonly Skill[] = [EXECUTE_SKILL, RENDER_UI_SKILL];
 
 /** Look up a skill by its exact name. */
 export const findSkill = (name: string): Skill | undefined =>

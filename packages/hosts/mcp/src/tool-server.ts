@@ -1,7 +1,17 @@
 import { Duration, Effect, Match, Option, Schema } from "effect";
 import * as Cause from "effect/Cause";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { ContentBlockSchema, type ContentBlock } from "@modelcontextprotocol/sdk/types.js";
+import {
+  ContentBlockSchema,
+  type ClientCapabilities,
+  type ContentBlock,
+} from "@modelcontextprotocol/sdk/types.js";
+import {
+  getUiCapability,
+  registerAppResource,
+  registerAppTool,
+  RESOURCE_MIME_TYPE,
+} from "@modelcontextprotocol/ext-apps/server";
 import type {
   jsonSchemaValidator,
   JsonSchemaType,
@@ -12,10 +22,13 @@ import * as z from "zod/v4";
 
 import { isToolFile } from "@executor-js/sdk";
 import type {
+  Artifact,
+  ArtifactSummary,
   ElicitationResponse,
   ElicitationHandler,
   ElicitationContext,
   ElicitationRequest,
+  SaveArtifactInput,
   ToolFileValue,
 } from "@executor-js/sdk";
 import type * as Tracer from "effect/Tracer";
@@ -35,6 +48,7 @@ import {
   type PausedExecution,
   type PausedExecutionDeadline,
 } from "@executor-js/execution";
+import { MCP_APPS_SHELL_RESOURCE_URI, validateRenderUiCode } from "./render-ui";
 
 // ---------------------------------------------------------------------------
 // Workers-compatible JSON Schema validator (replaces Ajv which uses new Function())
@@ -118,6 +132,39 @@ type SharedMcpServerConfig = {
     executionId: string,
     response: ResumeResponse,
   ) => Effect.Effect<ResumeFallbackOutcome | null, unknown>;
+  /**
+   * Loads the MCP-Apps shell HTML served as the `ui://executor/shell.html`
+   * resource. Injected rather than imported: the shell carries React, Recharts
+   * and Tailwind, and this package also runs on Workers. Hosts that can serve
+   * it pass `loadMcpAppsShellHtml` from `@executor-js/mcp-apps-shell`; hosts
+   * that leave it unset simply don't register the resource or the ui tools.
+   */
+  readonly loadAppShellHtml?: () => Promise<string>;
+  /**
+   * The scoped executor's artifact operations, so `render-ui` can persist what
+   * it renders and `list-artifacts` / `show-artifact` can read it back. Only
+   * the three operations the MCP surface needs, so hosts don't have to hand the
+   * whole `Executor` across this boundary.
+   */
+  readonly artifacts?: McpArtifactsPort;
+  /**
+   * Builds the web-app deep link for a saved artifact. Clients that can't
+   * render MCP Apps get this URL instead of an inline widget. Absent (stdio has
+   * no origin at all) means `render-ui` still persists and reports the id, but
+   * has no URL to offer.
+   */
+  readonly artifactUrl?: (artifactId: string) => string;
+};
+
+/**
+ * The narrow artifact surface the MCP tools need. Structurally satisfied by
+ * `Executor["artifacts"]`, so hosts holding a scoped executor can pass
+ * `executor.artifacts` directly.
+ */
+export type McpArtifactsPort = {
+  readonly list: () => Effect.Effect<readonly ArtifactSummary[], unknown>;
+  readonly get: (id: string) => Effect.Effect<Artifact, unknown>;
+  readonly save: (input: SaveArtifactInput) => Effect.Effect<Artifact, unknown>;
 };
 
 export type ExecutorMcpServerConfig<E extends Cause.YieldableError = Cause.YieldableError> =
@@ -684,6 +731,120 @@ const joinKeyAttributes = (joinKeys: McpRequestJoinKeys): Record<string, unknown
 const startMarker = (name: string, attributes: Record<string, unknown>): Effect.Effect<void> =>
   Effect.void.pipe(Effect.withSpan(name, { attributes }));
 
+// ---------------------------------------------------------------------------
+// Artifacts / MCP Apps result formatting
+// ---------------------------------------------------------------------------
+//
+// Delivery is negotiated, not branched on by the model: an artifact reaches the
+// user as an inline widget when the client renders MCP Apps, and as a link into
+// the web app when it doesn't. Both carry `artifactId`, because either way the
+// artifact was saved and can be reopened later.
+
+const renderRejectedResult = (reason: string): McpToolResult => ({
+  content: [{ type: "text", text: `Render UI rejected: ${reason}` }],
+  structuredContent: { status: "error", error: reason },
+  isError: true,
+});
+
+const renderedInAppResult = (input: {
+  readonly code: string;
+  readonly artifactId: string;
+  readonly title: string;
+}): McpToolResult => ({
+  content: [
+    {
+      type: "text",
+      text: `Rendered "${input.title}" as an interactive UI component. Saved as artifact ${input.artifactId}.`,
+    },
+  ],
+  structuredContent: { code: input.code, artifactId: input.artifactId },
+});
+
+const renderedAsLinkResult = (input: {
+  readonly url: string;
+  readonly artifactId: string;
+  readonly title: string;
+}): McpToolResult => ({
+  content: [
+    {
+      type: "text",
+      text: [
+        `Saved "${input.title}" as artifact ${input.artifactId}.`,
+        "This MCP client cannot display MCP Apps, so give the user this URL to open it:",
+        input.url,
+      ].join("\n"),
+    },
+  ],
+  structuredContent: {
+    status: "fallback_url",
+    url: input.url,
+    artifactId: input.artifactId,
+  },
+});
+
+const renderedWithoutSurfaceResult = (input: {
+  readonly artifactId: string;
+  readonly title: string;
+}): McpToolResult => ({
+  content: [
+    {
+      type: "text",
+      text: [
+        `Saved "${input.title}" as artifact ${input.artifactId}.`,
+        "This MCP client cannot display MCP Apps and this deployment has no web UI configured, so there is nowhere to show it right now.",
+        "Tell the user the artifact was saved and can be opened from a client that supports MCP Apps.",
+      ].join("\n"),
+    },
+  ],
+  structuredContent: {
+    status: "fallback_unavailable",
+    reason: "mcp_apps_unsupported",
+    artifactId: input.artifactId,
+  },
+});
+
+const artifactsUnavailableResult = (): McpToolResult => ({
+  content: [
+    {
+      type: "text",
+      text: "Artifacts are not available on this connection.",
+    },
+  ],
+  structuredContent: { status: "error", error: "artifacts_unavailable" },
+  isError: true,
+});
+
+const artifactListResult = (artifacts: readonly ArtifactSummary[]): McpToolResult => {
+  const items = artifacts.map((artifact) => ({
+    id: artifact.id,
+    title: artifact.title,
+    description: artifact.description,
+    updatedAt: artifact.updatedAt.toISOString(),
+  }));
+  const text =
+    items.length === 0
+      ? "No saved artifacts yet. Use render-ui to create one."
+      : [
+          "Saved artifacts:",
+          ...items.map(
+            (item) =>
+              `- ${item.id} — ${item.title}${item.description ? `: ${item.description}` : ""} (updated ${item.updatedAt})`,
+          ),
+        ].join("\n");
+  return { content: [{ type: "text", text }], structuredContent: { artifacts: items } };
+};
+
+const artifactNotFoundResult = (id: string): McpToolResult => ({
+  content: [
+    {
+      type: "text",
+      text: `No artifact with id "${id}". Call list-artifacts to see what is saved.`,
+    },
+  ],
+  structuredContent: { status: "error", error: "artifact_not_found", id },
+  isError: true,
+});
+
 const JsonObjectFromString = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown));
 const decodeJsonObjectString = Schema.decodeUnknownOption(JsonObjectFromString);
 
@@ -762,7 +923,7 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
 
     const formatPausedModelResult = (
       execution: PausedExecution,
-      source: "execute" | "resume" | "browser_resume",
+      source: "execute" | "execute_action" | "resume" | "browser_resume",
     ): Effect.Effect<McpToolResult> =>
       Effect.gen(function* () {
         const deadline = pauseDeadline();
@@ -795,7 +956,11 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
         new McpServer(
           { name: "executor", version: "1.0.0" },
           {
-            capabilities: { tools: {} },
+            // `resources` is required to serve the MCP-Apps shell at
+            // `ui://executor/shell.html`; it stays advertised even when no
+            // shell loader is configured so the capability set doesn't vary
+            // per host.
+            capabilities: { resources: {}, tools: {} },
             jsonSchemaValidator: new CfWorkerJsonSchemaValidator(),
           },
         ),
@@ -852,6 +1017,49 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
           },
         }),
         Effect.annotateSpans(joinKeyAttributes(extra)),
+      );
+
+    // `execute-action` is `execute` as called by the shell rather than by the
+    // model, and the difference is who owns approval. The shell renders the
+    // approval modal itself in its trusted outer frame, so a pause here must
+    // come back as the `waiting_for_interaction` payload the shell knows how to
+    // resolve — never as a browser approval URL, which the user would have no
+    // way to act on from inside a widget. That holds even when the session's
+    // elicitation mode is `browser`, which is why this doesn't just call
+    // `executeCode`.
+    const executeCodeFromApp = (code: string): Effect.Effect<McpToolResult, E> =>
+      Effect.gen(function* () {
+        debugLog("execute_action.call", {
+          elicitationMode: elicitationMode.mode,
+          elicitationSupport: getElicitationSupport(server),
+          codeLength: code.length,
+        });
+        if (elicitationMode.mode === "native") {
+          const result = yield* engine.execute(code, {
+            onElicitation: makeMcpElicitationHandler(server, debugLog),
+          });
+          return toMcpResult(result);
+        }
+        const outcome = yield* engine.executeWithPause(code);
+        debugLog("execute_action.paused_flow_result", {
+          status: outcome.status,
+          executionId: outcome.status === "paused" ? outcome.execution.id : undefined,
+          interactionKind:
+            outcome.status === "paused"
+              ? pausedInteractionKind(outcome.execution.elicitationContext.request)
+              : undefined,
+        });
+        if (outcome.status === "paused") {
+          return yield* formatPausedModelResult(outcome.execution, "execute_action");
+        }
+        return toMcpResult(outcome.result);
+      }).pipe(
+        Effect.withSpan("mcp.host.tool.execute_action", {
+          attributes: {
+            "mcp.tool.name": "execute-action",
+            "mcp.execute.code_length": code.length,
+          },
+        }),
       );
 
     const resumeExecution = (
@@ -1079,7 +1287,284 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
       }),
     );
 
-    yield* Effect.sync(() => {
+    // --- artifacts / MCP Apps ---
+    //
+    // These register unconditionally once a shell loader is configured. Whether
+    // the client can actually *render* an app is only known after `initialize`,
+    // so the app-only tools are toggled in `syncToolAvailability` below; the
+    // model-facing three stay enabled either way and fall back to a deep link.
+
+    const artifacts = config.artifacts;
+
+    // Set from the client's advertised capabilities at `initialize`. Read by
+    // the render handlers to choose inline widget vs. deep link.
+    let appsEnabled = false;
+    let executeActionTool: { enable: () => void; disable: () => void } | undefined;
+    let executeActionResumeTool: { enable: () => void; disable: () => void } | undefined;
+
+    const saveAndDeliverArtifact = (input: {
+      readonly code: string;
+      readonly title: string;
+      readonly description?: string;
+      readonly existingId?: string;
+    }): Effect.Effect<McpToolResult, unknown> =>
+      Effect.gen(function* () {
+        if (!artifacts) return artifactsUnavailableResult();
+        const saved = yield* artifacts.save({
+          ...(input.existingId === undefined ? {} : { id: input.existingId }),
+          title: input.title,
+          description: input.description ?? null,
+          code: input.code,
+        });
+        yield* Effect.annotateCurrentSpan({
+          "mcp.artifact.id": saved.id,
+          "mcp.artifact.apps_enabled": appsEnabled,
+        });
+        return deliverArtifact({ code: saved.code, artifactId: saved.id, title: saved.title });
+      });
+
+    const deliverArtifact = (input: {
+      readonly code: string;
+      readonly artifactId: string;
+      readonly title: string;
+    }): McpToolResult => {
+      if (appsEnabled) return renderedInAppResult(input);
+      const url = config.artifactUrl?.(input.artifactId);
+      return url
+        ? renderedAsLinkResult({ url, artifactId: input.artifactId, title: input.title })
+        : renderedWithoutSurfaceResult({ artifactId: input.artifactId, title: input.title });
+    };
+
+    const renderUi = (input: {
+      readonly code: string;
+      readonly title: string;
+      readonly description?: string;
+    }): Effect.Effect<McpToolResult, unknown> =>
+      Effect.gen(function* () {
+        const rejection = validateRenderUiCode(input.code);
+        if (rejection) return renderRejectedResult(rejection);
+        return yield* saveAndDeliverArtifact(input);
+      }).pipe(
+        Effect.withSpan("mcp.host.tool.render_ui", {
+          attributes: {
+            "mcp.tool.name": "render-ui",
+            "mcp.execute.code_length": input.code.length,
+          },
+        }),
+      );
+
+    const listArtifacts = (): Effect.Effect<McpToolResult, unknown> =>
+      Effect.gen(function* () {
+        if (!artifacts) return artifactsUnavailableResult();
+        return artifactListResult(yield* artifacts.list());
+      }).pipe(
+        Effect.withSpan("mcp.host.tool.list_artifacts", {
+          attributes: { "mcp.tool.name": "list-artifacts" },
+        }),
+      );
+
+    const showArtifact = (id: string): Effect.Effect<McpToolResult, unknown> =>
+      Effect.gen(function* () {
+        if (!artifacts) return artifactsUnavailableResult();
+        // A miss is the ordinary case (the model guessed an id, or the row was
+        // deleted), so it becomes an isError result rather than a defect.
+        const artifact: Artifact | null = yield* artifacts
+          .get(id)
+          .pipe(Effect.catchCause(() => Effect.succeed(null)));
+        if (!artifact) return artifactNotFoundResult(id);
+        return deliverArtifact({
+          code: artifact.code,
+          artifactId: artifact.id,
+          title: artifact.title,
+        });
+      }).pipe(
+        Effect.withSpan("mcp.host.tool.show_artifact", {
+          attributes: { "mcp.tool.name": "show-artifact", "mcp.artifact.id": id },
+        }),
+      );
+
+    const loadAppShellHtml = config.loadAppShellHtml;
+
+    if (loadAppShellHtml) {
+      yield* Effect.sync(() => {
+        registerAppResource(
+          server,
+          "Executor Shell",
+          MCP_APPS_SHELL_RESOURCE_URI,
+          { mimeType: RESOURCE_MIME_TYPE },
+          async () => ({
+            contents: [
+              {
+                uri: MCP_APPS_SHELL_RESOURCE_URI,
+                mimeType: RESOURCE_MIME_TYPE,
+                text: await loadAppShellHtml(),
+                // Zero allowed domains: the shell may open no network
+                // connection of its own. Every read and write goes back over
+                // the MCP bridge through `execute-action`.
+                _meta: { ui: { csp: { connectDomains: [], resourceDomains: [] } } },
+              },
+            ],
+          }),
+        );
+      }).pipe(
+        Effect.withSpan("mcp.host.register_resource", {
+          attributes: { "mcp.resource.uri": MCP_APPS_SHELL_RESOURCE_URI },
+        }),
+      );
+
+      yield* Effect.sync(() =>
+        registerAppTool(
+          server,
+          "render-ui",
+          {
+            description: [
+              "Render an interactive React UI component as an MCP app, and save it as a reusable artifact.",
+              'Call `skills({ name: "render-ui" })` for the full guide: the discovery-then-render protocol, TanStack Query rules, and every component already in scope.',
+              "Write a component named `App` in `code`. Do not import anything and do not paste fetched data into JSX — read it live with `useQuery(tools.<namespace>.<tool>.queryOptions(args))`.",
+              "Clients that cannot display MCP apps receive a link to the saved artifact instead; pass it to the user.",
+            ].join("\n"),
+            inputSchema: {
+              code: z.string().trim().min(1).describe("The React component source. Export `App`."),
+              title: z
+                .string()
+                .trim()
+                .min(1)
+                .describe(
+                  'Short human-readable name for the artifact, e.g. "Active users dashboard". The user sees this and you match against it later.',
+                ),
+              description: z
+                .string()
+                .optional()
+                .describe(
+                  "What this UI shows, in a sentence. Used to find the artifact again on a later request.",
+                ),
+            },
+            _meta: {
+              ui: { resourceUri: MCP_APPS_SHELL_RESOURCE_URI, visibility: ["model"] },
+            },
+          },
+          ({ code, title, description }) => runToolEffect(renderUi({ code, title, description })),
+        ),
+      ).pipe(
+        Effect.withSpan("mcp.host.register_tool", {
+          attributes: { "mcp.tool.name": "render-ui" },
+        }),
+      );
+
+      yield* Effect.sync(() =>
+        server.registerTool(
+          "list-artifacts",
+          {
+            description: [
+              "List the saved UI artifacts for this account, newest first.",
+              "Match the user's phrasing against the returned titles and descriptions, then call `show-artifact` with that id.",
+            ].join("\n"),
+            inputSchema: {},
+          },
+          () => runToolEffect(listArtifacts()),
+        ),
+      ).pipe(
+        Effect.withSpan("mcp.host.register_tool", {
+          attributes: { "mcp.tool.name": "list-artifacts" },
+        }),
+      );
+
+      yield* Effect.sync(() =>
+        registerAppTool(
+          server,
+          "show-artifact",
+          {
+            description: [
+              "Re-render a saved UI artifact by id.",
+              "Use `list-artifacts` first to find the id whose title or description matches what the user asked for.",
+              "Clients that cannot display MCP apps receive a link to the artifact instead.",
+            ].join("\n"),
+            inputSchema: {
+              id: z.string().trim().min(1).describe("The artifact id from `list-artifacts`."),
+            },
+            _meta: {
+              ui: { resourceUri: MCP_APPS_SHELL_RESOURCE_URI, visibility: ["model"] },
+            },
+          },
+          ({ id }) => runToolEffect(showArtifact(id)),
+        ),
+      ).pipe(
+        Effect.withSpan("mcp.host.register_tool", {
+          attributes: { "mcp.tool.name": "show-artifact" },
+        }),
+      );
+
+      yield* Effect.sync(() => {
+        executeActionTool = registerAppTool(
+          server,
+          "execute-action",
+          {
+            description:
+              "Execute code from the UI shell. Used by interactive components to call tools and run mutations.",
+            inputSchema: { code: z.string().trim().min(1) },
+            _meta: {
+              ui: { resourceUri: MCP_APPS_SHELL_RESOURCE_URI, visibility: ["app"] },
+            },
+          },
+          ({ code }) => runToolEffect(executeCodeFromApp(code)),
+        );
+
+        executeActionResumeTool = registerAppTool(
+          server,
+          "execute-action-resume",
+          {
+            description: "Resume an interactive UI action after shell-owned user approval.",
+            inputSchema: {
+              executionId: z.string().describe("The execution ID from the paused UI action"),
+              action: z
+                .enum(["accept", "decline", "cancel"])
+                .describe("How to respond to the interaction"),
+              content: z
+                .string()
+                .describe("Optional JSON-encoded response content for form elicitations")
+                .default("{}"),
+            },
+            _meta: {
+              ui: { resourceUri: MCP_APPS_SHELL_RESOURCE_URI, visibility: ["app"] },
+            },
+          },
+          ({ executionId, action, content: rawContent }, extra) =>
+            runToolEffect(
+              resumeExecution(executionId, action, parseJsonContent(rawContent), extra),
+            ),
+        );
+      }).pipe(
+        Effect.withSpan("mcp.host.register_tool", {
+          attributes: { "mcp.tool.name": "execute-action" },
+        }),
+      );
+    }
+
+    // Client capabilities only exist after `initialize`, and `tools/list` is
+    // answered from whatever is registered at that moment — so app-only tool
+    // visibility has to be re-synced from the `oninitialized` hook rather than
+    // decided at construction.
+    const syncToolAvailability = () => {
+      const clientCapabilities = server.server.getClientCapabilities();
+      const uiCapability = getUiCapability(
+        clientCapabilities as
+          | (ClientCapabilities & { extensions?: Record<string, unknown> })
+          | null,
+      );
+      appsEnabled = Boolean(uiCapability?.mimeTypes?.includes(RESOURCE_MIME_TYPE));
+
+      // `execute-action` is only callable from inside a rendered app, so a
+      // client that can't render one should never see it. `render-ui`,
+      // `list-artifacts` and `show-artifact` stay visible regardless: they
+      // still persist, and still return something useful (a deep link).
+      if (appsEnabled) {
+        executeActionTool?.enable();
+        executeActionResumeTool?.enable();
+      } else {
+        executeActionTool?.disable();
+        executeActionResumeTool?.disable();
+      }
+
       console.error(
         "[executor] MCP session mode",
         JSON.stringify({
@@ -1089,11 +1574,19 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
         }),
       );
       debugLog("tool.visibility", {
-        clientCapabilities: server.server.getClientCapabilities() ?? null,
+        clientCapabilities: clientCapabilities ?? null,
         elicitationSupport: getElicitationSupport(server),
         elicitationMode: elicitationMode.mode,
         resumeEnabled: elicitationMode.mode !== "native",
+        appsSupport: uiCapability ?? null,
+        appsEnabled,
+        executeActionEnabled: appsEnabled,
       });
+    };
+
+    yield* Effect.sync(() => {
+      syncToolAvailability();
+      server.server.oninitialized = syncToolAvailability;
     }).pipe(Effect.withSpan("mcp.host.sync_tool_availability"));
 
     return server;

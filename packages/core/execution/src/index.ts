@@ -12,7 +12,15 @@ export {
 } from "./engine";
 
 export { buildExecuteDescription, INTEGRATION_INVENTORY_HEADER } from "./description";
-export { EXECUTE_SKILL, SKILLS, findSkill, renderSkillsIndex, type Skill } from "./skills";
+export {
+  EXECUTE_SKILL,
+  RENDER_UI_SKILL,
+  SKILLS,
+  findSkill,
+  renderSkillsIndex,
+  type Skill,
+} from "./skills";
+export { PROVIDED_GLOBAL_NAMES } from "./provided-globals";
 export { ExecutionToolError } from "./errors";
 export {
   defaultToolDiscoveryProvider,

@@ -91,6 +91,10 @@ const loadLocalPlugins = (options: LocalExecutorOptions = {}) =>
 interface LocalExecutorBundle {
   readonly executor: Executor<LocalPlugins>;
   readonly plugins: LocalPlugins;
+  /** Where this daemon's web UI is reachable, resolved once at boot. Surfaced
+   *  so callers building user-facing links (MCP artifact deep links) use the
+   *  same origin the executor itself was configured with. */
+  readonly webBaseUrl: string;
 }
 
 class LocalExecutorTag extends Context.Service<LocalExecutorTag, LocalExecutorBundle>()(
@@ -233,7 +237,7 @@ const createLocalExecutorLayer = (options: LocalExecutorOptions = {}) => {
           );
       }
 
-      return { executor, plugins };
+      return { executor, plugins, webBaseUrl };
     }),
   );
 };
@@ -246,6 +250,7 @@ export const createExecutorHandle = async (options: LocalExecutorOptions = {}) =
   return {
     executor: bundle.executor,
     plugins: bundle.plugins,
+    webBaseUrl: bundle.webBaseUrl,
     dispose: async () => {
       await Effect.runPromise(Effect.ignore(bundle.executor.close()));
       await ignorePromiseFailure("disposeRuntime", () => runtime.dispose());
