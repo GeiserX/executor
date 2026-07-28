@@ -1,7 +1,7 @@
 import { HttpApiBuilder } from "effect/unstable/httpapi";
 import { HttpRouter, HttpServer } from "effect/unstable/http";
 import { describe, expect, it } from "@effect/vitest";
-import { Context, Effect, Layer, type Scope } from "effect";
+import { Context, Data, Effect, Layer, type Scope } from "effect";
 
 import { Subject, Tenant, collectTables, createExecutor, type Executor } from "@executor-js/sdk";
 import { createSqliteTestFumaDb, type SqliteTestFumaDb } from "@executor-js/sdk/testing";
@@ -10,7 +10,13 @@ import { resetSubjectTouchCache, touchSubject } from "@executor-js/sdk/host-inte
 import { AdminUsersHttpApi, AdminUsersForbidden, AdminUsersUnauthorized } from "./api";
 import { AdminUsersHandlers } from "./handlers";
 import { AdminUsersProvider, type AdminUsersHeaders } from "./service";
-import { listUserConnections, listUsers, listUsersWithConnections, platformViewOf } from "./reads";
+import {
+  listUserConnections,
+  listUsers,
+  listUsersWithConnections,
+  platformViewOf,
+  type AdminIdentityDirectory,
+} from "./reads";
 
 // ---------------------------------------------------------------------------
 // The admin users HTTP surface, over a real SQLite-backed platform view.
@@ -180,13 +186,16 @@ const stubProvider = (
   authorize: (
     headers: AdminUsersHeaders,
   ) => Effect.Effect<string, AdminUsersUnauthorized | AdminUsersForbidden>,
+  directory?: AdminIdentityDirectory,
 ) =>
   Layer.succeed(AdminUsersProvider)({
     listUsers: (headers, options) =>
       authorize(headers).pipe(
         Effect.flatMap(executorFor),
         Effect.flatMap((executor) =>
-          platformViewOf(executor).pipe(Effect.flatMap((admin) => listUsers(admin, options))),
+          platformViewOf(executor).pipe(
+            Effect.flatMap((admin) => listUsers(admin, options, directory)),
+          ),
         ),
       ),
     listUsersWithConnections: (headers, options) =>
@@ -194,7 +203,7 @@ const stubProvider = (
         Effect.flatMap(executorFor),
         Effect.flatMap((executor) =>
           platformViewOf(executor).pipe(
-            Effect.flatMap((admin) => listUsersWithConnections(admin, options)),
+            Effect.flatMap((admin) => listUsersWithConnections(admin, options, directory)),
           ),
         ),
       ),
@@ -261,13 +270,21 @@ const get = (
 
 const jsonOf = <A>(response: Response) => Effect.promise(() => response.json() as Promise<A>);
 
-type UsersBody = { readonly users: ReadonlyArray<{ readonly externalId: string }> };
+type UsersBody = {
+  readonly users: ReadonlyArray<{
+    readonly externalId: string;
+    readonly email: string | null;
+    readonly displayName: string | null;
+  }>;
+};
 type ConnectionsBody = {
   readonly connections: ReadonlyArray<{ readonly integration: string; readonly name: string }>;
 };
 type UsersWithConnectionsBody = {
   readonly users: ReadonlyArray<{
     readonly externalId: string;
+    readonly email: string | null;
+    readonly displayName: string | null;
     readonly lastSeenAt: number | null;
     readonly status: string | null;
     readonly connections: ReadonlyArray<{
@@ -279,6 +296,33 @@ type UsersWithConnectionsBody = {
 };
 
 const ORG_A = "Bearer org_a_key";
+
+/**
+ * A host member directory that knows USER_A1 only.
+ *
+ * USER_A2 is deliberately absent — that is the real case of a member who left
+ * the org while their connections remain, and the one an id-space mismatch would
+ * also look like. `seen` records the ids the directory was asked for, so a test
+ * can prove the join is ONE batched read of the returned page rather than a
+ * lookup per user.
+ */
+const stubDirectory =
+  (seen: string[][]): AdminIdentityDirectory =>
+  (externalIds) => {
+    seen.push([...externalIds]);
+    return Effect.succeed(new Map([[USER_A1, { email: "a1@users.test", displayName: "User A1" }]]));
+  };
+
+/** The failure a host's directory raises — WorkOS or Better Auth being
+ *  unreachable. Typed rather than a bare `Error`, since the directory seam's
+ *  `unknown` error channel exists to carry each host's OWN error type. */
+class DirectoryUnavailable extends Data.TaggedError("DirectoryUnavailable")<{
+  readonly message: string;
+}> {}
+
+/** A directory whose read fails, standing in for a WorkOS/Better Auth outage. */
+const failingDirectory: AdminIdentityDirectory = () =>
+  Effect.fail(new DirectoryUnavailable({ message: "member directory unavailable" }));
 
 describe("admin users API", () => {
   it.effect("lists every user of the tenant for an authorized org caller", () =>
@@ -458,7 +502,7 @@ describe("admin users API", () => {
         expect(
           Object.keys(users[0] ?? {}).sort(),
           "the user projection is exactly the allowlist",
-        ).toEqual(["createdAt", "externalId", "lastSeenAt", "status"]);
+        ).toEqual(["createdAt", "displayName", "email", "externalId", "lastSeenAt", "status"]);
       }),
     ),
   );
@@ -475,6 +519,140 @@ describe("admin users API", () => {
 
         const response = yield* get(web, "/admin/users", ORG_A);
         expect(response.status, "a missing platform view is a server error").toBe(500);
+      }),
+    ),
+  );
+
+  // ── Host identity join ────────────────────────────────────────────────────
+
+  it.effect("joins the host's email and name onto users the directory resolves", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const seen: string[][] = [];
+        const web = yield* webHandlerFor(
+          stubProvider(
+            (tenant) => platformExecutorFor(db, tenant),
+            headerAuthorize,
+            stubDirectory(seen),
+          ),
+        );
+
+        const body = yield* jsonOf<UsersBody>(yield* get(web, "/admin/users", ORG_A));
+        expect(
+          body.users.map((user) => [user.externalId, user.email, user.displayName]),
+          "the resolvable member is named; the unresolvable one reports absent identity",
+        ).toEqual([
+          [USER_A1, "a1@users.test", "User A1"],
+          [USER_A2, null, null],
+        ]);
+
+        // The join is a BATCH: one directory read for the whole page, carrying
+        // every id at once — never one read per user.
+        expect(seen, "one directory read, for exactly the page's ids").toEqual([
+          [USER_A1, USER_A2],
+        ]);
+      }),
+    ),
+  );
+
+  it.effect("joins identity onto the connections view too, over the same one read", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const seen: string[][] = [];
+        const web = yield* webHandlerFor(
+          stubProvider(
+            (tenant) => platformExecutorFor(db, tenant),
+            headerAuthorize,
+            stubDirectory(seen),
+          ),
+        );
+
+        const body = yield* jsonOf<UsersWithConnectionsBody>(
+          yield* get(web, "/admin/users/with-connections", ORG_A),
+        );
+        expect(body.users.map((user) => [user.externalId, user.email])).toEqual([
+          [USER_A1, "a1@users.test"],
+          [USER_A2, null],
+        ]);
+        expect(seen.length, "still one directory read for the page").toBe(1);
+      }),
+    ),
+  );
+
+  // Identity is decoration on an operator view, not the answer: a directory
+  // outage must cost the rows their names, never cost the operator the read.
+  it.effect("still serves users when the host's identity lookup fails", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const web = yield* webHandlerFor(
+          stubProvider(
+            (tenant) => platformExecutorFor(db, tenant),
+            headerAuthorize,
+            failingDirectory,
+          ),
+        );
+
+        const response = yield* get(web, "/admin/users", ORG_A);
+        expect(response.status, "a directory outage is not a failed request").toBe(200);
+        const body = yield* jsonOf<UsersBody>(response);
+        expect(
+          body.users.map((user) => [user.externalId, user.email, user.displayName]),
+          "every user is still reported, simply unnamed",
+        ).toEqual([
+          [USER_A1, null, null],
+          [USER_A2, null, null],
+        ]);
+      }),
+    ),
+  );
+
+  // A host that cannot map its id space to a directory at all passes none. The
+  // rows must still be complete — absent identity, not a missing field.
+  it.effect("reports absent identity when the host wires no directory", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const web = yield* webHandlerFor(
+          stubProvider((tenant) => platformExecutorFor(db, tenant), headerAuthorize),
+        );
+
+        const body = yield* jsonOf<UsersBody>(yield* get(web, "/admin/users", ORG_A));
+        expect(body.users.map((user) => [user.email, user.displayName])).toEqual([
+          [null, null],
+          [null, null],
+        ]);
+      }),
+    ),
+  );
+
+  // Email and name are the ONLY fields this join is allowed to add. The
+  // forbidden-field assertions above run without a directory, so re-run the
+  // credential check with one wired: a directory is a new data source reaching
+  // the response, and it must not become a hole in the allowlist.
+  it.effect("adds only email and displayName to the allowlist", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const seen: string[][] = [];
+        const web = yield* webHandlerFor(
+          stubProvider(
+            (tenant) => platformExecutorFor(db, tenant),
+            headerAuthorize,
+            stubDirectory(seen),
+          ),
+        );
+
+        for (const path of ["/admin/users", "/admin/users/with-connections"]) {
+          const response = yield* get(web, path, ORG_A);
+          const raw = yield* Effect.promise(() => response.text());
+          for (const field of FORBIDDEN_FIELDS) {
+            expect(raw, `${path} must not expose "${field}"`).not.toContain(`"${field}"`);
+          }
+          expect(raw, `${path} must not leak a stored secret`).not.toContain("SECRET-");
+        }
       }),
     ),
   );

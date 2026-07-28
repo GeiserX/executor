@@ -26,7 +26,7 @@
 // ---------------------------------------------------------------------------
 
 import { HttpRouter } from "effect/unstable/http";
-import { Effect, Layer } from "effect";
+import { Context, Effect, Layer } from "effect";
 
 import {
   AdminUsersProvider,
@@ -40,6 +40,8 @@ import {
   makePlatformExecutor,
   platformViewOf,
   requestScopedMiddleware,
+  type AdminIdentityDirectory,
+  type AdminUserIdentity,
   type AdminUsersHeaders,
 } from "@executor-js/api/server";
 import { AdminUsersError, AdminUsersForbidden, AdminUsersUnauthorized } from "@executor-js/api";
@@ -111,6 +113,70 @@ const authorizeTenant = (
   });
 
 /**
+ * How many user-detail reads run at once. Matches the account plane's own
+ * member listing (`workos-account-service.ts`), which fans out the same way for
+ * the same reason.
+ */
+const IDENTITY_CONCURRENCY = 5;
+
+/**
+ * Cloud's member directory: `externalId` → email/name.
+ *
+ * THE JOIN KEY is the membership's `userId` — the WorkOS `user_...` that
+ * `workos-auth-provider.ts` binds as `accountId` on every credential path, and
+ * therefore what the subject table records in `external_id`. The membership's
+ * own `id` is an `om_...` row id and joins to nothing.
+ *
+ * WHY THIS IS TWO CALLS AND NOT ONE. The membership list is read once per
+ * request and is the authority on who belongs to the org, but WorkOS's
+ * `listOrganizationMemberships` carries no user detail and offers no
+ * include/expand — email and name only exist on the user resource. The SDK does
+ * expose a batched `listUsers({ organizationId })`, but the pinned
+ * `@executor-js/emulate` WorkOS emulator serves only `GET
+ * /user_management/users/:id`, so taking that path would leave every cloud e2e
+ * user unnamed. So: ONE membership read per request, then user detail fetched
+ * only for the ids ON THIS PAGE — never for the whole org, and never once per
+ * row of some larger list. An id that is not an active/pending member is not
+ * fetched at all and reports absent identity, which is the honest answer for a
+ * member who left while their connections remain.
+ */
+const identityDirectory =
+  (organizationId: string, context: Context.Context<WorkOSClient>): AdminIdentityDirectory =>
+  (externalIds) =>
+    Effect.gen(function* () {
+      const workos = yield* WorkOSClient;
+      const memberships = yield* workos.listOrgMembers(organizationId);
+      const wanted = new Set(externalIds);
+      const memberIds = memberships.data
+        .map((membership) => membership.userId)
+        .filter((userId) => wanted.has(userId));
+
+      const resolved = yield* Effect.all(
+        memberIds.map((userId) =>
+          workos.getUser(userId).pipe(
+            Effect.map(
+              (user) =>
+                [
+                  userId,
+                  {
+                    email: user.email,
+                    displayName: [user.firstName, user.lastName].filter(Boolean).join(" ") || null,
+                  },
+                ] as const,
+            ),
+            // One unreadable user must not cost the whole page its names.
+            Effect.catchCause(() => Effect.succeed(null)),
+          ),
+        ),
+        { concurrency: IDENTITY_CONCURRENCY },
+      );
+
+      const identities = new Map<string, AdminUserIdentity>();
+      for (const entry of resolved) if (entry) identities.set(entry[0], entry[1]);
+      return identities;
+    }).pipe(Effect.provideContext(context));
+
+/**
  * Authorize, then run `body` against the tenant's platform view.
  *
  * The executor is built per request and closed after, like every other cloud
@@ -119,7 +185,7 @@ const authorizeTenant = (
  */
 const withPlatformView = <A>(
   headers: AdminUsersHeaders,
-  body: (executor: Executor) => Effect.Effect<A, AdminUsersError>,
+  body: (executor: Executor, organizationId: string) => Effect.Effect<A, AdminUsersError>,
 ): Effect.Effect<
   A,
   AdminUsersError | AdminUsersUnauthorized | AdminUsersForbidden,
@@ -132,7 +198,12 @@ const withPlatformView = <A>(
     const executor = yield* makePlatformExecutor(organizationId).pipe(
       Effect.mapError(() => new AdminUsersError({ message: "Failed to open the platform view" })),
     );
-    return yield* Effect.ensuring(body(executor), executor.close().pipe(Effect.ignore));
+    // The authorized tenant is handed to the body so an identity join reads the
+    // SAME org the reads are scoped to — never one named by client input.
+    return yield* Effect.ensuring(
+      body(executor, organizationId),
+      executor.close().pipe(Effect.ignore),
+    );
   });
 
 /**
@@ -150,13 +221,23 @@ export const workosAdminUsersProvider: Layer.Layer<
     >();
     return AdminUsersProvider.of({
       listUsers: (headers, options) =>
-        withPlatformView(headers, (executor) =>
-          platformViewOf(executor).pipe(Effect.flatMap((admin) => listAdminUsers(admin, options))),
+        withPlatformView(headers, (executor, organizationId) =>
+          platformViewOf(executor).pipe(
+            Effect.flatMap((admin) =>
+              listAdminUsers(admin, options, identityDirectory(organizationId, context)),
+            ),
+          ),
         ).pipe(Effect.provideContext(context)),
       listUsersWithConnections: (headers, options) =>
-        withPlatformView(headers, (executor) =>
+        withPlatformView(headers, (executor, organizationId) =>
           platformViewOf(executor).pipe(
-            Effect.flatMap((admin) => listAdminUsersWithConnections(admin, options)),
+            Effect.flatMap((admin) =>
+              listAdminUsersWithConnections(
+                admin,
+                options,
+                identityDirectory(organizationId, context),
+              ),
+            ),
           ),
         ).pipe(Effect.provideContext(context)),
       listUserConnections: (headers, externalId) =>

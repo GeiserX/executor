@@ -76,6 +76,23 @@ export const AdminUser = Schema.Struct({
   /** User lifecycle. Unconstrained until the lifecycle values are defined;
    *  `null` means no state recorded (which is every row today). */
   status: Schema.NullOr(Schema.String),
+  /**
+   * The host's email for this principal, joined server-side from the host's own
+   * member directory (cloud: WorkOS; self-host: Better Auth). `null` whenever
+   * the host cannot resolve the id — the member left the org while their
+   * connections remain, the directory read failed, or the id is a host sentinel
+   * like "local" that names no member at all.
+   *
+   * NOT credential material and not part of the storage projection: it is a
+   * directory lookup keyed by `externalId`, which is why it can be absent on a
+   * row whose other fields are complete. Nothing may treat its presence as an
+   * authorization signal.
+   */
+  email: Schema.NullOr(Schema.String),
+  /** The host's human name for this principal (cloud: given + family name;
+   *  self-host: the Better Auth `name`). `null` on the same terms as `email`,
+   *  and independently — a directory can hold one without the other. */
+  displayName: Schema.NullOr(Schema.String),
 });
 
 /**

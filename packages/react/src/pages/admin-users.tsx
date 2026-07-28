@@ -33,18 +33,20 @@ import {
 } from "../components/sheet";
 import { Skeleton } from "../components/skeleton";
 import {
+  adminUserCopyableEmail,
+  adminUserTitle,
   connectionHealthStatus,
   connectLinkUrl,
   formatAdminDate,
   formatLastSeen,
   integrationConnectionStates,
-  isLocalSubject,
   lastSeenTitle,
   pageNumber,
   shortenExternalId,
   splitPage,
   type AdminCatalogRow,
   type AdminConnectionRow,
+  type AdminUserIdentityRow,
 } from "../lib/admin-users-display";
 import {
   HEALTH_INDICATOR_COLOR,
@@ -78,6 +80,11 @@ type AdminUserRow = {
   readonly createdAt: number;
   readonly lastSeenAt: number | null;
   readonly status: string | null;
+  /** Joined server-side from the host's member directory. Null whenever the
+   *  host couldn't resolve the id — see `adminUserTitle` for what that renders
+   *  as. */
+  readonly email: string | null;
+  readonly displayName: string | null;
   readonly connections: readonly AdminConnectionRow[];
 };
 
@@ -244,6 +251,111 @@ function ConnectionGrid(props: {
       >
         {connectedCount}/{states.length}
       </span>
+    </div>
+  );
+}
+
+// ── Identity ────────────────────────────────────────────────────────────────
+
+/**
+ * The user cell: who this is, then the opaque id underneath.
+ *
+ * The host joins email/name onto each row server-side, so the headline is
+ * something an operator recognizes and the `externalId` becomes the supporting
+ * line — still mono, still carrying the full value in its title, still under the
+ * same `data-slot` it always had, because the id is what identifies a row to
+ * anything reading this table. When the host resolved no identity the cell
+ * collapses back to exactly the single mono id line this table has always shown.
+ *
+ * NO copy button lives here: the row itself is a `<button>` (a user has no page
+ * of its own, so the row opens a detail sheet), and a button inside a button is
+ * invalid markup that swallows its own clicks. The copy affordances live one
+ * click away in the sheet header, on the same values.
+ */
+function UserIdentityCell(props: { readonly user: AdminUserIdentityRow }) {
+  const title = adminUserTitle(props.user);
+
+  if (title.primaryIsId) {
+    return (
+      <span
+        data-slot="admin-user-id"
+        className="min-w-0 truncate font-mono text-sm text-foreground"
+        title={props.user.externalId}
+      >
+        {shortenExternalId(title.primary)}
+      </span>
+    );
+  }
+
+  return (
+    <span className="flex min-w-0 flex-col gap-0.5">
+      <span
+        data-slot="admin-user-name"
+        className="truncate text-sm text-foreground"
+        title={title.primary}
+      >
+        {title.primary}
+      </span>
+      <span
+        data-slot="admin-user-id"
+        className="truncate font-mono text-[11px] text-muted-foreground"
+        title={props.user.externalId}
+      >
+        {shortenExternalId(props.user.externalId)}
+      </span>
+    </span>
+  );
+}
+
+/**
+ * The sheet header: the same title treatment as the row, plus the copy
+ * affordances the row can't carry.
+ *
+ * Two separate buttons rather than one, because they yield different things and
+ * an operator wants a specific one: the email is what they paste into a mail
+ * client or a support ticket, and the `externalId` is what they paste into a log
+ * search or an API call. A single "copy" would force them to guess which.
+ *
+ * The email button is absent — not disabled — when the host resolved no email,
+ * since there is nothing to put on the clipboard. The id button is always
+ * present, whether the id is the headline (no identity resolved) or the
+ * supporting line: every user has an id by definition, and it is the value that
+ * identifies them to logs and to the API.
+ */
+function UserDetailTitle(props: { readonly user: AdminUserRow }) {
+  const title = adminUserTitle(props.user);
+  const email = adminUserCopyableEmail(props.user);
+
+  return (
+    <div className="flex min-w-0 flex-col gap-1">
+      <div className="flex min-w-0 items-center gap-1">
+        <SheetTitle
+          data-slot="admin-user-detail-title"
+          className={
+            title.primaryIsId ? "truncate font-mono text-sm" : "truncate text-sm font-semibold"
+          }
+          title={title.primary}
+        >
+          {title.primary}
+        </SheetTitle>
+        {email ? (
+          <CopyButton value={email} label="Copy email" />
+        ) : (
+          title.primaryIsId && <CopyButton value={props.user.externalId} label="Copy ID" />
+        )}
+      </div>
+      {title.secondary !== null && (
+        <div className="flex min-w-0 items-center gap-1">
+          <span
+            data-slot="admin-user-detail-id"
+            className="truncate font-mono text-[11px] text-muted-foreground"
+            title={props.user.externalId}
+          >
+            {props.user.externalId}
+          </span>
+          <CopyButton value={props.user.externalId} label="Copy ID" />
+        </div>
+      )}
     </div>
   );
 }
@@ -506,15 +618,7 @@ export function AdminUsersPage() {
                         data-slot="admin-user-row"
                         className="grid w-full grid-cols-[1fr_auto] items-center gap-4 border-b border-border px-4 py-4 text-left transition-colors last:border-b-0 hover:bg-accent md:grid-cols-[1.6fr_0.8fr_0.9fr_1.1fr]"
                       >
-                        <span
-                          data-slot="admin-user-id"
-                          className="min-w-0 truncate font-mono text-sm text-foreground"
-                          title={user.externalId}
-                        >
-                          {isLocalSubject(user.externalId)
-                            ? "local"
-                            : shortenExternalId(user.externalId)}
-                        </span>
+                        <UserIdentityCell user={user} />
                         <span className="hidden font-mono text-xs text-muted-foreground md:block">
                           {formatAdminDate(user.createdAt)}
                         </span>
@@ -570,9 +674,7 @@ export function AdminUsersPage() {
           {selected && (
             <>
               <SheetHeader className="border-b border-border">
-                <SheetTitle className="truncate font-mono text-sm" title={selected.externalId}>
-                  {selected.externalId}
-                </SheetTitle>
+                <UserDetailTitle user={selected} />
                 <SheetDescription>
                   Created {formatAdminDate(selected.createdAt)} · last seen{" "}
                   <span title={lastSeenTitle(selected.lastSeenAt)}>

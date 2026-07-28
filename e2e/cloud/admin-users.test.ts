@@ -187,12 +187,30 @@ scenario(
           "the member's connection is visible to the owner, though not to the admin's product view",
         ).toContain(memberConnection);
 
+        // The host identity join: the WorkOS email lands on the right row.
+        //
+        // The join key is the membership's `userId` — the same WorkOS `user_...`
+        // the subject table records — so this proves the id spaces line up. A
+        // mismatch would leave every user unnamed while the id assertions above
+        // still passed, which is exactly the failure this asserts against.
+        expect(
+          byId.get(adminId)?.email,
+          "the admin's row carries the email they signed in with",
+        ).toBe(admin.credentials?.email);
+        expect(byId.get(memberId)?.email, "and the invited member's row carries theirs").toBe(
+          member.credentials?.email,
+        );
+
         // The flat list agrees with the joined one.
         const flat = yield* client.adminUsers.listUsers({ query: {} });
         expect(
           flat.users.map((user) => user.externalId).sort(),
           "the flat list reports the same members",
         ).toEqual([adminId, memberId].sort());
+        expect(
+          flat.users.map((user) => user.email).sort(),
+          "with the same identities joined onto it",
+        ).toEqual([admin.credentials?.email, member.credentials?.email].sort());
 
         // Per-user connections resolve the same rows.
         const memberConnections = yield* client.adminUsers.listUserConnections({

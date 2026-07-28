@@ -83,22 +83,57 @@ test("the owner sees who uses the instance; a plain member cannot look", async (
   const response = await adminUsers(adminToken);
   expect(response.status).toBe(200);
   const body = (await response.json()) as {
-    users: ReadonlyArray<{ externalId: string; lastSeenAt: number | null }>;
+    users: ReadonlyArray<{
+      externalId: string;
+      lastSeenAt: number | null;
+      email: string | null;
+      displayName: string | null;
+    }>;
   };
   expect(body.users.length, "both the owner and the invited member are reported").toBe(2);
   expect(typeof body.users[0]?.lastSeenAt, "last-seen crosses the wire as a number").toBe("number");
 
-  // The joined view is mounted too.
+  // THE JOIN KEY, proven against real Better Auth rather than assumed.
+  //
+  // `auth/identity.ts` binds `session.user.id` as the accountId, so that is what
+  // the subject table records in `external_id` — and it is the member list's
+  // `userId`, NOT its `id` (the organization `member` ROW id). The two look
+  // alike and only one joins, so this asserts the actual emails land on the
+  // actual rows: a mismatch would leave every user unnamed while the counts
+  // above still passed.
+  const byEmail = new Map(body.users.map((user) => [user.email, user.externalId]));
+  expect(
+    [...byEmail.keys()].sort(),
+    "each user carries the email Better Auth holds for them",
+  ).toEqual(["admin@admin-users.test", "member@admin-users.test"]);
+  expect(
+    body.users.every((user) => user.externalId.length > 0),
+    "and the id space still lines up — nobody was named by matching nothing",
+  ).toBe(true);
+  expect(
+    body.users.find((user) => user.email === "member@admin-users.test")?.displayName,
+    "the sign-up name comes through as the display name",
+  ).toBe("Member");
+
+  // The joined view is mounted too, and carries the same identity.
   const joined = await adminUsers(adminToken, "/api/admin/users/with-connections");
   expect(joined.status).toBe(200);
   const joinedBody = (await joined.json()) as {
-    users: ReadonlyArray<{ externalId: string; connections: readonly unknown[] }>;
+    users: ReadonlyArray<{
+      externalId: string;
+      email: string | null;
+      connections: readonly unknown[];
+    }>;
   };
   expect(joinedBody.users.length).toBe(2);
   expect(
     joinedBody.users.every((user) => Array.isArray(user.connections)),
     "every user carries a connections array",
   ).toBe(true);
+  expect(
+    joinedBody.users.map((user) => [user.externalId, user.email]).sort(),
+    "the joined view reports the same identities, keyed the same way",
+  ).toEqual(body.users.map((user) => [user.externalId, user.email]).sort());
 
   // The gate: a plain member may not read the instance-wide view.
   const asMember = await adminUsers(memberToken);

@@ -24,6 +24,14 @@ import { Api, Browser, Target } from "../src/services";
 const api = composePluginApi([openApiHttpPlugin()] as const);
 type Client = HttpApiClient.ForApi<typeof api>;
 
+declare global {
+  interface Window {
+    // What the page handed to the clipboard through the non-secure-origin
+    // execCommand fallback, read back out of the browser context.
+    __e2eCopied?: Array<string>;
+  }
+}
+
 const TEMPLATE_API_KEY = AuthTemplateSlug.make("apiKey");
 
 /** Minimal OpenAPI spec with a single GET /ping — never contacted here. */
@@ -120,6 +128,17 @@ scenario(
               })
               .first();
             await row.waitFor({ state: "visible", timeout: 30_000 });
+
+            // Better Auth's identity, joined server-side. The join key is the
+            // member list's `userId` (the Better Auth user id the subject table
+            // records), NOT the organization `member` row id — so asserting the
+            // email this identity was actually minted with is what proves the
+            // id spaces line up on THIS host's auth model.
+            expect(
+              await row.locator("[data-slot='admin-user-name']").textContent(),
+              "the member's row leads with the email they signed up with",
+            ).toBe(member.credentials?.email);
+
             await row.click();
 
             const detail = page.getByRole("dialog");
@@ -127,6 +146,47 @@ scenario(
             await detail
               .getByText(memberConnection, { exact: true })
               .waitFor({ state: "visible", timeout: 30_000 });
+          });
+
+          await step("The detail header copies the member's email and their id", async () => {
+            const detail = page.getByRole("dialog");
+            // The member's opaque id, from the supporting line the header shows
+            // beneath the email.
+            const externalId = await detail
+              .locator("[data-slot='admin-user-detail-id']")
+              .getAttribute("title");
+            expect(externalId, "the header carries the opaque principal id").not.toBe("");
+
+            // Self-host is served over plain HTTP — a NON-secure origin, where
+            // `navigator.clipboard` does not exist and the copy must go through
+            // the execCommand fallback (see @executor-js/react `lib/clipboard`).
+            // Record what that path selects, exactly as the api-keys copy test
+            // does, so this asserts the real self-host copy path rather than a
+            // secure-context one the deployment never takes.
+            await page.evaluate(() => {
+              Object.defineProperty(navigator, "clipboard", {
+                configurable: true,
+                get: () => undefined,
+              });
+              const copied: Array<string> = [];
+              window.__e2eCopied = copied;
+              const exec = document.execCommand?.bind(document);
+              document.execCommand = (command, ...rest) => {
+                if (String(command).toLowerCase() === "copy") {
+                  copied.push(window.getSelection ? String(window.getSelection()) : "");
+                }
+                return exec ? exec(command, ...rest) : false;
+              };
+            });
+
+            await detail.getByRole("button", { name: "Copy email" }).click();
+            await detail.getByRole("button", { name: "Copy ID" }).click();
+
+            const copied = await page.evaluate(() => window.__e2eCopied ?? []);
+            expect(copied, "the email button copies the member's address").toContain(
+              member.credentials?.email,
+            );
+            expect(copied, "and the id button copies their opaque id").toContain(externalId);
           });
 
           await step(

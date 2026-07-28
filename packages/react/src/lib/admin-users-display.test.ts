@@ -2,6 +2,8 @@ import { describe, expect, it } from "@effect/vitest";
 import type { IntegrationSlug } from "@executor-js/sdk/shared";
 
 import {
+  adminUserCopyableEmail,
+  adminUserTitle,
   connectionHealthStatus,
   connectLinkUrl,
   formatLastSeen,
@@ -90,6 +92,75 @@ describe("externalId display", () => {
     expect(short.startsWith("user_01JAB")).toBe(true);
     expect(short.endsWith("0123456789")).toBe(true);
     expect(short).toContain("…");
+  });
+});
+
+describe("adminUserTitle", () => {
+  // The email is what an operator invites, searches and supports against, so it
+  // leads — and the opaque id drops to the supporting line rather than vanishing.
+  it("leads with the email and keeps the id as the supporting line", () => {
+    expect(
+      adminUserTitle({ externalId: "user_01JAB", email: "ada@e2e.test", displayName: "Ada L" }),
+    ).toEqual({ primary: "ada@e2e.test", secondary: "user_01JAB", primaryIsId: false });
+  });
+
+  it("falls back to the display name when the host resolved no email", () => {
+    expect(adminUserTitle({ externalId: "user_01JAB", email: null, displayName: "Ada L" })).toEqual(
+      { primary: "Ada L", secondary: "user_01JAB", primaryIsId: false },
+    );
+  });
+
+  // The pre-identity rendering, unchanged: one mono id line and no subtitle. A
+  // row the host cannot name must not degrade to a gap where a name would be.
+  it("renders exactly the old id-only row when the host resolved neither", () => {
+    expect(adminUserTitle({ externalId: "user_01JAB", email: null, displayName: null })).toEqual({
+      primary: "user_01JAB",
+      secondary: null,
+      primaryIsId: true,
+    });
+  });
+
+  // A member who left the org while their connections remain arrives with the
+  // fields simply missing rather than explicitly null.
+  it("treats missing identity fields the same as null ones", () => {
+    expect(adminUserTitle({ externalId: "user_01JAB" }).primaryIsId).toBe(true);
+  });
+
+  // A directory that stores empty strings must not produce a blank headline.
+  it("does not let a blank email or name become the headline", () => {
+    expect(adminUserTitle({ externalId: "user_01JAB", email: "  ", displayName: "" })).toEqual({
+      primary: "user_01JAB",
+      secondary: null,
+      primaryIsId: true,
+    });
+  });
+
+  it("spells out the single-player host sentinel, which names no member", () => {
+    expect(adminUserTitle({ externalId: "local", email: null, displayName: null })).toEqual({
+      primary: "local",
+      secondary: null,
+      primaryIsId: true,
+    });
+  });
+});
+
+describe("adminUserCopyableEmail", () => {
+  it("offers the email when the host resolved one", () => {
+    expect(adminUserCopyableEmail({ externalId: "user_01JAB", email: "ada@e2e.test" })).toBe(
+      "ada@e2e.test",
+    );
+  });
+
+  // A name is not an address: a copy button that yields something unusable is
+  // worse than no button, so a name-only row offers nothing to copy.
+  it("offers nothing when only a display name is known", () => {
+    expect(
+      adminUserCopyableEmail({ externalId: "user_01JAB", email: null, displayName: "Ada L" }),
+    ).toBeNull();
+  });
+
+  it("treats a blank email as absent", () => {
+    expect(adminUserCopyableEmail({ externalId: "user_01JAB", email: "   " })).toBeNull();
   });
 });
 

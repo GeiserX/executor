@@ -31,6 +31,8 @@ import {
   makePlatformExecutor,
   platformViewOf,
   requestScopedMiddleware,
+  type AdminIdentityDirectory,
+  type AdminUserIdentity,
   type AdminUsersHeaders,
 } from "@executor-js/api/server";
 import { AdminUsersError, AdminUsersForbidden, AdminUsersUnauthorized } from "@executor-js/api";
@@ -56,6 +58,40 @@ const requireAdmin = (headers: AdminUsersHeaders) =>
     return member;
   });
 
+/**
+ * Self-host's member directory: `externalId` → email/name.
+ *
+ * THE JOIN KEY is `member.userId`, the Better Auth `user.id` — precisely what
+ * `auth/identity.ts` binds as `accountId` and therefore what the subject table
+ * records in `external_id`. `member.id` is the organization `member` ROW id and
+ * joins to nothing; the two look alike, so the choice is pinned here and in the
+ * node test rather than left to a reader.
+ *
+ * One `listMembers` call per request: Better Auth's organization plugin already
+ * attaches the `user` row to each member, so email and name arrive with the
+ * membership and no per-user lookup is needed. The requested ids are not passed
+ * to the call — the plugin offers no id filter, and a single-instance member
+ * list is small — but the caller only reads the ids it asked for.
+ *
+ * Runs as the CALLER, using their own admin headers, so this reads exactly the
+ * directory that session is already entitled to on `/account/members`.
+ */
+const identityDirectory =
+  (auth: BetterAuthHandle["auth"], headers: AdminUsersHeaders): AdminIdentityDirectory =>
+  () =>
+    Effect.tryPromise(() => auth.api.listMembers({ headers: new Headers(headers) })).pipe(
+      Effect.map((result) => {
+        const identities = new Map<string, AdminUserIdentity>();
+        for (const member of result.members) {
+          identities.set(member.userId, {
+            email: member.user?.email ?? null,
+            displayName: member.user?.name ?? null,
+          });
+        }
+        return identities;
+      }),
+    );
+
 const withPlatformView = <A>(
   headers: AdminUsersHeaders,
   organizationId: string,
@@ -80,16 +116,22 @@ export const betterAuthAdminUsersProvider: Layer.Layer<
 > = Layer.effect(AdminUsersProvider)(
   Effect.gen(function* () {
     const context = yield* Effect.context<BetterAuth | DbProvider | PluginsProvider | HostConfig>();
-    const { organizationId } = yield* BetterAuth;
+    const { auth, organizationId } = yield* BetterAuth;
     return AdminUsersProvider.of({
       listUsers: (headers, options) =>
         withPlatformView(headers, organizationId, (executor) =>
-          platformViewOf(executor).pipe(Effect.flatMap((admin) => listAdminUsers(admin, options))),
+          platformViewOf(executor).pipe(
+            Effect.flatMap((admin) =>
+              listAdminUsers(admin, options, identityDirectory(auth, headers)),
+            ),
+          ),
         ).pipe(Effect.provideContext(context)),
       listUsersWithConnections: (headers, options) =>
         withPlatformView(headers, organizationId, (executor) =>
           platformViewOf(executor).pipe(
-            Effect.flatMap((admin) => listAdminUsersWithConnections(admin, options)),
+            Effect.flatMap((admin) =>
+              listAdminUsersWithConnections(admin, options, identityDirectory(auth, headers)),
+            ),
           ),
         ).pipe(Effect.provideContext(context)),
       listUserConnections: (headers, externalId) =>

@@ -90,6 +90,55 @@ export const shortenExternalId = (externalId: string, max = 28): string => {
   return `${externalId.slice(0, head)}…${externalId.slice(externalId.length - tail)}`;
 };
 
+/** The identity half of a user row, as the admin plane reports it. Both fields
+ *  are independently nullable: the host resolved one, the other, or neither. */
+export interface AdminUserIdentityRow {
+  readonly externalId: string;
+  readonly email?: string | null;
+  readonly displayName?: string | null;
+}
+
+/**
+ * How one user is titled and subtitled.
+ *
+ * The primary line is whatever an operator would actually recognize — the email
+ * first, since that is what they invite, search and support against; the
+ * display name only when there is no email; and the id itself when the host
+ * resolved neither. The secondary line carries the `externalId` whenever the
+ * primary line is NOT already the id, so the opaque principal is always one
+ * glance away without ever being the headline for a user who has a name.
+ *
+ * When identity is absent the result is exactly the pre-identity rendering — one
+ * mono id line and no subtitle — so an unresolvable row (a member who left the
+ * org while their connections remain, a host sentinel like "local", a directory
+ * outage) degrades to what this table always showed rather than to a gap.
+ *
+ * `primaryIsId` is what tells the component which line gets mono/metadata
+ * styling, so the caller never has to re-derive the same decision.
+ */
+export interface AdminUserTitle {
+  readonly primary: string;
+  readonly secondary: string | null;
+  readonly primaryIsId: boolean;
+}
+
+export const adminUserTitle = (user: AdminUserIdentityRow): AdminUserTitle => {
+  const email = user.email?.trim();
+  const displayName = user.displayName?.trim();
+  const idLabel = isLocalSubject(user.externalId) ? LOCAL_SUBJECT_ID : user.externalId;
+  const named = email || displayName;
+  if (!named) return { primary: idLabel, secondary: null, primaryIsId: true };
+  return { primary: named, secondary: idLabel, primaryIsId: false };
+};
+
+/** The email an operator can copy off a row, or `null` when the host resolved
+ *  none. Deliberately NOT the display name: a name is not an address, and a
+ *  copy button that yields something unusable is worse than no button. */
+export const adminUserCopyableEmail = (user: AdminUserIdentityRow): string | null => {
+  const email = user.email?.trim();
+  return email ? email : null;
+};
+
 // ── Connections ─────────────────────────────────────────────────────────────
 
 /** The health status a row displays. A connection that was never probed carries

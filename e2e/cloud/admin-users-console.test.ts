@@ -28,6 +28,15 @@ import type { Identity, Target as TargetShape } from "../src/target";
 const api = composePluginApi([openApiHttpPlugin()] as const);
 type Client = HttpApiClient.ForApi<typeof api>;
 
+declare global {
+  interface Window {
+    // The copy assertions stash what the page handed to the clipboard here, so
+    // it can be read back out of the browser context without needing a
+    // clipboard-read permission a headless context won't grant.
+    __e2eCopied?: Array<string>;
+  }
+}
+
 const TEMPLATE_API_KEY = AuthTemplateSlug.make("apiKey");
 
 /** Minimal OpenAPI spec with a single GET /ping — never contacted here. */
@@ -217,6 +226,21 @@ scenario(
               ids,
               "the invited member is listed too, though the admin's product view cannot see them",
             ).toContain(memberId);
+
+            // The host joins identity server-side, so an operator reads people
+            // by name rather than by opaque id. The emails are the ones these
+            // identities were actually minted with — asserting the seeded values
+            // is what proves the join key lines up, since a wrong key would
+            // leave every row unnamed while the id assertions above still pass.
+            const names = await rows
+              .locator("[data-slot='admin-user-name']")
+              .evaluateAll((elements) => elements.map((element) => element.textContent ?? ""));
+            expect(names, "the admin's row leads with their email").toContain(
+              admin.credentials?.email,
+            );
+            expect(names, "and the invited member's with theirs").toContain(
+              member.credentials?.email,
+            );
           });
 
           await step("Each row summarizes connected vs available integrations", async () => {
@@ -275,6 +299,39 @@ scenario(
               await detail.getByText(adminConnection, { exact: true }).count(),
               "one user's detail never shows another user's connection",
             ).toBe(0);
+          });
+
+          await step("The detail header copies the member's email and their id", async () => {
+            const detail = page.getByRole("dialog");
+            // Record what reaches the clipboard rather than reading it back:
+            // a headless context grants no clipboard-read permission, and the
+            // assertion is about what the button hands over, not about the
+            // browser's store.
+            await page.evaluate(() => {
+              const copied: Array<string> = [];
+              window.__e2eCopied = copied;
+              Object.defineProperty(navigator, "clipboard", {
+                configurable: true,
+                get: () => ({
+                  writeText: (text: string) => {
+                    copied.push(text);
+                    return Promise.resolve();
+                  },
+                }),
+              });
+            });
+
+            // Two buttons, not one: the email is what an operator pastes into a
+            // mail client, the id is what they paste into a log search.
+            await detail.getByRole("button", { name: "Copy email" }).click();
+            await detail.getByRole("button", { name: "Copy ID" }).click();
+
+            const copied = await page.evaluate(() => window.__e2eCopied ?? []);
+            expect(
+              copied,
+              "the email button copies the address the member signed up with",
+            ).toContain(member.credentials?.email);
+            expect(copied, "and the id button copies the opaque principal id").toContain(memberId);
           });
 
           await step("The not-connected integration offers a copyable connect link", async () => {

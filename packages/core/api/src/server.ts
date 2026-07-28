@@ -30,6 +30,8 @@ export {
   listUsers as listAdminUsers,
   listUsersWithConnections as listAdminUsersWithConnections,
   listUserConnections as listAdminUserConnections,
+  type AdminIdentityDirectory,
+  type AdminUserIdentity,
 } from "./admin/reads";
 export { requestScopedMiddleware } from "./server/request-scoped";
 export { RouterConfigLive } from "./server/router-config";
