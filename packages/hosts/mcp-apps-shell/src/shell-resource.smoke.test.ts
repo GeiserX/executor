@@ -28,6 +28,7 @@ const stubEngine: ExecutionEngine<never> = {
   getDescription: Effect.succeed("smoke"),
 };
 
+// oxlint-disable-next-line executor/no-double-cast -- boundary: MCP SDK ClientCapabilities predates the ext-apps `extensions` field
 const APPS_CAPS = {
   extensions: { [EXTENSION_ID]: { mimeTypes: [RESOURCE_MIME_TYPE] } },
 } as unknown as ClientCapabilities;

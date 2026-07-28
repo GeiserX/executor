@@ -123,7 +123,10 @@ const withClient = async <E extends Cause.YieldableError>(
 
 const SHELL_HTML = "<!doctype html><html><body><div id='root'></div></body></html>";
 
-// What a client that renders MCP Apps advertises at `initialize`.
+// What a client that renders MCP Apps advertises at `initialize`. The SDK's
+// `ClientCapabilities` has no `extensions` field yet (pending SEP-1724), which
+// is exactly why ext-apps ships `getUiCapability` to read it.
+// oxlint-disable-next-line executor/no-double-cast -- boundary: MCP SDK ClientCapabilities predates the ext-apps `extensions` field
 const APPS_CAPS = {
   extensions: { [EXTENSION_ID]: { mimeTypes: [RESOURCE_MIME_TYPE] } },
 } as unknown as ClientCapabilities;
@@ -217,7 +220,9 @@ describe("MCP host — artifact tool visibility", () => {
         const read = await client.readResource({ uri: MCP_APPS_SHELL_RESOURCE_URI });
         const [content] = read.contents;
         expect(content.mimeType).toBe(RESOURCE_MIME_TYPE);
-        expect(content.text).toBe(SHELL_HTML);
+        // Served as text, never as a blob.
+        expect("text" in content).toBe(true);
+        expect("text" in content ? content.text : "").toBe(SHELL_HTML);
         // The shell may open no network connection of its own; everything
         // routes back over the MCP bridge.
         expect(content._meta).toMatchObject({

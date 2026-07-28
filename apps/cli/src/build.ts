@@ -25,6 +25,32 @@ const resolveQuickJsWasmPath = (): string => {
   return wasmPath;
 };
 
+// ---------------------------------------------------------------------------
+// MCP-Apps shell (mcp-app.html)
+//
+// The MCP host serves the shell as the `ui://executor/shell.html` resource, and
+// `@executor-js/mcp-apps-shell` reads it from disk at runtime. That runtime
+// `fs.readFile` is invisible to `bun build --compile`, so without this the
+// packaged binary would serve the "Shell not built" placeholder and every
+// generated UI would render blank. Build it if missing and copy it next to the
+// executable, where the loader finds it via `process.execPath` — the same
+// colocation trick used for `libsql.node` / `emscripten-module.wasm`.
+// ---------------------------------------------------------------------------
+
+const mcpAppsShellDir = resolve(repoRoot, "packages/hosts/mcp-apps-shell");
+const mcpAppsShellHtml = join(mcpAppsShellDir, "dist/mcp-app.html");
+
+const ensureMcpAppsShell = async (): Promise<string> => {
+  if (!existsSync(mcpAppsShellHtml)) {
+    console.log("Building MCP-Apps shell (mcp-app.html)...");
+    await $`bun run --cwd ${mcpAppsShellDir} build:shell`.quiet();
+  }
+  if (!existsSync(mcpAppsShellHtml)) {
+    throw new Error(`MCP-Apps shell missing at ${mcpAppsShellHtml} after build:shell`);
+  }
+  return mcpAppsShellHtml;
+};
+
 const resolveOnePasswordCoreWasmPath = (): string => {
   const req = createRequire(join(repoRoot, "packages/plugins/onepassword/package.json"));
   const sdkPkg = req.resolve("@1password/sdk/package.json");
@@ -398,6 +424,7 @@ const buildBinaries = async (targets: Target[], mode: BuildMode) => {
   await writeFile(embeddedMigrationsPath, `${embeddedMigrations}\n`);
 
   const quickJsWasmPath = resolveQuickJsWasmPath();
+  const mcpAppsShellPath = await ensureMcpAppsShell();
   const onePasswordCoreWasmPath = resolveOnePasswordCoreWasmPath();
   const workerBundlerDistPath = resolveWorkerBundlerDistPath();
   const packedWorkerBundlerSource = await createPackedWorkerBundlerSource(workerBundlerDistPath);
@@ -422,6 +449,10 @@ const buildBinaries = async (targets: Target[], mode: BuildMode) => {
 
       // Copy QuickJS WASM next to binary — loaded at runtime by the server
       await cp(quickJsWasmPath, join(binDir, "emscripten-module.wasm"));
+
+      // Copy the MCP-Apps shell next to the binary. Platform-independent HTML,
+      // read from execDir at runtime by @executor-js/mcp-apps-shell.
+      await cp(mcpAppsShellPath, join(binDir, "mcp-app.html"));
 
       // Copy 1Password's sdk-core WASM next to the binary. The patched
       // sdk-core loader falls back to this sibling file when bun --compile
