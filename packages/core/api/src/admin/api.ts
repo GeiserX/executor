@@ -53,6 +53,23 @@ export class AdminUsersForbidden extends Schema.TaggedErrorClass<AdminUsersForbi
   { httpApiStatus: 403 },
 ) {}
 
+/**
+ * No user of THIS tenant matches the identifier. Distinct from 401/403 on
+ * purpose: an operator polling one user needs "this person has no footprint
+ * here" to be a different, non-alarming answer from "your credential is
+ * wrong". Carries no echo of the identifier — an admin credential is already
+ * scoped to one tenant, but reflecting input into an error body is a habit
+ * worth not having.
+ *
+ * Deliberately does NOT distinguish "never existed" from "exists in the host
+ * directory but never touched executor": see the `getUser` docs below.
+ */
+export class AdminUserNotFound extends Schema.TaggedErrorClass<AdminUserNotFound>()(
+  "AdminUserNotFound",
+  {},
+  { httpApiStatus: 404 },
+) {}
+
 // ---------------------------------------------------------------------------
 // Response schemas — the public projection of the SDK's admin shapes.
 // ---------------------------------------------------------------------------
@@ -129,17 +146,60 @@ export const AdminUsersWithConnectionsResponse = Schema.Struct({
   users: Schema.Array(AdminUserWithConnections),
 });
 
+/** One user, identity and connections together. Wrapped in `{ user }` rather
+ *  than returned bare so the response can grow a sibling field without a
+ *  breaking change — the same reason every list here is wrapped. */
+export const AdminUserResponse = Schema.Struct({
+  user: AdminUserWithConnections,
+});
+
 // ---------------------------------------------------------------------------
 // Params / query
 // ---------------------------------------------------------------------------
 
 const AdminUserParams = { externalId: Schema.String };
 
+/**
+ * The single-user path parameter, which names a user by EITHER identifier the
+ * operator has: the opaque `externalId`, or their email.
+ *
+ * WHY ONE PARAM AND NOT A `?email=` VARIANT. The alternative — `GET
+ * /admin/users?email=` returning the matched user — would make one endpoint
+ * answer with two different shapes (a list, or one user), which is exactly the
+ * thing the group comment below rules out: this repo's query params FILTER a
+ * fixed shape, they never switch it. Two identifiers for one resource is what
+ * a path parameter is for, and it keeps "fetch the user I am asking about" as
+ * one route with one response schema and one 404.
+ *
+ * DISAMBIGUATION is by shape — an identifier containing "@" is tried as an
+ * email — but that is a ROUTING HINT, not a parse of the id. `externalId` is
+ * opaque by contract, so the resolver falls back to a literal id lookup when
+ * the email interpretation matches nothing. No host mints an id containing
+ * "@" today (cloud: `user_...`; self-host: a Better Auth id; sentinels like
+ * "local"), so the fallback is a safety net rather than a live path — but it
+ * means the opacity rule is never actually violated.
+ *
+ * Note the value arrives URL-DECODED, so a client sends `alice%40example.com`
+ * and the handler sees `alice@example.com`.
+ */
+const AdminUserIdentifierParams = { identifier: Schema.String };
+
 // Paging, mirroring `AdminListSubjectsOptions`. Query params arrive as strings,
 // so decode them here rather than making every handler interpret raw strings —
 // an out-of-range or non-numeric value is a 400 from the contract, not a
 // silently-ignored filter. The joined endpoint reads per-user connections, so
 // its page size is bounded harder than the flat list's.
+//
+// `email` is an exact-match FILTER on the fixed list shape (the response is
+// still a `users` array, empty when nothing matches), which is how every other
+// list here uses query params. It selects a specific principal rather than
+// narrowing a scan, so paging over a filtered result is not meaningful — it is
+// still honored so the endpoint has one set of semantics, not two.
+//
+// Carried as a plain string: the trim + lower-case normalization lives at the
+// handler seam (`normalizeEmail`), which is also where the single-user path
+// parameter is normalized, so both entry points share ONE rule rather than a
+// schema transform on one and hand-rolled code on the other.
 const AdminListQuery = Schema.Struct({
   limit: Schema.optional(
     Schema.FiniteFromString.check(Schema.isBetween({ minimum: 1, maximum: 500 })),
@@ -149,6 +209,7 @@ const AdminListQuery = Schema.Struct({
       Schema.isBetween({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
     ),
   ),
+  email: Schema.optional(Schema.String),
 });
 
 // ---------------------------------------------------------------------------
@@ -165,6 +226,20 @@ const AdminListQuery = Schema.Struct({
  * only to FILTER a fixed shape (`/tools`, `/connections`), never to switch it.
  * It sorts before `/admin/users/:externalId/...` in the router either way, and
  * "with-connections" is not a valid opaque principal id.
+ *
+ * ROUTER ORDERING, re-verified now that `/admin/users/:identifier` exists and
+ * collides with `/admin/users/with-connections` at the same path depth. The
+ * router is find-my-way (`HttpRouter` builds on effect's vendored copy), a
+ * radix tree that ranks a STATIC segment above a parametric one at the same
+ * position regardless of registration order. Probed directly against the
+ * pinned build with the parametric route registered FIRST — the worst case —
+ * and `/admin/users/with-connections` still resolves to the list endpoint,
+ * while `/admin/users/user_123` and `/admin/users/alice%40example.test` both
+ * resolve to the single-user endpoint. The original comment's claim therefore
+ * still holds, and the endpoint order below is documentation rather than the
+ * thing that makes it work. Registering `:identifier` here and `:externalId`
+ * on the nested route is likewise fine: the names differ but they sit at the
+ * same position, and the tree matches on position, not on name.
  */
 export const AdminUsersApi = HttpApiGroup.make("adminUsers")
   .add(
@@ -186,6 +261,31 @@ export const AdminUsersApi = HttpApiGroup.make("adminUsers")
       params: AdminUserParams,
       success: AdminUserConnectionsResponse,
       error: [AdminUsersError, AdminUsersUnauthorized, AdminUsersForbidden],
+    }),
+  )
+  /**
+   * One user by `externalId` OR email, identity and connections in a single
+   * call — the read a per-user check makes, which operators run far more often
+   * than the bulk list.
+   *
+   * NOT-FOUND SEMANTICS. `AdminUserNotFound` (404) means "no subject row under
+   * this tenant matches", and that is the answer even when the host directory
+   * DOES know the email. A member who was invited but never touched executor
+   * has no footprint on this plane, and the admin plane exists to report
+   * footprint: "who are my users and what have they connected". Returning
+   * directory identity with an empty `connections` array would answer a
+   * question this API was not asked — it would make "is a member of the org"
+   * and "is a user of executor" the same answer, and a caller gating on that
+   * would treat a never-onboarded invitee as onboarded. 404 keeps the two
+   * distinct, and the org's membership roster is already the account plane's
+   * job (`/account/members`). The bulk `?email=` filter agrees: it returns an
+   * empty list, never a synthesized row.
+   */
+  .add(
+    HttpApiEndpoint.get("getUser", "/admin/users/:identifier", {
+      params: AdminUserIdentifierParams,
+      success: AdminUserResponse,
+      error: [AdminUsersError, AdminUsersUnauthorized, AdminUsersForbidden, AdminUserNotFound],
     }),
   );
 

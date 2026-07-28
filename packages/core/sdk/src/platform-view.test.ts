@@ -338,6 +338,83 @@ describe("platform view — admin.listSubjectsWithConnections", () => {
   );
 });
 
+describe("platform view — admin.getSubject", () => {
+  it.effect("reads one subject by external_id", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const admin = yield* requireAdmin(yield* makePlatformExecutor(db));
+
+        const subject = yield* admin.getSubject(SUBJECT_B);
+
+        expect(subject?.externalId).toBe(SUBJECT_B);
+        // The same field discipline as the list: a keyed read is not a
+        // different projection.
+        expect(Object.keys(subject!).sort()).toEqual([
+          "createdAt",
+          "externalId",
+          "lastSeenAt",
+          "status",
+        ]);
+      }),
+    ),
+  );
+
+  it.effect("returns null for an unknown id and for another tenant's subject", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const admin = yield* requireAdmin(yield* makePlatformExecutor(db));
+
+        expect(yield* admin.getSubject("user_nobody")).toBeNull();
+        // `user_elsewhere` exists — under t2. The tenant policy filters the
+        // keyed read exactly as it filters the list.
+        expect(yield* admin.getSubject("user_elsewhere")).toBeNull();
+      }),
+    ),
+  );
+
+  it.effect("joins connections in one call, and issues none for an absent subject", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const admin = yield* requireAdmin(yield* makePlatformExecutor(db));
+
+        const joined = yield* admin.getSubjectWithConnections(SUBJECT_A);
+        expect(joined?.externalId).toBe(SUBJECT_A);
+        expect(joined?.connections.map((entry) => entry.integration).sort()).toEqual([
+          "github",
+          "linear",
+        ]);
+        // Org-owned rows belong to the tenant, not to any user, so the
+        // keyed join excludes them exactly as the list join does.
+        expect(joined?.connections.every((entry) => entry.owner === "user")).toBe(true);
+
+        expect(yield* admin.getSubjectWithConnections("user_nobody")).toBeNull();
+      }),
+    ),
+  );
+
+  it.effect("never returns credential-bearing fields on the keyed join", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const admin = yield* requireAdmin(yield* makePlatformExecutor(db));
+
+        const joined = yield* admin.getSubjectWithConnections(SUBJECT_A);
+
+        for (const connection of joined!.connections) {
+          const keys = Object.keys(connection);
+          for (const forbidden of FORBIDDEN_CONNECTION_FIELDS) {
+            expect(keys).not.toContain(forbidden);
+          }
+        }
+        expect(JSON.stringify(joined)).not.toContain("SECRET-");
+      }),
+    ),
+  );
+});
+
 describe("platform view — default off", () => {
   it.effect("an executor without the opt-in has no admin surface", () =>
     withDb((db) =>

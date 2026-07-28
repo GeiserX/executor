@@ -26,25 +26,34 @@
 // ---------------------------------------------------------------------------
 
 import { HttpRouter } from "effect/unstable/http";
-import { Context, Effect, Layer } from "effect";
+import { Context, Effect, Layer, Option } from "effect";
 
 import {
   AdminUsersProvider,
   DbProvider,
   HostConfig,
   PluginsProvider,
+  getAdminUser,
   listAdminUserConnections,
   listAdminUsers,
   listAdminUsersWithConnections,
   makeAdminUsersApiLayer,
   makePlatformExecutor,
+  normalizeAdminUserEmail,
   platformViewOf,
   requestScopedMiddleware,
+  type AdminEmailResolver,
   type AdminIdentityDirectory,
+  type AdminUserDirectory,
   type AdminUserIdentity,
   type AdminUsersHeaders,
 } from "@executor-js/api/server";
-import { AdminUsersError, AdminUsersForbidden, AdminUsersUnauthorized } from "@executor-js/api";
+import {
+  AdminUserNotFound,
+  AdminUsersError,
+  AdminUsersForbidden,
+  AdminUsersUnauthorized,
+} from "@executor-js/api";
 import type { Executor } from "@executor-js/sdk";
 
 import { ApiKeyService } from "../auth/api-keys";
@@ -177,18 +186,77 @@ const identityDirectory =
     }).pipe(Effect.provideContext(context));
 
 /**
+ * Cloud's REVERSE directory lookup: email → the WorkOS `user_...` id.
+ *
+ * WHY THE MEMBER LIST AND NOT A SERVER-SIDE EMAIL QUERY. WorkOS's SDK does
+ * expose `listUsers({ email })`, which would be one indexed call instead of a
+ * scan — but the pinned `@executor-js/emulate` WorkOS emulator serves no
+ * list-users route at all. Its route table was read directly from the shipped
+ * bundle: under `/user_management` it has only `users/:id`,
+ * `organization_memberships`, the auth/session routes, and invitations. Taking
+ * the `listUsers` path would therefore 404 in every cloud e2e run and could
+ * only be exercised in production — so the lookup is built on the SAME
+ * membership read the forward join already makes, which the emulator does
+ * serve.
+ *
+ * THE TRADEOFF is an in-memory scan of the org's members, bounded by org size
+ * and capped by the identity fan-out below. That is acceptable at the sizes
+ * this plane serves, and it has a real correctness advantage: the membership
+ * list is the authority on who belongs to THIS org, so a resolver built on it
+ * cannot return a user from another tenant, which a bare `listUsers({ email })`
+ * could. If org sizes ever make the scan hurt, the fix is a server-side query
+ * gated on emulator support, not a cache.
+ *
+ * CASING: WorkOS preserves whatever casing an email was created with (and the
+ * emulator compares byte-exact), so the directory value is normalized here
+ * before comparison, against an argument the seam already normalized.
+ */
+export const emailResolver =
+  (organizationId: string, context: Context.Context<WorkOSClient>): AdminEmailResolver =>
+  (email) =>
+    Effect.gen(function* () {
+      const workos = yield* WorkOSClient;
+      const memberships = yield* workos.listOrgMembers(organizationId);
+      const userIds = memberships.data.map((membership) => membership.userId);
+
+      // Short-circuits on the first match: `Effect.findFirst` stops fetching
+      // once a user's email matches, so the common case costs far fewer reads
+      // than the member count.
+      const match = yield* Effect.findFirst(userIds, (userId) =>
+        workos.getUser(userId).pipe(
+          Effect.map((user) => normalizeAdminUserEmail(user.email ?? "") === email),
+          // One unreadable user must not fail the whole lookup — it simply
+          // cannot be the match.
+          Effect.catchCause(() => Effect.succeed(false)),
+        ),
+      );
+      return Option.getOrNull(match);
+    }).pipe(Effect.provideContext(context));
+
+/** Both directions of cloud's directory, built once per authorized request. */
+const userDirectory = (
+  organizationId: string,
+  context: Context.Context<WorkOSClient>,
+): AdminUserDirectory => ({
+  identities: identityDirectory(organizationId, context),
+  resolveEmail: emailResolver(organizationId, context),
+});
+
+/**
  * Authorize, then run `body` against the tenant's platform view.
  *
  * The executor is built per request and closed after, like every other cloud
  * execution stack: it holds the per-request postgres socket, which Cloudflare's
  * I/O isolation forbids sharing across requests.
  */
-const withPlatformView = <A>(
+const withPlatformView = <A, E extends AdminUsersError | AdminUserNotFound = AdminUsersError>(
   headers: AdminUsersHeaders,
-  body: (executor: Executor, organizationId: string) => Effect.Effect<A, AdminUsersError>,
+  body: (executor: Executor, organizationId: string) => Effect.Effect<A, E>,
 ): Effect.Effect<
   A,
-  AdminUsersError | AdminUsersUnauthorized | AdminUsersForbidden,
+  // `AdminUsersError` unconditionally: opening the platform view can fail that
+  // way regardless of what `body` itself raises.
+  E | AdminUsersError | AdminUsersUnauthorized | AdminUsersForbidden,
   WorkOSClient | ApiKeyService | UserStoreService | DbProvider | PluginsProvider | HostConfig
 > =>
   Effect.gen(function* () {
@@ -224,7 +292,7 @@ export const workosAdminUsersProvider: Layer.Layer<
         withPlatformView(headers, (executor, organizationId) =>
           platformViewOf(executor).pipe(
             Effect.flatMap((admin) =>
-              listAdminUsers(admin, options, identityDirectory(organizationId, context)),
+              listAdminUsers(admin, options, userDirectory(organizationId, context)),
             ),
           ),
         ).pipe(Effect.provideContext(context)),
@@ -232,11 +300,7 @@ export const workosAdminUsersProvider: Layer.Layer<
         withPlatformView(headers, (executor, organizationId) =>
           platformViewOf(executor).pipe(
             Effect.flatMap((admin) =>
-              listAdminUsersWithConnections(
-                admin,
-                options,
-                identityDirectory(organizationId, context),
-              ),
+              listAdminUsersWithConnections(admin, options, userDirectory(organizationId, context)),
             ),
           ),
         ).pipe(Effect.provideContext(context)),
@@ -244,6 +308,14 @@ export const workosAdminUsersProvider: Layer.Layer<
         withPlatformView(headers, (executor) =>
           platformViewOf(executor).pipe(
             Effect.flatMap((admin) => listAdminUserConnections(admin, externalId)),
+          ),
+        ).pipe(Effect.provideContext(context)),
+      getUser: (headers, identifier) =>
+        withPlatformView(headers, (executor, organizationId) =>
+          platformViewOf(executor).pipe(
+            Effect.flatMap((admin) =>
+              getAdminUser(admin, identifier, userDirectory(organizationId, context)),
+            ),
           ),
         ).pipe(Effect.provideContext(context)),
     });

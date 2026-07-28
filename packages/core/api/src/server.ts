@@ -30,7 +30,11 @@ export {
   listUsers as listAdminUsers,
   listUsersWithConnections as listAdminUsersWithConnections,
   listUserConnections as listAdminUserConnections,
+  getUser as getAdminUser,
+  normalizeEmail as normalizeAdminUserEmail,
+  type AdminEmailResolver,
   type AdminIdentityDirectory,
+  type AdminUserDirectory,
   type AdminUserIdentity,
 } from "./admin/reads";
 export { requestScopedMiddleware } from "./server/request-scoped";

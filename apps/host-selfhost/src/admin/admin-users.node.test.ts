@@ -135,6 +135,89 @@ test("the owner sees who uses the instance; a plain member cannot look", async (
     "the joined view reports the same identities, keyed the same way",
   ).toEqual(body.users.map((user) => [user.externalId, user.email]).sort());
 
+  // -------------------------------------------------------------------------
+  // The single-user read, by opaque id and by email.
+  // -------------------------------------------------------------------------
+
+  const memberId = byEmail.get("member@admin-users.test")!;
+
+  type UserBody = {
+    user: {
+      externalId: string;
+      email: string | null;
+      displayName: string | null;
+      connections: readonly unknown[];
+    };
+  };
+
+  const single = await adminUsers(adminToken, `/api/admin/users/${memberId}`);
+  expect(single.status).toBe(200);
+  const singleBody = (await single.json()) as UserBody;
+  expect(singleBody.user.externalId).toBe(memberId);
+  expect(singleBody.user.email).toBe("member@admin-users.test");
+  expect(singleBody.user.displayName).toBe("Member");
+  expect(
+    Array.isArray(singleBody.user.connections),
+    "identity and connections arrive in ONE call",
+  ).toBe(true);
+
+  // The same person by email, in three casings. Better Auth stores emails
+  // lower-cased, so this proves the QUERY side is normalized against a real
+  // directory rather than against a fixture that happens to agree.
+  for (const spelling of [
+    "member@admin-users.test",
+    "Member@Admin-Users.Test",
+    "MEMBER@ADMIN-USERS.TEST",
+  ]) {
+    const byEmailResponse = await adminUsers(
+      adminToken,
+      `/api/admin/users/${encodeURIComponent(spelling)}`,
+    );
+    expect(byEmailResponse.status, `${spelling} resolves`).toBe(200);
+    expect(((await byEmailResponse.json()) as UserBody).user.externalId).toBe(memberId);
+  }
+
+  // An email nobody in the directory holds.
+  const unknownEmail = await adminUsers(
+    adminToken,
+    `/api/admin/users/${encodeURIComponent("nobody@admin-users.test")}`,
+  );
+  expect(unknownEmail.status, "unknown email → 404").toBe(404);
+  // Asserted on the encoded body — the distinct error is what lets a caller
+  // tell "no footprint" from "bad credential" without parsing a message.
+  expect(await unknownEmail.text()).toContain("AdminUserNotFound");
+
+  // An id that names no subject row.
+  const unknownId = await adminUsers(adminToken, "/api/admin/users/user_does_not_exist");
+  expect(unknownId.status, "unknown id → 404").toBe(404);
+
+  // The bulk `?email=` filter, over the same real directory.
+  const filtered = await adminUsers(
+    adminToken,
+    `/api/admin/users?email=${encodeURIComponent("MEMBER@admin-users.test")}`,
+  );
+  expect(filtered.status).toBe(200);
+  const filteredBody = (await filtered.json()) as { users: ReadonlyArray<{ externalId: string }> };
+  expect(
+    filteredBody.users.map((user) => user.externalId),
+    "the filter selects exactly the one member, case-insensitively",
+  ).toEqual([memberId]);
+
+  const filteredUnknown = await adminUsers(
+    adminToken,
+    `/api/admin/users?email=${encodeURIComponent("nobody@admin-users.test")}`,
+  );
+  expect(
+    ((await filteredUnknown.json()) as { users: readonly unknown[] }).users,
+    "an unknown email is an EMPTY page, never the unfiltered tenant",
+  ).toEqual([]);
+
+  // The router-ordering invariant against the real mount: the static segment
+  // must still beat `/:identifier`.
+  const stillTheList = await adminUsers(adminToken, "/api/admin/users/with-connections");
+  expect(stillTheList.status).toBe(200);
+  expect(((await stillTheList.json()) as { users: readonly unknown[] }).users.length).toBe(2);
+
   // The gate: a plain member may not read the instance-wide view.
   const asMember = await adminUsers(memberToken);
   expect(asMember.status, "a member is refused").toBe(403);
@@ -142,4 +225,10 @@ test("the owner sees who uses the instance; a plain member cannot look", async (
   // And an anonymous caller has no session at all.
   const anonymous = await adminUsers();
   expect(anonymous.status, "no session → unauthorized").toBe(401);
+
+  // The single-user read refuses on the same terms — and refuses BEFORE
+  // looking, so a refused caller cannot probe which users exist.
+  expect((await adminUsers(memberToken, `/api/admin/users/${memberId}`)).status).toBe(403);
+  expect((await adminUsers(memberToken, "/api/admin/users/user_nobody")).status).toBe(403);
+  expect((await adminUsers(undefined, `/api/admin/users/${memberId}`)).status).toBe(401);
 });

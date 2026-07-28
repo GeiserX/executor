@@ -24,18 +24,25 @@ import {
   DbProvider,
   HostConfig,
   PluginsProvider,
+  getAdminUser,
   listAdminUserConnections,
   listAdminUsers,
   listAdminUsersWithConnections,
   makeAdminUsersApiLayer,
   makePlatformExecutor,
+  normalizeAdminUserEmail,
   platformViewOf,
   requestScopedMiddleware,
-  type AdminIdentityDirectory,
+  type AdminUserDirectory,
   type AdminUserIdentity,
   type AdminUsersHeaders,
 } from "@executor-js/api/server";
-import { AdminUsersError, AdminUsersForbidden, AdminUsersUnauthorized } from "@executor-js/api";
+import {
+  AdminUserNotFound,
+  AdminUsersError,
+  AdminUsersForbidden,
+  AdminUsersUnauthorized,
+} from "@executor-js/api";
 import type { Executor } from "@executor-js/sdk";
 
 import { BetterAuth, type BetterAuthHandle } from "../auth/better-auth";
@@ -76,10 +83,29 @@ const requireAdmin = (headers: AdminUsersHeaders) =>
  * Runs as the CALLER, using their own admin headers, so this reads exactly the
  * directory that session is already entitled to on `/account/members`.
  */
-const identityDirectory =
-  (auth: BetterAuthHandle["auth"], headers: AdminUsersHeaders): AdminIdentityDirectory =>
-  () =>
-    Effect.tryPromise(() => auth.api.listMembers({ headers: new Headers(headers) })).pipe(
+const listMembers = (auth: BetterAuthHandle["auth"], headers: AdminUsersHeaders) =>
+  Effect.tryPromise(() => auth.api.listMembers({ headers: new Headers(headers) }));
+
+/**
+ * Both directions of self-host's directory, over the SAME single `listMembers`
+ * read.
+ *
+ * The reverse (email → `user.id`) needs no extra call and no new permission:
+ * the organization plugin already attaches the `user` row to each member, so
+ * the email is sitting beside the id the forward join uses. Better Auth
+ * lower-cases every email it writes, but the directory value is normalized
+ * anyway so this host cannot answer differently from cloud if that ever
+ * changes.
+ *
+ * A member with no `user.email` cannot match — `null` is not an address, and
+ * coercing it to "" would let an empty `?email=` select an arbitrary row.
+ */
+const userDirectory = (
+  auth: BetterAuthHandle["auth"],
+  headers: AdminUsersHeaders,
+): AdminUserDirectory => ({
+  identities: () =>
+    listMembers(auth, headers).pipe(
       Effect.map((result) => {
         const identities = new Map<string, AdminUserIdentity>();
         for (const member of result.members) {
@@ -90,15 +116,28 @@ const identityDirectory =
         }
         return identities;
       }),
-    );
+    ),
+  resolveEmail: (email) =>
+    listMembers(auth, headers).pipe(
+      Effect.map(
+        (result) =>
+          result.members.find((member) => {
+            const stored = member.user?.email;
+            return stored != null && normalizeAdminUserEmail(stored) === email;
+          })?.userId ?? null,
+      ),
+    ),
+});
 
-const withPlatformView = <A>(
+const withPlatformView = <A, E extends AdminUsersError | AdminUserNotFound = AdminUsersError>(
   headers: AdminUsersHeaders,
   organizationId: string,
-  body: (executor: Executor) => Effect.Effect<A, AdminUsersError>,
+  body: (executor: Executor) => Effect.Effect<A, E>,
 ): Effect.Effect<
   A,
-  AdminUsersError | AdminUsersUnauthorized | AdminUsersForbidden,
+  // `AdminUsersError` unconditionally: opening the platform view can fail that
+  // way regardless of what `body` itself raises.
+  E | AdminUsersError | AdminUsersUnauthorized | AdminUsersForbidden,
   BetterAuth | DbProvider | PluginsProvider | HostConfig
 > =>
   Effect.gen(function* () {
@@ -121,16 +160,14 @@ export const betterAuthAdminUsersProvider: Layer.Layer<
       listUsers: (headers, options) =>
         withPlatformView(headers, organizationId, (executor) =>
           platformViewOf(executor).pipe(
-            Effect.flatMap((admin) =>
-              listAdminUsers(admin, options, identityDirectory(auth, headers)),
-            ),
+            Effect.flatMap((admin) => listAdminUsers(admin, options, userDirectory(auth, headers))),
           ),
         ).pipe(Effect.provideContext(context)),
       listUsersWithConnections: (headers, options) =>
         withPlatformView(headers, organizationId, (executor) =>
           platformViewOf(executor).pipe(
             Effect.flatMap((admin) =>
-              listAdminUsersWithConnections(admin, options, identityDirectory(auth, headers)),
+              listAdminUsersWithConnections(admin, options, userDirectory(auth, headers)),
             ),
           ),
         ).pipe(Effect.provideContext(context)),
@@ -138,6 +175,14 @@ export const betterAuthAdminUsersProvider: Layer.Layer<
         withPlatformView(headers, organizationId, (executor) =>
           platformViewOf(executor).pipe(
             Effect.flatMap((admin) => listAdminUserConnections(admin, externalId)),
+          ),
+        ).pipe(Effect.provideContext(context)),
+      getUser: (headers, identifier) =>
+        withPlatformView(headers, organizationId, (executor) =>
+          platformViewOf(executor).pipe(
+            Effect.flatMap((admin) =>
+              getAdminUser(admin, identifier, userDirectory(auth, headers)),
+            ),
           ),
         ).pipe(Effect.provideContext(context)),
     });

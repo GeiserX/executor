@@ -450,6 +450,18 @@ export interface ExecutorAdmin {
   readonly listSubjects: (
     options?: AdminListSubjectsOptions,
   ) => Effect.Effect<readonly AdminSubject[], StorageFailure>;
+  /**
+   * One subject by its `external_id`, or `null` when the tenant has no such
+   * row. A keyed read on the `(tenant, external_id)` unique index rather than
+   * a filtered `listSubjects`, because the caller asking for ONE principal
+   * must not pay for a tenant-wide scan — this is the read behind a per-user
+   * check that runs far more often than the bulk list.
+   *
+   * `null` is a normal answer, not a failure: it means "this tenant has never
+   * recorded that principal". Distinguishing that from a storage fault is the
+   * whole point of the nullable return.
+   */
+  readonly getSubject: (externalId: string) => Effect.Effect<AdminSubject | null, StorageFailure>;
   /** Every connection in the tenant owned by `externalId`. Org-owned
    *  connections are NOT attributed to a user and are excluded. */
   readonly listSubjectConnections: (
@@ -459,6 +471,12 @@ export interface ExecutorAdmin {
   readonly listSubjectsWithConnections: (
     options?: AdminListSubjectsOptions,
   ) => Effect.Effect<readonly AdminSubjectWithConnections[], StorageFailure>;
+  /** `getSubject` joined with that subject's connections, in ONE call — the
+   *  shape a per-user check needs. `null` on the same terms as `getSubject`,
+   *  and no connection read is issued when the subject row is absent. */
+  readonly getSubjectWithConnections: (
+    externalId: string,
+  ) => Effect.Effect<AdminSubjectWithConnections | null, StorageFailure>;
 }
 
 export interface ExecutorDb {
@@ -4323,6 +4341,14 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
           })
           .pipe(Effect.map((rows) => rows.map(rowToAdminSubject)));
 
+      // Keyed on `(tenant, external_id)` — the table's unique index. No
+      // `tenant` clause here: the tenant policy adds it to every read, the
+      // same way `touchSubject` relies on it.
+      const getSubject = (externalId: string): Effect.Effect<AdminSubject | null, StorageFailure> =>
+        platformCore
+          .findFirst("subject", { where: (b: AnyCb) => b("external_id", "=", externalId) })
+          .pipe(Effect.map((row) => (row === null ? null : rowToAdminSubject(row))));
+
       const listSubjectConnections = (
         externalId: string,
       ): Effect.Effect<readonly AdminConnection[], StorageFailure> =>
@@ -4351,7 +4377,25 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
           );
         });
 
-      return { listSubjects, listSubjectConnections, listSubjectsWithConnections };
+      // Absent subject short-circuits: no connection query is issued for a
+      // principal the tenant never recorded.
+      const getSubjectWithConnections = (
+        externalId: string,
+      ): Effect.Effect<AdminSubjectWithConnections | null, StorageFailure> =>
+        Effect.gen(function* () {
+          const subject = yield* getSubject(externalId);
+          if (subject === null) return null;
+          const connections = yield* listSubjectConnections(externalId);
+          return { ...subject, connections };
+        });
+
+      return {
+        listSubjects,
+        getSubject,
+        listSubjectConnections,
+        listSubjectsWithConnections,
+        getSubjectWithConnections,
+      };
     };
 
     // Default OFF: without the opt-in there is no `admin` key at all, so the

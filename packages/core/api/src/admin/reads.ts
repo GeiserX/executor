@@ -23,8 +23,10 @@ import type {
 } from "@executor-js/sdk";
 
 import {
+  AdminUserNotFound,
   AdminUsersError,
   type AdminUserConnectionsResponse,
+  type AdminUserResponse,
   type AdminUsersResponse,
   type AdminUsersWithConnectionsResponse,
 } from "./api";
@@ -64,6 +66,20 @@ export interface AdminUserIdentity {
 }
 
 /**
+ * The ONE email normalization rule: shared by the `?email=` filter, the
+ * single-user path parameter, and every host's own resolver (which must apply
+ * it to the DIRECTORY value before comparing).
+ *
+ * Case-insensitive because the two hosts disagree about what they store:
+ * Better Auth lower-cases every email it writes, while WorkOS preserves the
+ * casing it was given. Lower-casing BOTH sides is the only rule that answers
+ * the same way on both. The local part of an address is technically
+ * case-sensitive per RFC 5321, but no directory this reads treats it that way,
+ * and an operator typing "Alice@..." means the same person.
+ */
+export const normalizeEmail = (email: string): string => email.trim().toLowerCase();
+
+/**
  * A host's member directory, keyed by the SAME id space the subject table
  * records in `external_id`.
  *
@@ -80,6 +96,31 @@ export interface AdminUserIdentity {
 export type AdminIdentityDirectory = (
   externalIds: readonly string[],
 ) => Effect.Effect<ReadonlyMap<string, AdminUserIdentity>, unknown>;
+
+/**
+ * The REVERSE of the join above: email → the host-auth principal id, so an
+ * operator can name a user by the identifier they actually have.
+ *
+ * The email arrives already trimmed and lower-cased by the contract, and an
+ * implementation must compare against a lower-cased directory value — neither
+ * host guarantees the casing it stores, so case-insensitivity is the seam's
+ * rule and not a per-host accident.
+ *
+ * `null` means the directory knows no such member. That is NOT the same as
+ * "not a user of this tenant": a resolved id may still have no subject row,
+ * which the reads below treat as absent (see `getUser`). Failures are the
+ * caller's to interpret — unlike the decorative identity join, a lookup that
+ * cannot run must not silently become "no such user".
+ */
+export type AdminEmailResolver = (email: string) => Effect.Effect<string | null, unknown>;
+
+/** Both directions of a host's member directory. Optional as a whole (a host
+ *  with no directory reports unnamed rows and cannot resolve emails), and
+ *  optional per direction. */
+export interface AdminUserDirectory {
+  readonly identities?: AdminIdentityDirectory;
+  readonly resolveEmail?: AdminEmailResolver;
+}
 
 /** Identity is decoration on an operator view, not part of the answer: a
  *  directory outage must degrade to unnamed rows, never fail the read the
@@ -152,45 +193,128 @@ const toUserWithConnections = (
   connections: subject.connections.map(toConnection),
 });
 
+/**
+ * Accept the legacy one-way directory or the two-way one, so a host that only
+ * joins identities keeps working unchanged.
+ */
+const asDirectory = (
+  directory: AdminIdentityDirectory | AdminUserDirectory | undefined,
+): AdminUserDirectory =>
+  directory === undefined
+    ? {}
+    : typeof directory === "function"
+      ? { identities: directory }
+      : directory;
+
+/**
+ * Turn an `?email=` filter into the id to keep, or `null` for "nothing can
+ * match" (unknown email, or a host with no resolver — an email filter no host
+ * can answer must return nothing, never an unfiltered page).
+ *
+ * A resolver FAILURE is a 500, not an empty page: silently reporting "no such
+ * user" because a directory was unreachable is the kind of wrong answer an
+ * operator would act on.
+ */
+const resolveEmailFilter = (
+  directory: AdminUserDirectory,
+  email: string,
+): Effect.Effect<string | null, AdminUsersError> => {
+  const resolve = directory.resolveEmail;
+  if (!resolve) return Effect.succeed(null);
+  return resolve(email).pipe(
+    Effect.mapError(() => new AdminUsersError({ message: "Failed to resolve the email address" })),
+  );
+};
+
+/** Keep only the subject naming `externalId`. The filter is applied AFTER the
+ *  page read, so it narrows the requested page rather than scanning past it —
+ *  see the contract's note on paging a filtered result. */
+const filterToId = <T extends { readonly externalId: string }>(
+  subjects: readonly T[],
+  externalId: string | null,
+): readonly T[] =>
+  externalId === null ? [] : subjects.filter((subject) => subject.externalId === externalId);
+
 export const listUsers = (
   admin: ExecutorAdmin,
   options: AdminUsersListOptions,
-  directory?: AdminIdentityDirectory,
+  directory?: AdminIdentityDirectory | AdminUserDirectory,
 ): Effect.Effect<typeof AdminUsersResponse.Type, AdminUsersError> =>
-  admin.listSubjects(options).pipe(
-    Effect.mapError(readFailed("users")),
+  Effect.gen(function* () {
+    const dir = asDirectory(directory);
+    const wanted =
+      options.email === undefined ? undefined : yield* resolveEmailFilter(dir, options.email);
+    const all = yield* admin.listSubjects(options).pipe(Effect.mapError(readFailed("users")));
+    const subjects = wanted === undefined ? all : filterToId(all, wanted);
     // One directory read for the page that was actually returned, joined in
     // memory — never a lookup per user.
-    Effect.flatMap((subjects) =>
-      resolveIdentities(
-        directory,
-        subjects.map((subject) => subject.externalId),
-      ).pipe(
-        Effect.map((identities) => ({
-          users: subjects.map((subject) => toUser(subject, identities)),
-        })),
-      ),
-    ),
-  );
+    const identities = yield* resolveIdentities(
+      dir.identities,
+      subjects.map((subject) => subject.externalId),
+    );
+    return { users: subjects.map((subject) => toUser(subject, identities)) };
+  });
 
 export const listUsersWithConnections = (
   admin: ExecutorAdmin,
   options: AdminUsersListOptions,
-  directory?: AdminIdentityDirectory,
+  directory?: AdminIdentityDirectory | AdminUserDirectory,
 ): Effect.Effect<typeof AdminUsersWithConnectionsResponse.Type, AdminUsersError> =>
-  admin.listSubjectsWithConnections(options).pipe(
-    Effect.mapError(readFailed("users")),
-    Effect.flatMap((subjects) =>
-      resolveIdentities(
-        directory,
-        subjects.map((subject) => subject.externalId),
-      ).pipe(
-        Effect.map((identities) => ({
-          users: subjects.map((subject) => toUserWithConnections(subject, identities)),
-        })),
-      ),
-    ),
-  );
+  Effect.gen(function* () {
+    const dir = asDirectory(directory);
+    const wanted =
+      options.email === undefined ? undefined : yield* resolveEmailFilter(dir, options.email);
+    const all = yield* admin
+      .listSubjectsWithConnections(options)
+      .pipe(Effect.mapError(readFailed("users")));
+    const subjects = wanted === undefined ? all : filterToId(all, wanted);
+    const identities = yield* resolveIdentities(
+      dir.identities,
+      subjects.map((subject) => subject.externalId),
+    );
+    return { users: subjects.map((subject) => toUserWithConnections(subject, identities)) };
+  });
+
+/**
+ * One user by `externalId` OR email, with connections.
+ *
+ * RESOLUTION ORDER. An identifier containing "@" is tried as an email first;
+ * if the directory knows no such member, or the id it resolves to has no
+ * subject row, the identifier is then tried as a literal `externalId`. That
+ * fallback is what keeps `externalId` opaque: no host mints an id containing
+ * "@" today, but the contract promises nothing may parse the id, so the "@"
+ * test is only ever a routing hint that costs one extra keyed read in a case
+ * that does not currently arise.
+ *
+ * A directory hit with no subject row is `AdminUserNotFound`, the same as an
+ * unknown identifier — the plane reports footprint, not org membership. See
+ * the `getUser` contract docs for why.
+ */
+export const getUser = (
+  admin: ExecutorAdmin,
+  identifier: string,
+  directory?: AdminIdentityDirectory | AdminUserDirectory,
+): Effect.Effect<typeof AdminUserResponse.Type, AdminUsersError | AdminUserNotFound> =>
+  Effect.gen(function* () {
+    const dir = asDirectory(directory);
+    const read = (externalId: string) =>
+      admin.getSubjectWithConnections(externalId).pipe(Effect.mapError(readFailed("user")));
+
+    const subject = yield* identifier.includes("@")
+      ? Effect.gen(function* () {
+          const resolved = yield* resolveEmailFilter(dir, normalizeEmail(identifier));
+          const byEmail = resolved === null ? null : yield* read(resolved);
+          return byEmail ?? (yield* read(identifier));
+        })
+      : read(identifier);
+
+    if (subject === null) return yield* new AdminUserNotFound();
+
+    // Identity is joined through the SAME batched seam the list uses, so the
+    // single read reports exactly the fields the list would for this row.
+    const identities = yield* resolveIdentities(dir.identities, [subject.externalId]);
+    return { user: toUserWithConnections(subject, identities) };
+  });
 
 export const listUserConnections = (
   admin: ExecutorAdmin,

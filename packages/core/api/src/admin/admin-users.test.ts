@@ -11,11 +11,13 @@ import { AdminUsersHttpApi, AdminUsersForbidden, AdminUsersUnauthorized } from "
 import { AdminUsersHandlers } from "./handlers";
 import { AdminUsersProvider, type AdminUsersHeaders } from "./service";
 import {
+  getUser,
   listUserConnections,
   listUsers,
   listUsersWithConnections,
   platformViewOf,
   type AdminIdentityDirectory,
+  type AdminUserDirectory,
 } from "./reads";
 
 // ---------------------------------------------------------------------------
@@ -186,7 +188,7 @@ const stubProvider = (
   authorize: (
     headers: AdminUsersHeaders,
   ) => Effect.Effect<string, AdminUsersUnauthorized | AdminUsersForbidden>,
-  directory?: AdminIdentityDirectory,
+  directory?: AdminIdentityDirectory | AdminUserDirectory,
 ) =>
   Layer.succeed(AdminUsersProvider)({
     listUsers: (headers, options) =>
@@ -213,6 +215,15 @@ const stubProvider = (
         Effect.flatMap((executor) =>
           platformViewOf(executor).pipe(
             Effect.flatMap((admin) => listUserConnections(admin, externalId)),
+          ),
+        ),
+      ),
+    getUser: (headers, identifier) =>
+      authorize(headers).pipe(
+        Effect.flatMap(executorFor),
+        Effect.flatMap((executor) =>
+          platformViewOf(executor).pipe(
+            Effect.flatMap((admin) => getUser(admin, identifier, directory)),
           ),
         ),
       ),
@@ -280,6 +291,20 @@ type UsersBody = {
 type ConnectionsBody = {
   readonly connections: ReadonlyArray<{ readonly integration: string; readonly name: string }>;
 };
+type UserBody = {
+  readonly user: {
+    readonly externalId: string;
+    readonly email: string | null;
+    readonly displayName: string | null;
+    readonly lastSeenAt: number | null;
+    readonly status: string | null;
+    readonly connections: ReadonlyArray<{
+      readonly integration: string;
+      readonly oauthScope: string | null;
+      readonly lastHealth: { readonly status: string } | null;
+    }>;
+  };
+};
 type UsersWithConnectionsBody = {
   readonly users: ReadonlyArray<{
     readonly externalId: string;
@@ -312,6 +337,36 @@ const stubDirectory =
     seen.push([...externalIds]);
     return Effect.succeed(new Map([[USER_A1, { email: "a1@users.test", displayName: "User A1" }]]));
   };
+
+/** The email the stub directory knows USER_A1 by. Stored MIXED-CASE on
+ *  purpose: WorkOS preserves whatever casing a user was created with, so the
+ *  case-insensitivity rule has to hold against a non-normalized directory
+ *  value, not just a non-normalized query. */
+const A1_EMAIL_STORED = "A1@Users.Test";
+const A1_EMAIL = "a1@users.test";
+
+/**
+ * The two-way directory: the same USER_A1-only knowledge as `stubDirectory`,
+ * plus the reverse resolver.
+ *
+ * USER_A2 stays absent in BOTH directions, so it doubles as the "member the
+ * directory cannot name" case. `resolved` records every email the resolver was
+ * asked for, so a test can prove the lookup normalizes before comparing.
+ */
+const stubUserDirectory = (options: {
+  readonly seen?: string[][];
+  readonly resolved?: string[];
+}): AdminUserDirectory => ({
+  identities: (externalIds) => {
+    options.seen?.push([...externalIds]);
+    return Effect.succeed(new Map([[USER_A1, { email: A1_EMAIL_STORED, displayName: "User A1" }]]));
+  },
+  resolveEmail: (email) => {
+    options.resolved?.push(email);
+    // Compares a NORMALIZED stored value, the rule both real hosts follow.
+    return Effect.succeed(A1_EMAIL_STORED.toLowerCase() === email ? USER_A1 : null);
+  },
+});
 
 /** The failure a host's directory raises — WorkOS or Better Auth being
  *  unreachable. Typed rather than a bare `Error`, since the directory seam's
@@ -407,6 +462,7 @@ describe("admin users API", () => {
           "/admin/users",
           "/admin/users/with-connections",
           `/admin/users/${USER_A1}/connections`,
+          `/admin/users/${USER_A1}`,
         ]) {
           const response = yield* get(web, path, ORG_A);
           const raw = yield* Effect.promise(() => response.text());
@@ -477,6 +533,13 @@ describe("admin users API", () => {
           "Bearer user_key",
         );
         expect(memberConnections.status).toBe(403);
+
+        // The single-user read refuses on the same terms, and crucially it
+        // refuses BEFORE looking: an unauthorized caller must not be able to
+        // tell a real user from an absent one by the status they get back.
+        expect((yield* get(web, `/admin/users/${USER_A1}`)).status).toBe(401);
+        expect((yield* get(web, `/admin/users/${USER_A1}`, "Bearer user_key")).status).toBe(403);
+        expect((yield* get(web, "/admin/users/nobody", "Bearer user_key")).status).toBe(403);
       }),
     ),
   );
@@ -641,11 +704,20 @@ describe("admin users API", () => {
           stubProvider(
             (tenant) => platformExecutorFor(db, tenant),
             headerAuthorize,
-            stubDirectory(seen),
+            stubUserDirectory({ seen }),
           ),
         );
 
-        for (const path of ["/admin/users", "/admin/users/with-connections"]) {
+        for (const path of [
+          "/admin/users",
+          "/admin/users/with-connections",
+          // The single-user read joins identity through the same seam, so it
+          // gets the same sweep — including the email-addressed form, whose
+          // response is built on a directory value.
+          `/admin/users/${USER_A1}`,
+          `/admin/users/${encodeURIComponent(A1_EMAIL)}`,
+          `/admin/users?email=${encodeURIComponent(A1_EMAIL)}`,
+        ]) {
           const response = yield* get(web, path, ORG_A);
           const raw = yield* Effect.promise(() => response.text());
           for (const field of FORBIDDEN_FIELDS) {
@@ -672,6 +744,217 @@ describe("admin users API", () => {
           yield* get(web, "/admin/users?limit=1&offset=1", ORG_A),
         );
         expect(second.users.map((user) => user.externalId)).toEqual([USER_A2]);
+      }),
+    ),
+  );
+
+  // -------------------------------------------------------------------------
+  // Single-user reads, by opaque id and by email.
+  // -------------------------------------------------------------------------
+
+  const singleUserWeb = (db: SqliteTestFumaDb, resolved?: string[]) =>
+    webHandlerFor(
+      stubProvider(
+        (tenant) => platformExecutorFor(db, tenant),
+        headerAuthorize,
+        stubUserDirectory(resolved ? { resolved } : {}),
+      ),
+    );
+
+  it.effect("returns one user with identity and connections in a single call", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const web = yield* singleUserWeb(db);
+
+        const response = yield* get(web, `/admin/users/${USER_A1}`, ORG_A);
+        expect(response.status).toBe(200);
+        const body = yield* jsonOf<UserBody>(response);
+
+        // The whole point of the endpoint: identity AND connections together,
+        // so a per-user check needs exactly one request.
+        expect(body.user.externalId).toBe(USER_A1);
+        expect(body.user.email).toBe(A1_EMAIL_STORED);
+        expect(body.user.displayName).toBe("User A1");
+        expect(typeof body.user.lastSeenAt).toBe("number");
+        expect(body.user.connections.map((connection) => connection.integration)).toEqual([
+          "github",
+        ]);
+        expect(body.user.connections[0]?.oauthScope).toBe("repo read:user");
+        expect(body.user.connections[0]?.lastHealth?.status).toBe("healthy");
+      }),
+    ),
+  );
+
+  it.effect("finds the same user by email, case-insensitively", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const resolved: string[] = [];
+        const web = yield* singleUserWeb(db, resolved);
+
+        // Three spellings of one address: as stored, all-lower, and shouted.
+        for (const spelling of [A1_EMAIL_STORED, A1_EMAIL, A1_EMAIL.toUpperCase()]) {
+          const response = yield* get(web, `/admin/users/${encodeURIComponent(spelling)}`, ORG_A);
+          expect(response.status, `${spelling} should resolve`).toBe(200);
+          const body = yield* jsonOf<UserBody>(response);
+          expect(body.user.externalId).toBe(USER_A1);
+          expect(body.user.connections.map((connection) => connection.integration)).toEqual([
+            "github",
+          ]);
+        }
+
+        // The seam normalizes before the resolver ever sees the value, so a
+        // host implementation never has to repeat the rule for the QUERY side.
+        expect(resolved).toEqual([A1_EMAIL, A1_EMAIL, A1_EMAIL]);
+      }),
+    ),
+  );
+
+  it.effect("404s an unknown id and an unknown email, distinctly from 401 and 403", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const web = yield* singleUserWeb(db);
+
+        const unknownId = yield* get(web, "/admin/users/user_nobody", ORG_A);
+        expect(unknownId.status).toBe(404);
+        const unknownEmail = yield* get(
+          web,
+          `/admin/users/${encodeURIComponent("nobody@users.test")}`,
+          ORG_A,
+        );
+        expect(unknownEmail.status).toBe(404);
+
+        // The distinct error is what lets a caller tell "no footprint" from
+        // "bad credential" without parsing a message. Asserted on the encoded
+        // body, which is what a consumer actually receives.
+        expect(yield* Effect.promise(() => unknownId.text())).toContain("AdminUserNotFound");
+
+        // And 404 must not echo the identifier back.
+        const raw = yield* Effect.promise(() => unknownEmail.text());
+        expect(raw).not.toContain("nobody@users.test");
+      }),
+    ),
+  );
+
+  it.effect("404s a user of ANOTHER tenant rather than revealing them", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const web = yield* singleUserWeb(db);
+
+        // B's user exists, but not for A — the same answer as a nonexistent id,
+        // which is what keeps the admin plane tenant-isolated.
+        expect((yield* get(web, `/admin/users/${USER_B1}`, ORG_A)).status).toBe(404);
+        expect((yield* get(web, `/admin/users/${USER_B1}`, "Bearer org_b_key")).status).toBe(200);
+      }),
+    ),
+  );
+
+  // The decision documented on the contract: the admin plane reports FOOTPRINT,
+  // not org membership. A directory member who never touched executor is a 404,
+  // not identity-with-empty-connections — otherwise a caller gating on this
+  // endpoint would treat a never-onboarded invitee as onboarded.
+  it.effect("404s an email the directory knows but who has no subject row", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        // Seed connections/tenant B but NOT a subject row for the directory's
+        // only known member, so the directory resolves and storage does not.
+        yield* touchSubject(db.db, { tenant: TENANT_B, externalId: USER_B1 });
+        const web = yield* singleUserWeb(db);
+
+        const response = yield* get(web, `/admin/users/${encodeURIComponent(A1_EMAIL)}`, ORG_A);
+        expect(response.status, "known to the directory, unknown to this tenant").toBe(404);
+        expect(yield* Effect.promise(() => response.text())).toContain("AdminUserNotFound");
+      }),
+    ),
+  );
+
+  it.effect("filters the bulk lists by email, and returns an empty list for an unknown one", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const web = yield* singleUserWeb(db);
+
+        const filtered = yield* jsonOf<UsersBody>(
+          yield* get(
+            web,
+            `/admin/users?email=${encodeURIComponent(A1_EMAIL.toUpperCase())}`,
+            ORG_A,
+          ),
+        );
+        expect(filtered.users.map((user) => user.externalId)).toEqual([USER_A1]);
+
+        const joined = yield* jsonOf<UsersWithConnectionsBody>(
+          yield* get(
+            web,
+            `/admin/users/with-connections?email=${encodeURIComponent(A1_EMAIL)}`,
+            ORG_A,
+          ),
+        );
+        expect(joined.users.map((user) => user.externalId)).toEqual([USER_A1]);
+        expect(joined.users[0]?.connections.map((c) => c.integration)).toEqual(["github"]);
+
+        // An unknown email is an empty page, never an unfiltered one — the
+        // failure mode that would quietly hand back the whole tenant.
+        const unknown = yield* jsonOf<UsersBody>(
+          yield* get(web, "/admin/users?email=nobody%40users.test", ORG_A),
+        );
+        expect(unknown.users).toEqual([]);
+      }),
+    ),
+  );
+
+  // A resolver OUTAGE must not read as "no such user": that is a wrong answer an
+  // operator would act on. Contrast with the identity join, which degrades to
+  // unnamed rows precisely because it is decoration.
+  it.effect("500s when the email resolver fails, rather than reporting no match", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const web = yield* webHandlerFor(
+          stubProvider((tenant) => platformExecutorFor(db, tenant), headerAuthorize, {
+            resolveEmail: () => Effect.fail(new DirectoryUnavailable({ message: "down" })),
+          }),
+        );
+
+        expect(
+          (yield* get(web, `/admin/users/${encodeURIComponent(A1_EMAIL)}`, ORG_A)).status,
+        ).toBe(500);
+        expect((yield* get(web, `/admin/users?email=${A1_EMAIL}`, ORG_A)).status).toBe(500);
+      }),
+    ),
+  );
+
+  // `externalId` is opaque by contract, so the "@" test is a routing hint and
+  // not a parse: an id that happens to contain "@" must still be findable.
+  it.effect("falls back to a literal id lookup for an id containing @", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        const oddId = "user@odd";
+        yield* touchSubject(db.db, { tenant: TENANT_A, externalId: oddId });
+        const web = yield* singleUserWeb(db);
+
+        const response = yield* get(web, `/admin/users/${encodeURIComponent(oddId)}`, ORG_A);
+        expect(response.status).toBe(200);
+        expect((yield* jsonOf<UserBody>(response)).user.externalId).toBe(oddId);
+      }),
+    ),
+  );
+
+  it.effect("still resolves /with-connections as the list, not as a user id", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const web = yield* singleUserWeb(db);
+
+        // The router-ordering invariant, asserted rather than trusted: the
+        // static segment must keep winning now that `/:identifier` exists.
+        const body = yield* jsonOf<UsersWithConnectionsBody>(
+          yield* get(web, "/admin/users/with-connections", ORG_A),
+        );
+        expect(body.users.map((user) => user.externalId)).toEqual([USER_A1, USER_A2]);
       }),
     ),
   );

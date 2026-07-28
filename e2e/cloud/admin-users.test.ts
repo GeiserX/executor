@@ -221,6 +221,40 @@ scenario(
           "the member's connections are readable by external id",
         ).toContain(memberConnection);
 
+        // The single-user read, addressed by EMAIL, against real WorkOS-shaped
+        // identity: the reverse directory lookup (email → user id) has to agree
+        // with the forward join above, and the answer must carry identity AND
+        // connections in the one call a per-user check makes.
+        const memberEmail = member.credentials?.email ?? "";
+        const single = yield* client.adminUsers.getUser({
+          params: { identifier: memberEmail },
+        });
+        expect(single.user.externalId, "the email resolves to the same member").toBe(memberId);
+        expect(single.user.email, "and carries the identity the list reported").toBe(memberEmail);
+        expect(
+          single.user.connections.map((connection) => connection.name),
+          "with their connections joined in the same response",
+        ).toContain(memberConnection);
+
+        // The same read by opaque id agrees, so neither identifier is a
+        // different code path with a different answer.
+        const byOpaqueId = yield* client.adminUsers.getUser({
+          params: { identifier: memberId },
+        });
+        expect(byOpaqueId.user.email).toBe(memberEmail);
+        expect(byOpaqueId.user.connections.map((connection) => connection.name)).toEqual(
+          single.user.connections.map((connection) => connection.name),
+        );
+
+        // The bulk filter selects the same member out of the workspace.
+        const filtered = yield* client.adminUsers.listUsers({
+          query: { email: memberEmail },
+        });
+        expect(
+          filtered.users.map((user) => user.externalId),
+          "?email= narrows the list to exactly that member",
+        ).toEqual([memberId]);
+
         // (2) No credential material anywhere in the joined view.
         expect(
           JSON.stringify(joined),
@@ -312,6 +346,19 @@ scenario(
           params: { externalId: myId },
         });
         expect(probe.connections, "a cross-tenant id resolves to nothing").toEqual([]);
+
+        // And the single-user read refuses to confirm I exist at all — by my
+        // id or by my email, both of which are real, just not theirs.
+        for (const identifier of [myId, mine.credentials?.email ?? ""]) {
+          const response = yield* Effect.promise(() =>
+            fetch(new URL(`/api/admin/users/${encodeURIComponent(identifier)}`, target.baseUrl), {
+              headers: { cookie: cookieOf(theirs) },
+            }),
+          );
+          expect(response.status, "a cross-tenant lookup is a plain 404, revealing nothing").toBe(
+            404,
+          );
+        }
       }),
       Effect.all(
         [
