@@ -181,6 +181,13 @@ export class CredentialResolutionError extends Schema.TaggedErrorClass<Credentia
     /** True when the stored grant is permanently invalid and the user must
      *  sign in again (RFC 6749 §5.2 invalid_grant and friends). */
     reauthRequired: Schema.optional(Schema.Boolean),
+    /** The authorization server's RFC 6749 §5.2 error code (`invalid_grant`,
+     *  `invalid_client`, …), when the failure came from a token-endpoint
+     *  refusal. A typed field rather than message text so telemetry and
+     *  classification read it structurally — the misclassification where
+     *  `invalid_client` (rotated app secret, fleet-wide) surfaced as a vague
+     *  "degraded" was only findable by grepping persisted message strings. */
+    oauthErrorCode: Schema.optional(Schema.String),
   },
 ) {}
 

@@ -1804,6 +1804,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
                         // oxlint-disable-next-line executor/no-unknown-error-message -- boundary: OAuth2Error carries a typed `message`
                         message: `OAuth token refresh was rejected (${cause.error}): ${cause.message}`,
                         reauthRequired: cause.error === "invalid_grant",
+                        oauthErrorCode: cause.error,
                       });
                     }
                     return new StorageError({
@@ -1849,16 +1850,13 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         // The refresh path was previously invisible to telemetry: no span, no
         // log, no metric. When a customer reported "my OAuth just died", there
         // was no way to answer "did a refresh even fire, and did it work?"
-        // without a repro. Stamp the outcome and the failure KIND — enumerable
-        // identifiers only, never user content or token material.
-        //
-        // The AS's own RFC 6749 §5.2 code is not stamped here: it survives only
-        // inside the error's message, and that message embeds the token
-        // endpoint's response URL and a body preview, so it can't go on a span
-        // attribute. Making that code a queryable dimension needs it lifted to
-        // a typed field on CredentialResolutionError first — worth doing, since
-        // invalid_client (a rotated secret, fleet-wide) currently looks exactly
-        // like a transient server_error from a trace.
+        // without a repro. Stamp the outcome, the failure KIND, and the AS's
+        // own RFC 6749 §5.2 code (from the typed `oauthErrorCode` field, NOT
+        // the message — the message embeds the token endpoint's response URL
+        // and a body preview). Enumerable identifiers only, never user content
+        // or token material. The code is the dimension that separates
+        // invalid_client (a rotated app secret — fleet-wide, page someone)
+        // from server_error (transient, the next invoke retries).
         Effect.tap(() => Effect.annotateCurrentSpan({ "executor.oauth.refresh.outcome": "ok" })),
         Effect.tapError((error: StorageFailure | CredentialResolutionError) =>
           Effect.annotateCurrentSpan({
@@ -1870,7 +1868,12 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
             // the refresh token itself is dead) or a transient failure the next
             // invoke can retry. The split is the actionable half of the signal.
             ...(Predicate.isTagged(error, "CredentialResolutionError")
-              ? { "executor.oauth.refresh.reauth_required": error.reauthRequired === true }
+              ? {
+                  "executor.oauth.refresh.reauth_required": error.reauthRequired === true,
+                  ...(error.oauthErrorCode !== undefined
+                    ? { "executor.oauth.error_code": error.oauthErrorCode }
+                    : {}),
+                }
               : {}),
           }),
         ),
@@ -3092,6 +3095,25 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         return out;
       });
 
+    /** Stamp the verdict + which path produced it onto the enclosing health
+     *  span. Every health outcome is HTTP 200, so WITHOUT these attributes the
+     *  request envelope cannot separate healthy from expired — the "what
+     *  fraction of connections are dead right now" question was previously
+     *  only answerable by querying the database. `status` and `httpStatus`
+     *  are enumerable; `detail`/`identity` (upstream free text / an email)
+     *  never go on a span. */
+    const annotateHealthVerdict = (
+      source: "cache" | "no_capability" | "credential_only" | "probe",
+      result: HealthCheckResult,
+    ): Effect.Effect<void> =>
+      Effect.annotateCurrentSpan({
+        "executor.health.status": result.status,
+        "executor.health.source": source,
+        ...(result.httpStatus !== undefined
+          ? { "executor.health.http_status": result.httpStatus }
+          : {}),
+      });
+
     const connectionCheckHealth = (
       ref: ConnectionRef,
       options?: {
@@ -3116,7 +3138,10 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         }
         if (options?.ifStaleMs !== undefined) {
           const cached = Option.getOrNull(decodeLastHealth(connectionRow.last_health));
-          if (cached && Date.now() - cached.checkedAt < options.ifStaleMs) return cached;
+          if (cached && Date.now() - cached.checkedAt < options.ifStaleMs) {
+            yield* annotateHealthVerdict("cache", cached);
+            return cached;
+          }
         }
         const integrationRow = yield* findIntegrationRow(ref.integration);
         if (!integrationRow) {
@@ -3124,10 +3149,19 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         }
         const runtime = runtimes.get(integrationRow.plugin_id);
         const check = runtime?.plugin.checkHealth;
-        if (!runtime || !check) return unknownHealth();
+        if (!runtime || !check) {
+          const result = unknownHealth();
+          yield* annotateHealthVerdict("no_capability", result);
+          return result;
+        }
         const spec = describeHealthCheckForRow(integrationRow) ?? undefined;
         if (spec === undefined && connectionRow.oauth_client != null) {
+          // No probe operation is declared, so "healthy" here means only "the
+          // credential resolved (refreshing if due)" — a refresh failure is
+          // the one real signal this path can produce, and it must not hide
+          // inside a green span.
           const result = yield* oauthCredentialHealthWithoutProbe(connectionRow);
+          yield* annotateHealthVerdict("credential_only", result);
           yield* persistHealthResult(ref, result);
           return result;
         }
@@ -3156,12 +3190,20 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
             `Health check for connection "${ref.name}" failed.`,
           );
         }).pipe(Effect.catchTag("CredentialResolutionError", healthFromCredentialResolutionError));
+        yield* annotateHealthVerdict("probe", result);
         // Persist the verdict on the connection row so the accounts list shows
         // alive/expired at a glance. Best-effort: a write failure must not turn
         // a successful probe into an error.
         yield* persistHealthResult(ref, result);
         return result;
-      });
+      }).pipe(
+        Effect.withSpan("executor.connection.health.check", {
+          attributes: {
+            "executor.integration": String(ref.integration),
+            "executor.connection": String(ref.name),
+          },
+        }),
+      );
 
     const connectionValidate = (
       input: ValidateConnectionInput,
@@ -3196,11 +3238,25 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         // from the integration row. Nothing persists here: validate is the
         // key-first flow's dry run.
         const spec = input.spec ?? describeHealthCheckForRow(integrationRow) ?? undefined;
-        return yield* foldPluginFailure(
+        const result = yield* foldPluginFailure(
           check({ ctx: runtime.ctx, integration: record, credential, spec }),
           `Validating credential for "${input.integration}" failed.`,
         );
-      });
+        // Nothing persists here BY DESIGN, which makes this span the only
+        // possible record of "what fraction of pasted credentials are rejected
+        // at the door" — a signal the DB can never carry.
+        yield* Effect.annotateCurrentSpan({
+          "executor.health.status": result.status,
+          ...(result.httpStatus !== undefined
+            ? { "executor.health.http_status": result.httpStatus }
+            : {}),
+        });
+        return result;
+      }).pipe(
+        Effect.withSpan("executor.connection.validate", {
+          attributes: { "executor.integration": String(input.integration) },
+        }),
+      );
 
     // Clear the sync stamp so the next tools read re-produces this connection's
     // catalog. The deferred variant of `connectionsRefresh` for signals that

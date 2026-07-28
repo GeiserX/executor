@@ -1283,6 +1283,15 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
           clientOwnerFromPayload(sessionRow.payload) ?? (String(sessionRow.owner) as Owner),
       };
 
+      // Annotate as soon as the session resolves the flow's identity, so even
+      // a completion that fails at the exchange still says WHOSE connect died.
+      yield* Effect.annotateCurrentSpan({
+        "executor.integration": String(session.integration),
+        "executor.connection": String(session.name),
+        "executor.template": String(session.template),
+        "executor.oauth.client": String(session.clientSlug),
+      });
+
       // Expired sessions are not redeemable — drop + treat as not found.
       if (Number.isFinite(session.expiresAt) && session.expiresAt <= Date.now()) {
         yield* deleteSession(input.state);
@@ -1368,9 +1377,24 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
         ),
       );
 
+      // Everything a "why did this connect fail / where did it go" question
+      // needs, none of it secret: slugs, owner scope, and whether the token
+      // host was rebound to a regional endpoint (the Datadog multi-site path —
+      // a bug there previously shipped and was only diagnosable by hand).
+      // Deliberately absent: the code, the PKCE verifier, the token, the
+      // callback domain (can embed an org's private site), and identityLabel
+      // (resolves to an email).
+      yield* Effect.annotateCurrentSpan({
+        "executor.oauth.token_host_rebound": tokenUrl !== client.tokenUrl,
+      });
+
       yield* deleteSession(input.state);
       return connection;
-    });
+    }).pipe(
+      Effect.withSpan("executor.oauth.complete", {
+        attributes: { "executor.oauth.grant": "authorization_code" },
+      }),
+    );
 
   // -----------------------------------------------------------------------
   // Mint the connection from a freshly exchanged token: store the access
@@ -1416,6 +1440,24 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
       }
 
       const oauthScope = recordedOAuthScope(token, requestedScopes);
+      const missingScopes =
+        client.grant === "authorization_code"
+          ? missingGrantedOAuthScopes(requestedScopes, oauthScope)
+          : [];
+      // The freshness facts of this connection AT BIRTH, on the enclosing
+      // span (executor.oauth.complete, or the reconnect path's request
+      // envelope). Every "why did this connection later go stale" question
+      // starts here: a partial grant fails later as oauth_scope_insufficient
+      // in an unrelated trace; no refresh token means the first expiry is
+      // terminal; no advertised expiry means only the reactive 401 path can
+      // ever refresh it. Counts and booleans only — scope VALUES can encode
+      // customer resource names on some providers.
+      yield* Effect.annotateCurrentSpan({
+        "executor.oauth.scope_requested_count": requestedScopes.length,
+        "executor.oauth.scope_missing_count": missingScopes.length,
+        "executor.oauth.has_refresh_token": token.refresh_token !== undefined,
+        "executor.oauth.has_advertised_expiry": typeof token.expires_in === "number",
+      });
       return yield* deps.mintOAuthConnection({
         owner: target.owner,
         name: target.name,
@@ -1436,10 +1478,7 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
         // non-resource scope from the token `scope` string, so preserve it when
         // the refresh token proves it was granted.
         oauthScope,
-        missingOAuthScopes:
-          client.grant === "authorization_code"
-            ? missingGrantedOAuthScopes(requestedScopes, oauthScope)
-            : [],
+        missingOAuthScopes: missingScopes,
         oauthTokenUrl,
       });
     });

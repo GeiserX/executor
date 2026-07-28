@@ -367,6 +367,43 @@ const toOAuth2ErrorWithHttpSummary = (cause: unknown): Effect.Effect<OAuth2Error
 const failOAuth2WithHttpSummary = (cause: unknown): Effect.Effect<never, OAuth2Error> =>
   toOAuth2ErrorWithHttpSummary(cause).pipe(Effect.flatMap((error) => Effect.fail(error)));
 
+/** Trace one token-endpoint round trip. This is the ONLY place a token request
+ *  can be observed: oauth4webapi drives the raw global `fetch`, not Effect's
+ *  HttpClient, so no `http.client` span exists underneath — without this span
+ *  the AS's latency and refusal rate are invisible.
+ *
+ *  Attribute discipline: hostname (never the full URL — some providers carry
+ *  tenant ids in the path), the grant literal, the auth method, and on failure
+ *  the AS's RFC 6749 §5.2 code. Never the OAuth2Error message (it embeds the
+ *  response URL and a body preview), never token or code material. */
+const withTokenRequestSpan =
+  (input: {
+    readonly grantType: "authorization_code" | "client_credentials" | "refresh_token";
+    readonly tokenUrl: string;
+    readonly clientAuth: ClientAuthMethod | undefined;
+    readonly hasResource: boolean;
+  }) =>
+  <A>(effect: Effect.Effect<A, OAuth2Error>): Effect.Effect<A, OAuth2Error> =>
+    effect.pipe(
+      Effect.tapError((error) =>
+        Effect.annotateCurrentSpan({
+          ...(error.error !== undefined ? { "executor.oauth.error_code": error.error } : {}),
+        }),
+      ),
+      Effect.withSpan("executor.oauth.token_request", {
+        attributes: {
+          "executor.oauth.grant_type": input.grantType,
+          "executor.oauth.token_host": hostnameForTelemetry(input.tokenUrl),
+          "executor.oauth.client_auth": input.clientAuth ?? DEFAULT_CLIENT_AUTH_METHOD,
+          "executor.oauth.has_resource": input.hasResource,
+        },
+      }),
+    );
+
+/** The hostname alone — a malformed URL yields "invalid" rather than leaking
+ *  whatever string failed to parse. */
+const hostnameForTelemetry = (url: string): string => URL.parse(url)?.hostname ?? "invalid";
+
 // ---------------------------------------------------------------------------
 // oauth4webapi adapter helpers
 // ---------------------------------------------------------------------------
@@ -614,7 +651,15 @@ export const exchangeAuthorizationCode = (
       return await processTokenEndpointResponse(as, client, response);
     },
     catch: (cause) => cause,
-  }).pipe(Effect.catch(failOAuth2WithHttpSummary));
+  }).pipe(
+    Effect.catch(failOAuth2WithHttpSummary),
+    withTokenRequestSpan({
+      grantType: "authorization_code",
+      tokenUrl: input.tokenUrl,
+      clientAuth: input.clientAuth,
+      hasResource: input.resource !== undefined,
+    }),
+  );
 
 // ---------------------------------------------------------------------------
 // Exchange client credentials → tokens (RFC 6749 §4.4)
@@ -669,7 +714,15 @@ export const exchangeClientCredentials = (
       return tokenResponseFrom(result);
     },
     catch: (cause) => cause,
-  }).pipe(Effect.catch(failOAuth2WithHttpSummary));
+  }).pipe(
+    Effect.catch(failOAuth2WithHttpSummary),
+    withTokenRequestSpan({
+      grantType: "client_credentials",
+      tokenUrl: input.tokenUrl,
+      clientAuth: input.clientAuth,
+      hasResource: input.resource !== undefined,
+    }),
+  );
 
 // ---------------------------------------------------------------------------
 // Refresh access token
@@ -740,7 +793,15 @@ export const refreshAccessToken = (
       return tokenResponseFrom(result);
     },
     catch: (cause) => cause,
-  }).pipe(Effect.catch(failOAuth2WithHttpSummary));
+  }).pipe(
+    Effect.catch(failOAuth2WithHttpSummary),
+    withTokenRequestSpan({
+      grantType: "refresh_token",
+      tokenUrl: input.tokenUrl,
+      clientAuth: input.clientAuth,
+      hasResource: input.resource !== undefined,
+    }),
+  );
 
 // ---------------------------------------------------------------------------
 // Refresh-needed predicate
