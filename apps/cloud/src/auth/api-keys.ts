@@ -75,9 +75,10 @@ const ApiKey = Schema.Struct({
   last_used_at: Schema.optional(Schema.NullOr(Schema.String)),
 });
 
-// Validation accepts BOTH owner shapes. The list/create paths below stay
-// user-only on purpose: they are the console's personal-key CRUD, and minting
-// org keys is a separate, privileged surface (PR 1.5).
+// Validation accepts BOTH owner shapes. The user list/create paths below stay
+// user-only on purpose (they are the console's personal-key CRUD); the ORG
+// list/create paths are the separate, privileged surface beside them, gated to
+// admins at the account-provider boundary.
 const ValidatedApiKey = Schema.Struct({
   id: Schema.String,
   owner: WorkOSApiKeyOwner,
@@ -106,6 +107,45 @@ const ListApiKeysResponse = Schema.Struct({
   data: Schema.Array(ApiKey),
 });
 
+// The ORG-owned mirror of `ApiKey` / `RawCreatedApiKey`. A separate shape
+// rather than a widened one: `summaryFromApiKey` reads the user shape's
+// `organization_id` to prove the key belongs to the caller's org, and an
+// org-owned row carries the org in `owner.id` instead. Merging them would mean
+// one nullable field standing for two different things.
+const OrgApiKey = Schema.Struct({
+  id: Schema.String,
+  owner: OrgApiKeyOwner,
+  name: Schema.optional(Schema.String),
+  obfuscatedValue: Schema.optional(Schema.String),
+  obfuscated_value: Schema.optional(Schema.String),
+  createdAt: Schema.optional(Schema.String),
+  created_at: Schema.optional(Schema.String),
+  updatedAt: Schema.optional(Schema.String),
+  updated_at: Schema.optional(Schema.String),
+  lastUsedAt: Schema.optional(Schema.NullOr(Schema.String)),
+  last_used_at: Schema.optional(Schema.NullOr(Schema.String)),
+});
+
+const RawCreatedOrgApiKey = Schema.Struct({
+  ...OrgApiKey.fields,
+  value: Schema.String,
+});
+
+// `data` is decoded element-by-element, NOT as `Schema.Array(OrgApiKey)`: WorkOS
+// may return user-owned keys alongside org-owned ones, and a whole-array decode
+// fails on the first non-org element — blanking the entire list rather than
+// dropping the one row that doesn't belong. Same per-row tolerance the user-key
+// path gets from `summaryFromApiKey` returning null.
+const ListOrgApiKeysResponse = Schema.Struct({
+  data: Schema.Array(Schema.Unknown),
+});
+
+const CreateOrgApiKeyResponse = Schema.Union([
+  RawCreatedOrgApiKey,
+  Schema.Struct({ apiKey: RawCreatedOrgApiKey }),
+  Schema.Struct({ api_key: RawCreatedOrgApiKey }),
+]);
+
 const CreateApiKeyResponse = Schema.Union([
   RawCreatedApiKey,
   Schema.Struct({ apiKey: RawCreatedApiKey }),
@@ -115,6 +155,9 @@ const CreateApiKeyResponse = Schema.Union([
 const decodeValidateApiKeyResponse = Schema.decodeUnknownOption(ValidateApiKeyResponse);
 const decodeListApiKeysResponse = Schema.decodeUnknownOption(ListApiKeysResponse);
 const decodeCreateApiKeyResponse = Schema.decodeUnknownOption(CreateApiKeyResponse);
+const decodeListOrgApiKeysResponse = Schema.decodeUnknownOption(ListOrgApiKeysResponse);
+const decodeOrgApiKey = Schema.decodeUnknownOption(OrgApiKey);
+const decodeCreateOrgApiKeyResponse = Schema.decodeUnknownOption(CreateOrgApiKeyResponse);
 
 const ownerFromApiKey = (apiKey: typeof ValidatedApiKey.Type): ApiKeyOwner | null => {
   if (apiKey.owner.type === "organization") {
@@ -166,6 +209,53 @@ const listFromResponse = (value: unknown): readonly ApiKeySummary[] =>
       }),
   });
 
+// The org-owned mirror of `summaryFromApiKey`. `organizationId` is checked by
+// the CALLER against the org it asked for: WorkOS's workspace api key is
+// workspace-wide, so a response naming a different org than the one requested
+// must not be surfaced as that org's key.
+const summaryFromOrgApiKey = (
+  apiKey: typeof OrgApiKey.Type,
+  organizationId: string,
+): ApiKeySummary | null => {
+  if (apiKey.owner.id !== organizationId) return null;
+  return {
+    id: apiKey.id,
+    name: apiKey.name ?? "API key",
+    obfuscatedValue: apiKey.obfuscatedValue ?? apiKey.obfuscated_value ?? "",
+    createdAt: apiKey.createdAt ?? apiKey.created_at ?? "",
+    updatedAt: apiKey.updatedAt ?? apiKey.updated_at ?? "",
+    lastUsedAt: apiKey.lastUsedAt ?? apiKey.last_used_at ?? null,
+  };
+};
+
+const orgListFromResponse = (value: unknown, organizationId: string): readonly ApiKeySummary[] =>
+  Option.match(decodeListOrgApiKeysResponse(value), {
+    onNone: () => [],
+    onSome: ({ data }) =>
+      data.flatMap((entry) =>
+        Option.match(decodeOrgApiKey(entry), {
+          // Not an org-owned key (a user key sharing the listing, or a shape we
+          // don't recognize) — skip the row, keep the rest.
+          onNone: () => [],
+          onSome: (apiKey) => {
+            const summary = summaryFromOrgApiKey(apiKey, organizationId);
+            return summary ? [summary] : [];
+          },
+        }),
+      ),
+  });
+
+const orgCreatedFromResponse = (value: unknown, organizationId: string): CreatedApiKey | null =>
+  Option.match(decodeCreateOrgApiKeyResponse(value), {
+    onNone: () => null,
+    onSome: (response) => {
+      const apiKey =
+        "value" in response ? response : "apiKey" in response ? response.apiKey : response.api_key;
+      const summary = summaryFromOrgApiKey(apiKey, organizationId);
+      return summary ? { ...summary, value: apiKey.value } : null;
+    },
+  });
+
 const createdFromResponse = (value: unknown): CreatedApiKey | null =>
   Option.match(decodeCreateApiKeyResponse(value), {
     onNone: () => null,
@@ -193,6 +283,18 @@ export class ApiKeyService extends Context.Service<
     readonly revokeUserKey: (input: {
       readonly keyId: string;
     }) => Effect.Effect<void, ApiKeyManagementError>;
+    /**
+     * The org-owned keys of an organization — the credentials that resolve to
+     * the read-only platform view. Privileged: callers gate on admin membership
+     * before reaching this.
+     */
+    readonly listOrgKeys: (input: {
+      readonly organizationId: string;
+    }) => Effect.Effect<readonly ApiKeySummary[], ApiKeyManagementError>;
+    readonly createOrgKey: (input: {
+      readonly organizationId: string;
+      readonly name: string;
+    }) => Effect.Effect<CreatedApiKey, ApiKeyManagementError>;
   }
 >()("@executor-js/cloud/ApiKeyService") {
   static WorkOS = Layer.effect(this)(
@@ -223,6 +325,21 @@ export class ApiKeyService extends Context.Service<
           workos
             .deleteApiKey(keyId)
             .pipe(Effect.mapError((cause) => new ApiKeyManagementError({ cause }))),
+        listOrgKeys: ({ organizationId }) =>
+          workos.listOrgApiKeys(organizationId).pipe(
+            Effect.map((response) => orgListFromResponse(response, organizationId)),
+            Effect.mapError((cause) => new ApiKeyManagementError({ cause })),
+          ),
+        createOrgKey: ({ organizationId, name }) =>
+          workos.createOrgApiKey({ organizationId, name }).pipe(
+            Effect.mapError((cause) => new ApiKeyManagementError({ cause })),
+            Effect.flatMap((response) => {
+              const created = orgCreatedFromResponse(response, organizationId);
+              return created
+                ? Effect.succeed(created)
+                : Effect.fail(new ApiKeyManagementError({ cause: "invalid_create_response" }));
+            }),
+          ),
       };
     }),
   );

@@ -9,6 +9,7 @@ import { runSqliteDataMigrations } from "@executor-js/sdk";
 import { resolveAuthProviders } from "./auth";
 import { selfHostDataMigrations } from "./db/data-migrations";
 import { makeSelfHostAdminApiLayer } from "./admin/handlers";
+import { makeSelfHostAdminUsersApiLayer } from "./admin/admin-users-api";
 import { makeSelfHostSystemApiLayer } from "./system/handlers";
 import { selfHostAccountMiddleware } from "./account";
 import { loadConfig, SELF_HOST_NAMESPACE, SELF_HOST_SCHEMA_VERSION } from "./config";
@@ -117,6 +118,10 @@ export const makeSelfHostApp = async (options: MakeSelfHostAppOptions = {}) => {
         HttpRouter.add("*", "/api/mcp-sessions/*", HttpEffect.fromWebHandler(mcp.approvalHandler)),
         // App-local admin (invite-code) API, served under /api/admin/*.
         makeSelfHostAdminApiLayer({ betterAuth, db: dbHandle, mountPrefix: "/api" }),
+        // Tenant-wide admin users API (/api/admin/users*): the owner's view of
+        // who uses this instance and what they've connected. Owner/admin-gated,
+        // same as the invite routes above.
+        makeSelfHostAdminUsersApiLayer({ betterAuth, db: dbHandle, mountPrefix: "/api" }),
         // Public system API: /api/health + /api/setup-status (unauthenticated).
         makeSelfHostSystemApiLayer({ betterAuth, db: dbHandle, mountPrefix: "/api" }),
         // Swagger UI at /docs, over the /api-prefixed spec (matches the served paths).

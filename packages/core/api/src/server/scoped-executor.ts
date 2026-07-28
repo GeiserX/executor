@@ -300,3 +300,58 @@ export const makeScopedExecutor = <
     // `createExecutor({ plugins })` call.
     return executor as Executor<TPlugins>;
   });
+
+// ---------------------------------------------------------------------------
+// makePlatformExecutor — the subject-less, read-only sibling of
+// `makeScopedExecutor`, for the `/admin/*` plane.
+//
+// An org-level caller (a WorkOS org-scoped API key, or an owner/admin acting on
+// the whole workspace) has NO acting member, so there is no honest subject to
+// bind. This builds the executor that shape implies: `{ tenant, subject:
+// undefined, platformView: true }` — the tenant-wide READ-ONLY view. The owner
+// policy rejects writes at `reach: "tenant"`, so the read-only property is
+// enforced by the storage layer, not by this factory remembering to be careful.
+//
+// Three deliberate differences from `makeScopedExecutor`:
+//   - no `subject`, so no `owner: "user"` rows resolve implicitly and the
+//     product view is untouched;
+//   - no `touchSubject`, because there is no principal to record a sighting
+//     for. An org key must never mint a `subject` row — that row would show up
+//     in the very list this plane serves, as a user that does not exist;
+//   - no OAuth redirect / core-tools wiring. Those exist to drive interactive
+//     connect flows on behalf of a member; an admin read has neither.
+// ---------------------------------------------------------------------------
+
+export const makePlatformExecutor = (
+  organizationId: string,
+): Effect.Effect<Executor, StorageFailure, DbProvider | PluginsProvider | HostConfig> =>
+  Effect.gen(function* () {
+    const { db, blobs } = yield* DbProvider.asEffect().pipe(
+      Effect.withSpan("executor.platform.db_provider"),
+    );
+    const { plugins: pluginsFactory } = yield* PluginsProvider.asEffect().pipe(
+      Effect.withSpan("executor.platform.plugins_provider"),
+    );
+    const config = yield* HostConfig.asEffect().pipe(
+      Effect.withSpan("executor.platform.host_config"),
+    );
+
+    // The plugin set still has to be built: the platform view reads the
+    // `connection` table, whose rows name integrations a plugin owns, and the
+    // executor's construction validates against the registered plugin set.
+    const plugins = yield* Effect.sync(() => pluginsFactory()).pipe(
+      Effect.withSpan("executor.platform.plugins.init"),
+    );
+    const hostedHttpOptions = { allowLocalNetwork: config.allowLocalNetwork };
+
+    return yield* createExecutor({
+      tenant: Tenant.make(organizationId),
+      db,
+      blobs,
+      plugins,
+      httpClientLayer: makeHostedHttpClientLayer(hostedHttpOptions),
+      fetch: makeHostedFetch(hostedHttpOptions),
+      onElicitation: "accept-all",
+      platformView: true,
+    }).pipe(Effect.withSpan("executor.platform.create_executor"));
+  });

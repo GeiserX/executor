@@ -106,6 +106,22 @@ export const betterAuthAccountProvider: Layer.Layer<AccountProvider, never, Bett
             auth.api.deleteApiKey({ body: { keyId: apiKeyId }, headers: toHeaders(headers) }),
           ).pipe(Effect.as({ success: true })),
 
+        // Better Auth has no organization-OWNED key concept: every key it
+        // issues belongs to the user who created it. Rather than inventing one
+        // (a shared key filed under whichever admin happened to click the
+        // button is not an org key — it dies with that member), self-host
+        // reports no org keys and refuses to mint. Self-host's own `/admin/*`
+        // plane is gated on an owner/admin SESSION instead, which is the
+        // credential a single-instance operator already has.
+        listOrgApiKeys: () => Effect.succeed({ apiKeys: [] }),
+
+        createOrgApiKey: () =>
+          Effect.fail(
+            new AccountError({
+              message: "Organization API keys are not available on self-hosted instances",
+            }),
+          ),
+
         listMembers: (headers) =>
           Effect.gen(function* () {
             const resolved = yield* getSession(headers);

@@ -97,6 +97,18 @@ export const CreatedApiKeyResponse = Schema.Struct({
   value: Schema.String,
 });
 
+/**
+ * ORGANIZATION-owned api keys — the credentials that authenticate as the
+ * workspace itself rather than as a member, and are the credential for the
+ * `/admin/*` plane. Listed and minted beside personal keys (same surface, same
+ * shapes) but gated to admins, since an org key can read every user in the
+ * tenant. A provider without an org-key concept (self-host) reports an empty
+ * list and refuses to mint.
+ */
+export const OrgApiKeysResponse = Schema.Struct({
+  apiKeys: Schema.Array(ApiKeySummary),
+});
+
 export const OrgMember = Schema.Struct({
   id: Schema.String,
   userId: Schema.String,
@@ -192,6 +204,19 @@ export const AccountApi = HttpApiGroup.make("account")
       params: ApiKeyParams,
       success: SuccessResponse,
       error: [AccountError, AccountUnauthorized, AccountNoOrganization],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("listOrgApiKeys", "/account/org-api-keys", {
+      success: OrgApiKeysResponse,
+      error: [AccountError, AccountUnauthorized, AccountForbidden, AccountNoOrganization],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("createOrgApiKey", "/account/org-api-keys", {
+      payload: CreateApiKeyBody,
+      success: CreatedApiKeyResponse,
+      error: [AccountError, AccountUnauthorized, AccountForbidden, AccountNoOrganization],
     }),
   )
   .add(

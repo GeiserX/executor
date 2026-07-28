@@ -1,0 +1,495 @@
+import { HttpApiBuilder } from "effect/unstable/httpapi";
+import { HttpRouter, HttpServer } from "effect/unstable/http";
+import { describe, expect, it } from "@effect/vitest";
+import { Context, Effect, Layer, type Scope } from "effect";
+
+import { Subject, Tenant, collectTables, createExecutor, type Executor } from "@executor-js/sdk";
+import { createSqliteTestFumaDb, type SqliteTestFumaDb } from "@executor-js/sdk/testing";
+import { touchSubject } from "@executor-js/sdk/host-internal";
+
+import { AdminUsersHttpApi, AdminUsersForbidden, AdminUsersUnauthorized } from "./api";
+import { AdminUsersHandlers } from "./handlers";
+import { AdminUsersProvider, type AdminUsersHeaders } from "./service";
+import { listUserConnections, listUsers, listUsersWithConnections, platformViewOf } from "./reads";
+
+// ---------------------------------------------------------------------------
+// The admin users HTTP surface, over a real SQLite-backed platform view.
+//
+// The reads themselves (tenant reach, the bigint `last_seen_at` round-trip, the
+// field allowlist) are proven in the SDK's `platform-view.test.ts`. What this
+// file proves is the HTTP EDGE on top of them:
+//   - the public vocabulary + wire shapes the contract promises,
+//   - the authorization outcomes (401 vs 403) a host's provider produces,
+//   - that a tenant's admin plane cannot see another tenant's rows,
+//   - that no credential-bearing field survives the projection.
+//
+// The provider seam is stubbed the way each host's real one behaves, so the
+// authz assertions are about the CONTRACT (which status a refusal renders),
+// not about WorkOS or Better Auth.
+// ---------------------------------------------------------------------------
+
+const TENANT_A = "org_a";
+const TENANT_B = "org_b";
+const USER_A1 = "user_a1";
+const USER_A2 = "user_a2";
+const USER_B1 = "user_b1";
+
+/** Every field that could resolve, or help resolve, a credential. NONE may
+ *  appear anywhere in an admin HTTP response — enumerated so a future column
+ *  addition has to be argued with this list. Mirrors the SDK's own list. */
+const FORBIDDEN_FIELDS = [
+  "item_ids",
+  "itemIds",
+  "refresh_item_id",
+  "refreshItemId",
+  "provider",
+  "provider_state",
+  "providerState",
+  "oauth_token_url",
+  "oauthTokenUrl",
+  "template",
+  "client_secret",
+  "clientSecret",
+  "secret",
+  "token",
+  // The internal partition keys: the public vocabulary is users/owners, so
+  // neither the raw column name nor the tenant may leak onto the wire.
+  "subject",
+  "tenant",
+] as const;
+
+// The bodies below acquire a scoped web handler, so `R` carries `Scope` rather
+// than being erased; `Effect.scoped` closes it when the body finishes.
+const withDb = <A, E>(
+  body: (db: SqliteTestFumaDb) => Effect.Effect<A, E, Scope.Scope>,
+): Effect.Effect<A, E> =>
+  Effect.scoped(
+    Effect.acquireUseRelease(
+      Effect.promise(() => createSqliteTestFumaDb({ tables: collectTables() })),
+      body,
+      (db) => Effect.promise(() => db.close()),
+    ),
+  );
+
+const insertConnection = (
+  db: SqliteTestFumaDb,
+  row: {
+    readonly rowId: string;
+    readonly tenant: string;
+    readonly owner: string;
+    readonly subject: string;
+    readonly integration: string;
+    readonly name: string;
+    readonly oauthScope?: string | null;
+  },
+): Effect.Effect<void> =>
+  Effect.promise(async () => {
+    await db.client.execute({
+      sql: `INSERT INTO connection (
+          row_id, tenant, owner, subject, integration, name, template, provider,
+          item_ids, refresh_item_id, oauth_scope, last_health, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        row.rowId,
+        row.tenant,
+        row.owner,
+        row.subject,
+        row.integration,
+        row.name,
+        "oauth2",
+        "memory",
+        // Deliberately secret-bearing: the assertions below prove these never
+        // reach an HTTP response.
+        JSON.stringify({ token: `SECRET-item-${row.rowId}` }),
+        `SECRET-refresh-${row.rowId}`,
+        row.oauthScope ?? null,
+        JSON.stringify({ status: "healthy", checkedAt: 1_700_000_000_000 }),
+        Date.now(),
+        Date.now(),
+      ],
+    });
+  });
+
+/** Two users with connections under tenant A, plus a whole separate tenant B
+ *  that A's admin plane must never see. */
+const seed = (db: SqliteTestFumaDb): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    yield* touchSubject(db.db, { tenant: TENANT_A, externalId: USER_A1 });
+    yield* touchSubject(db.db, { tenant: TENANT_A, externalId: USER_A2 });
+    yield* touchSubject(db.db, { tenant: TENANT_B, externalId: USER_B1 });
+
+    yield* insertConnection(db, {
+      rowId: "c-a1-gh",
+      tenant: TENANT_A,
+      owner: "user",
+      subject: USER_A1,
+      integration: "github",
+      name: "personal",
+      oauthScope: "repo read:user",
+    });
+    yield* insertConnection(db, {
+      rowId: "c-a2-linear",
+      tenant: TENANT_A,
+      owner: "user",
+      subject: USER_A2,
+      integration: "linear",
+      name: "work",
+    });
+    yield* insertConnection(db, {
+      rowId: "c-b1-gh",
+      tenant: TENANT_B,
+      owner: "user",
+      subject: USER_B1,
+      integration: "github",
+      name: "b-secret",
+      oauthScope: "admin:org",
+    });
+  });
+
+const platformExecutorFor = (db: SqliteTestFumaDb, tenant: string): Effect.Effect<Executor> =>
+  createExecutor({
+    tenant: Tenant.make(tenant),
+    db: db.db,
+    onElicitation: "accept-all",
+    platformView: true,
+  }).pipe(Effect.orDie);
+
+/** A product-view executor: bound to one subject, no platform view at all. */
+const productExecutorFor = (db: SqliteTestFumaDb, tenant: string): Effect.Effect<Executor> =>
+  createExecutor({
+    tenant: Tenant.make(tenant),
+    subject: Subject.make(USER_A1),
+    db: db.db,
+    onElicitation: "accept-all",
+  }).pipe(Effect.orDie);
+
+/**
+ * A stub `AdminUsersProvider` shaped like a host's real one: it authorizes off
+ * the request headers, then delegates to the shared reads. `authorize` returns
+ * the tenant an authorized caller may read, or a refusal — exactly the decision
+ * cloud makes from an org key / admin session and self-host from a Better Auth
+ * member.
+ */
+const stubProvider = (
+  executorFor: (tenant: string) => Effect.Effect<Executor>,
+  authorize: (
+    headers: AdminUsersHeaders,
+  ) => Effect.Effect<string, AdminUsersUnauthorized | AdminUsersForbidden>,
+) =>
+  Layer.succeed(AdminUsersProvider)({
+    listUsers: (headers, options) =>
+      authorize(headers).pipe(
+        Effect.flatMap(executorFor),
+        Effect.flatMap((executor) =>
+          platformViewOf(executor).pipe(Effect.flatMap((admin) => listUsers(admin, options))),
+        ),
+      ),
+    listUsersWithConnections: (headers, options) =>
+      authorize(headers).pipe(
+        Effect.flatMap(executorFor),
+        Effect.flatMap((executor) =>
+          platformViewOf(executor).pipe(
+            Effect.flatMap((admin) => listUsersWithConnections(admin, options)),
+          ),
+        ),
+      ),
+    listUserConnections: (headers, externalId) =>
+      authorize(headers).pipe(
+        Effect.flatMap(executorFor),
+        Effect.flatMap((executor) =>
+          platformViewOf(executor).pipe(
+            Effect.flatMap((admin) => listUserConnections(admin, externalId)),
+          ),
+        ),
+      ),
+  });
+
+/**
+ * The authorization the hosts implement, reduced to its decision table:
+ * an org-scoped key (or admin session) names its tenant; a plain member or a
+ * user-scoped key is forbidden; no credential at all is unauthorized.
+ */
+const headerAuthorize = (headers: AdminUsersHeaders) => {
+  const credential = headers["authorization"];
+  if (!credential) return Effect.fail(new AdminUsersUnauthorized());
+  if (credential === "Bearer org_a_key") return Effect.succeed(TENANT_A);
+  if (credential === "Bearer org_b_key") return Effect.succeed(TENANT_B);
+  // A valid user-scoped key / plain member session: authentic, but this plane
+  // serves the whole tenant and they name one member.
+  return Effect.fail(new AdminUsersForbidden());
+};
+
+// `HttpRouter.provideRequest` (not a plain `Layer.provide`) is what clears the
+// handlers' per-request `AdminUsersProvider` marker — the same reason the real
+// hosts mount the provider through a router middleware.
+const webHandlerFor = (provider: Layer.Layer<AdminUsersProvider>) =>
+  Effect.acquireRelease(
+    Effect.sync(() =>
+      HttpRouter.toWebHandler(
+        HttpApiBuilder.layer(AdminUsersHttpApi).pipe(
+          Layer.provide(AdminUsersHandlers),
+          HttpRouter.provideRequest(provider),
+          Layer.provideMerge(HttpServer.layerServices),
+          Layer.provideMerge(Layer.succeed(HttpRouter.RouterConfig)({ maxParamLength: 1000 })),
+        ),
+        { disableLogger: true },
+      ),
+    ),
+    (web) => Effect.promise(() => web.dispose()),
+  );
+
+const get = (
+  web: {
+    readonly handler: (request: Request, context: Context.Context<never>) => Promise<Response>;
+  },
+  path: string,
+  credential?: string,
+) =>
+  Effect.promise(() =>
+    web.handler(
+      new Request(`http://localhost${path}`, {
+        headers: credential ? { authorization: credential } : {},
+      }),
+      Context.empty(),
+    ),
+  );
+
+const jsonOf = <A>(response: Response) => Effect.promise(() => response.json() as Promise<A>);
+
+type UsersBody = { readonly users: ReadonlyArray<{ readonly externalId: string }> };
+type ConnectionsBody = {
+  readonly connections: ReadonlyArray<{ readonly integration: string; readonly name: string }>;
+};
+type UsersWithConnectionsBody = {
+  readonly users: ReadonlyArray<{
+    readonly externalId: string;
+    readonly lastSeenAt: number | null;
+    readonly status: string | null;
+    readonly connections: ReadonlyArray<{
+      readonly integration: string;
+      readonly oauthScope: string | null;
+      readonly lastHealth: { readonly status: string } | null;
+    }>;
+  }>;
+};
+
+const ORG_A = "Bearer org_a_key";
+
+describe("admin users API", () => {
+  it.effect("lists every user of the tenant for an authorized org caller", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const web = yield* webHandlerFor(
+          stubProvider((tenant) => platformExecutorFor(db, tenant), headerAuthorize),
+        );
+
+        const response = yield* get(web, "/admin/users", ORG_A);
+        expect(response.status).toBe(200);
+        const body = yield* jsonOf<UsersBody>(response);
+
+        expect(
+          body.users.map((user) => user.externalId),
+          "both of the tenant's users are reported",
+        ).toEqual([USER_A1, USER_A2]);
+      }),
+    ),
+  );
+
+  it.effect("reports a user's connections with access summary but no credential", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const web = yield* webHandlerFor(
+          stubProvider((tenant) => platformExecutorFor(db, tenant), headerAuthorize),
+        );
+
+        const response = yield* get(web, `/admin/users/${USER_A1}/connections`, ORG_A);
+        expect(response.status).toBe(200);
+        const body = yield* jsonOf<ConnectionsBody>(response);
+
+        expect(
+          body.connections.map((connection) => connection.integration),
+          "the user's own connection is reported",
+        ).toEqual(["github"]);
+        expect(body.connections[0]?.name).toBe("personal");
+      }),
+    ),
+  );
+
+  it.effect("joins users with their connections for the dashboard view", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const web = yield* webHandlerFor(
+          stubProvider((tenant) => platformExecutorFor(db, tenant), headerAuthorize),
+        );
+
+        const response = yield* get(web, "/admin/users/with-connections", ORG_A);
+        expect(response.status).toBe(200);
+        const body = yield* jsonOf<UsersWithConnectionsBody>(response);
+
+        expect(
+          body.users.map((user) => [user.externalId, user.connections.map((c) => c.integration)]),
+          "each user carries their own connections",
+        ).toEqual([
+          [USER_A1, ["github"]],
+          [USER_A2, ["linear"]],
+        ]);
+        // The access summary and health travel; `lastSeenAt` is a number the
+        // dashboard can render (a raw SQL read would hand back a blob).
+        expect(body.users[0]?.connections[0]?.oauthScope).toBe("repo read:user");
+        expect(body.users[0]?.connections[0]?.lastHealth?.status).toBe("healthy");
+        expect(typeof body.users[0]?.lastSeenAt).toBe("number");
+        expect(body.users[0]?.status, "no lifecycle state is recorded yet").toBeNull();
+      }),
+    ),
+  );
+
+  it.effect("never serves credential material on any admin response", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const web = yield* webHandlerFor(
+          stubProvider((tenant) => platformExecutorFor(db, tenant), headerAuthorize),
+        );
+
+        for (const path of [
+          "/admin/users",
+          "/admin/users/with-connections",
+          `/admin/users/${USER_A1}/connections`,
+        ]) {
+          const response = yield* get(web, path, ORG_A);
+          const raw = yield* Effect.promise(() => response.text());
+
+          for (const field of FORBIDDEN_FIELDS) {
+            expect(raw, `${path} must not expose "${field}"`).not.toContain(`"${field}"`);
+          }
+          // The seeded secrets are the ground truth: nothing derived from a
+          // credential may appear, whatever it is called.
+          expect(raw, `${path} must not leak a stored secret`).not.toContain("SECRET-");
+        }
+      }),
+    ),
+  );
+
+  it.effect("isolates tenants: an org caller sees nothing of another tenant", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const web = yield* webHandlerFor(
+          stubProvider((tenant) => platformExecutorFor(db, tenant), headerAuthorize),
+        );
+
+        const users = yield* jsonOf<UsersBody>(yield* get(web, "/admin/users", ORG_A));
+        expect(
+          users.users.map((user) => user.externalId),
+          "tenant B's user is invisible to tenant A",
+        ).not.toContain(USER_B1);
+
+        // Naming another tenant's user directly returns nothing rather than
+        // that user's connections — the tenant clause is never relaxed.
+        const crossTenant = yield* jsonOf<ConnectionsBody>(
+          yield* get(web, `/admin/users/${USER_B1}/connections`, ORG_A),
+        );
+        expect(crossTenant.connections, "tenant B's connections stay in tenant B").toEqual([]);
+
+        // And tenant B's own caller does see them — proving the emptiness above
+        // is isolation, not a broken fixture.
+        const ownView = yield* jsonOf<ConnectionsBody>(
+          yield* get(web, `/admin/users/${USER_B1}/connections`, "Bearer org_b_key"),
+        );
+        expect(ownView.connections.map((c) => c.name)).toEqual(["b-secret"]);
+      }),
+    ),
+  );
+
+  it.effect("refuses a caller with no credential and a caller who is only a member", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const web = yield* webHandlerFor(
+          stubProvider((tenant) => platformExecutorFor(db, tenant), headerAuthorize),
+        );
+
+        const anonymous = yield* get(web, "/admin/users");
+        expect(anonymous.status, "no credential → unauthorized").toBe(401);
+
+        // A user-scoped API key or plain member session: authentic, but this
+        // plane serves the whole tenant.
+        const member = yield* get(web, "/admin/users", "Bearer user_scoped_key");
+        expect(member.status, "a non-admin caller → forbidden").toBe(403);
+
+        const memberJoined = yield* get(web, "/admin/users/with-connections", "Bearer user_key");
+        expect(memberJoined.status).toBe(403);
+        const memberConnections = yield* get(
+          web,
+          `/admin/users/${USER_A1}/connections`,
+          "Bearer user_key",
+        );
+        expect(memberConnections.status).toBe(403);
+      }),
+    ),
+  );
+
+  // The response schema strips unknown fields on encode, so the HTTP assertions
+  // above would still pass if the projection leaked one. Assert the projection
+  // directly too: it is the layer that is supposed to be an allowlist, and both
+  // layers should hold on their own.
+  it.effect("projects only allowlisted fields, before the schema ever encodes", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const executor = yield* platformExecutorFor(db, TENANT_A);
+        const admin = yield* platformViewOf(executor);
+
+        const { connections } = yield* listUserConnections(admin, USER_A1);
+        expect(
+          Object.keys(connections[0] ?? {}).sort(),
+          "the connection projection is exactly the allowlist",
+        ).toEqual(["integration", "lastHealth", "name", "oauthScope", "owner"]);
+
+        const { users } = yield* listUsers(admin, {});
+        expect(
+          Object.keys(users[0] ?? {}).sort(),
+          "the user projection is exactly the allowlist",
+        ).toEqual(["createdAt", "externalId", "lastSeenAt", "status"]);
+      }),
+    ),
+  );
+
+  it.effect("fails loudly when wired to a product-view executor", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        // A host that forgot `platformView: true` must not silently report an
+        // empty tenant — that would read as "this owner has no users".
+        const web = yield* webHandlerFor(
+          stubProvider((tenant) => productExecutorFor(db, tenant), headerAuthorize),
+        );
+
+        const response = yield* get(web, "/admin/users", ORG_A);
+        expect(response.status, "a missing platform view is a server error").toBe(500);
+      }),
+    ),
+  );
+
+  it.effect("pages the user list", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        yield* seed(db);
+        const web = yield* webHandlerFor(
+          stubProvider((tenant) => platformExecutorFor(db, tenant), headerAuthorize),
+        );
+
+        const first = yield* jsonOf<UsersBody>(yield* get(web, "/admin/users?limit=1", ORG_A));
+        expect(first.users.map((user) => user.externalId)).toEqual([USER_A1]);
+
+        const second = yield* jsonOf<UsersBody>(
+          yield* get(web, "/admin/users?limit=1&offset=1", ORG_A),
+        );
+        expect(second.users.map((user) => user.externalId)).toEqual([USER_A2]);
+      }),
+    ),
+  );
+});

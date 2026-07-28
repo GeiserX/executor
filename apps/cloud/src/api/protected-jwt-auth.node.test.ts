@@ -40,6 +40,8 @@ const stubApiKeys = Layer.succeed(ApiKeyService)({
   listUserKeys: () => Effect.succeed([]),
   createUserKey: () => Effect.die("JWT auth test does not create API keys"),
   revokeUserKey: () => Effect.void,
+  listOrgKeys: () => Effect.die("auth resolution test does not list org API keys"),
+  createOrgKey: () => Effect.die("auth resolution test does not create org API keys"),
 });
 
 const stubWorkOS = Layer.succeed(

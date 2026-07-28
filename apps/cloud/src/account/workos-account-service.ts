@@ -246,6 +246,32 @@ export const workosAccountProvider: Layer.Layer<
           return { success: true };
         }),
 
+      // Org keys read every user in the tenant through the `/admin/*` plane, so
+      // both paths are admin-gated — unlike personal keys, which any member may
+      // mint for themselves.
+      listOrgApiKeys: (headers) =>
+        Effect.gen(function* () {
+          const { session, org } = yield* requireOrganization(headers);
+          yield* requireAdmin(session.accountId, org.id);
+          const keys = yield* apiKeys
+            .listOrgKeys({ organizationId: org.id })
+            .pipe(Effect.catchTag("ApiKeyManagementError", toAccountError));
+          return { apiKeys: keys };
+        }),
+
+      createOrgApiKey: (headers, name) =>
+        Effect.gen(function* () {
+          const { session, org } = yield* requireOrganization(headers);
+          yield* requireAdmin(session.accountId, org.id);
+          const trimmed = name.trim().slice(0, MAX_API_KEY_NAME_LENGTH);
+          if (!trimmed) {
+            return yield* new AccountError({ message: "API key name is required" });
+          }
+          return yield* apiKeys
+            .createOrgKey({ organizationId: org.id, name: trimmed })
+            .pipe(Effect.catchTag("ApiKeyManagementError", toAccountError));
+        }),
+
       listMembers: (headers) =>
         Effect.gen(function* () {
           const { session, org } = yield* requireOrganization(headers);

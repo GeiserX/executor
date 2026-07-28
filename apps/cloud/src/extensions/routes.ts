@@ -34,6 +34,7 @@ import {
 } from "../auth/handlers";
 import { CloudAuthApi, CloudAuthPublicApi } from "../auth/api";
 import { SessionAuthLive } from "../auth/middleware-live";
+import { makeCloudAdminUsersRoutes } from "../admin/admin-users-api";
 import { OrgApi, OrgHttpApi } from "../org/api";
 import { orgAuthMiddleware } from "../org/auth-middleware";
 import { OrgHandlers } from "../org/handlers";
@@ -100,5 +101,18 @@ export const makeCloudExtensionRoutes = (rsLive: Layer.Layer<DbService | UserSto
 
   const BillingRoutes = AutumnRoutesLive.pipe(Layer.provide(requestScopedMiddleware(rsLive).layer));
 
-  return [SessionRoutes, OrgRoutes, DocsRoutes, BillingRoutes, ApiErrorLoggingLive] as const;
+  // The tenant-wide admin plane (`/api/admin/users*`). Mounted as an extension
+  // rather than on the protected API because the protected plane's middleware
+  // binds a product-view executor to one acting member — this one authorizes an
+  // org key (or an admin session) and builds a subject-less platform view.
+  const AdminUsersRoutes = makeCloudAdminUsersRoutes(rsLive, { router: apiPrefixedRouter });
+
+  return [
+    SessionRoutes,
+    OrgRoutes,
+    AdminUsersRoutes,
+    DocsRoutes,
+    BillingRoutes,
+    ApiErrorLoggingLive,
+  ] as const;
 };
