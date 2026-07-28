@@ -34,6 +34,7 @@ export const ORG_SLUG_SEGMENT = "{-$orgSlug}";
  *  are these paths prefixed with `/{-$orgSlug}`. */
 export const CONSOLE_ROUTE_PATHS = [
   "/",
+  "/connect/$integrationSlug",
   "/integrations/$namespace",
   "/integrations/add/$pluginKey",
   "/policies",
@@ -62,6 +63,10 @@ export const consoleRoutes = (options: ConsoleRoutesOptions): Array<VirtualRoute
   const file = (name: string): string => `${options.dir}/${name}`;
   const entries: ReadonlyArray<readonly [ConsoleRoutePath, VirtualRouteNode]> = [
     ["/", index(file("index.tsx"))],
+    [
+      "/connect/$integrationSlug",
+      route("/connect/$integrationSlug", file("connect.$integrationSlug.tsx")),
+    ],
     [
       "/integrations/$namespace",
       route("/integrations/$namespace", file("integrations.$namespace.tsx")),

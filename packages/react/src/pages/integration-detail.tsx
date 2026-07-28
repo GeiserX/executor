@@ -60,6 +60,10 @@ type ToolRow = {
 export function IntegrationDetailPage(props: {
   namespace: string;
   tab?: IntegrationDetailSearchTab;
+  /** Route-validated `addAccount=1`: open the add-connection flow on arrival.
+   *  Set by the `/connect/<slug>` deep link, which navigates client-side and so
+   *  cannot rely on the raw location search below. */
+  addAccount?: boolean;
 }) {
   const { namespace } = props;
   const slug = IntegrationSlug.make(namespace);
@@ -122,9 +126,11 @@ export function IntegrationDetailPage(props: {
   const canRefresh = integrationData?.canRefresh ?? false;
   const canRemove = integrationData?.canRemove ?? false;
   const urlAccountHandoff = useMemo<IntegrationAccountHandoff | null>(() => {
-    if (locationSearch.length === 0) return null;
     const search = new URLSearchParams(locationSearch);
-    if (search.get("addAccount") !== "1") return null;
+    // The route-validated flag and the raw `addAccount=1` are the same request;
+    // either one opens the flow. The extra prefill fields below are read from
+    // the raw search, which is populated on the full page loads that carry them.
+    if (!props.addAccount && search.get("addAccount") !== "1") return null;
     const owner = search.get("owner");
     const template = search.get("template");
     const label = search.get("label");
@@ -149,13 +155,13 @@ export function IntegrationDetailPage(props: {
       };
     })();
     return {
-      key: locationSearch,
+      key: `${String(props.addAccount)}:${locationSearch}`,
       ...(owner === "org" || owner === "user" ? { owner } : {}),
       ...(template != null && template.length > 0 ? { template } : {}),
       ...(label != null && label.length > 0 ? { label } : {}),
       ...(oauthClient !== undefined ? { oauthClient } : {}),
     };
-  }, [locationSearch]);
+  }, [locationSearch, props.addAccount]);
   const accountHandoff = manualAccountHandoff ?? urlAccountHandoff;
 
   useEffect(() => {

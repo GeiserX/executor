@@ -57,7 +57,20 @@ describe("isValidOrgSlug", () => {
   });
 
   it("reserves the segments routing depends on", () => {
-    for (const critical of ["api", "mcp", "integrations", "policies", "login", "cdn-cgi"]) {
+    for (const critical of [
+      "api",
+      "mcp",
+      "integrations",
+      "policies",
+      "login",
+      "cdn-cgi",
+      // The connect deep link's root. Cloud's post-auth callback reads the
+      // first path segment as an org selector, so leaving `connect` claimable
+      // made `/connect/<slug>` look like a request for an org named "connect"
+      // — which suppressed the active-membership fallback and could drop the
+      // deep link into org onboarding after sign-in.
+      "connect",
+    ]) {
       expect(RESERVED_ORG_SLUGS.has(critical), critical).toBe(true);
     }
   });

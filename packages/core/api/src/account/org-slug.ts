@@ -17,8 +17,8 @@ const ORG_SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){1,47}$/;
  * predictably will):
  *  - App planes:        api, mcp, .well-known (cloud `app-paths.ts`, selfhost
  *                       envelope, cloudflare `run_worker_first`)
- *  - Console routes:    integrations, policies, secrets, tools, resume,
- *                       plugins (the shared contract), plus host extras:
+ *  - Console routes:    connect, integrations, policies, secrets, tools,
+ *                       resume, plugins (the shared contract), plus host extras:
  *                       api-keys, org, billing, create-org, setup-mcp (cloud),
  *                       admin, join, docs (selfhost), login (Better Auth
  *                       `mcp({ loginPage })` + cloud/selfhost login UX)
@@ -41,6 +41,7 @@ export const RESERVED_ORG_SLUGS: ReadonlySet<string> = new Set([
   "mcp",
   ".well-known",
   // console + host routes
+  "connect",
   "integrations",
   "policies",
   "secrets",
