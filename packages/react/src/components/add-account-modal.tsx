@@ -1303,8 +1303,19 @@ function AddAccountModalView(props: AddAccountModalProps) {
     setMethodId(allMethods[0]!.id);
   }, [allMethods, methodId]);
 
+  // Apply the handoff prefill ONCE per handoff key (tracked by ref). The
+  // effect's deps include `allMethods`, which gets a new identity whenever the
+  // integration refetches — and the wizard itself triggers a refetch mid-flow
+  // (Continue probes the key and saves the health check). Re-running the reset
+  // then would wipe the credential the user just pasted.
+  const handoffAppliedKey = useRef<string | null>(null);
   useEffect(() => {
     if (!initialState) return;
+    // Methods load in a second fetch after the modal opens; when the handoff
+    // preselects one, retry until they land so the match has something to hit.
+    if (initialState.template != null && allMethods.length === 0) return;
+    if (handoffAppliedKey.current === initialState.key) return;
+    handoffAppliedKey.current = initialState.key;
     const initialMethod = initialState.template
       ? allMethods.find(
           (m: AuthMethod) =>
@@ -1900,6 +1911,12 @@ function AddAccountModalView(props: AddAccountModalProps) {
     if (spec) await handleValidate(spec);
   };
 
+  // Continue probes the key, but only a DEFINITIVE rejection (the upstream
+  // answered 401/403 → "expired") blocks the step. An inconclusive probe —
+  // upstream unreachable, no runnable check, the probe call itself failing —
+  // advances: the pasted key may be perfectly valid, and stranding the user on
+  // an upstream outage would make the wizard depend on availability, not
+  // credential correctness.
   const handleContinue = async () => {
     if (credentialPayloadOrigin === null) {
       setContinueError(singleInput ? "Enter the key first" : "Fill in every credential field");
@@ -1913,9 +1930,9 @@ function AddAccountModalView(props: AddAccountModalProps) {
           : hasHealthCheck
             ? await handleValidate()
             : await handleValidate(candidateHealthSpec() ?? undefined);
-      if (result?.status !== "healthy") {
+      if (result?.status === "expired") {
         setContinueError(
-          result?.detail ?? "Check the credential and resolve the connection error to continue.",
+          result.detail ?? "Check the credential and resolve the connection error to continue.",
         );
         return;
       }
