@@ -206,10 +206,10 @@ const makeProvider = (
   get: (id: ProviderItemId): Effect.Effect<Redacted.Redacted<string> | null, StorageFailure> =>
     ctx.storage.getConfig().pipe(
       Effect.flatMap((config) => {
-        if (!config) return Effect.succeed(null as Redacted.Redacted<string> | null);
+        if (!config) return Effect.succeed<Redacted.Redacted<string> | null>(null);
 
         const uri = configuredVaultUri(config, id);
-        if (uri === null) return Effect.succeed(null as Redacted.Redacted<string> | null);
+        if (uri === null) return Effect.succeed<Redacted.Redacted<string> | null>(null);
 
         return getServiceFromConfig(config, timeoutMs, preferSdk).pipe(
           Effect.flatMap((svc) => svc.resolveSecret(uri)),
@@ -217,7 +217,7 @@ const makeProvider = (
           Effect.orElseSucceed(() => null),
         );
       }),
-      Effect.catch(() => Effect.succeed(null as Redacted.Redacted<string> | null)),
+      Effect.catch(() => Effect.succeed<Redacted.Redacted<string> | null>(null)),
     ),
 
   list: (): Effect.Effect<readonly ProviderEntry[], StorageFailure> =>

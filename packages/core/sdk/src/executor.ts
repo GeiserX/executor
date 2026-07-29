@@ -1532,9 +1532,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         // that never had one and for a confidential row whose vault item is
         // gone, which the AS then rejects loudly instead of us guessing.
         // It stays wrapped all the way to the OAuth 2.1 helpers, which unwrap
-        // at the oauth4webapi call. Presence is normalized on the UNWRAPPED
-        // value — `Redacted.make("")` is truthy, so an emptiness test on the
-        // wrapper would read a public client as confidential.
+        // at the oauth4webapi call.
         const storedClientSecret =
           clientRow.client_secret_item_id == null
             ? null
@@ -1589,9 +1587,6 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
                   return yield* reauth("No refresh token is stored for this connection.");
                 }
                 const refreshToken = yield* provider.get(ProviderItemId.make(row.refresh_item_id));
-                // Absence is `null` — never falsiness. Every `Redacted` is
-                // truthy, so a truthiness test here would silently stop
-                // detecting an unresolvable item id.
                 if (refreshToken === null) {
                   return yield* reauth("Stored refresh token could not be resolved.");
                 }
@@ -1646,7 +1641,6 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
             `connection:${row.owner}:${row.integration}:${row.name}:${PRIMARY_INPUT_VARIABLE}`;
           // `provider.set` accepts `Redacted` and unwraps at its own write line.
           yield* provider.set(ProviderItemId.make(tokenItemId), token.access_token);
-          // Presence, not truthiness — every `Redacted` is truthy.
           if (token.refresh_token !== undefined && row.refresh_item_id) {
             yield* provider.set(ProviderItemId.make(row.refresh_item_id), token.refresh_token);
           }

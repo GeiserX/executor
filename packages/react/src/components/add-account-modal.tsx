@@ -140,7 +140,7 @@ type CredentialPayloadOrigin =
 /** Wraps as it leaves the form: from here the pasted key is only ever a
  *  `Redacted`, which the payload schema unwraps at the one place it belongs —
  *  encoding the request body. Emptiness is decided on the bare string above,
- *  since every `Redacted` (including `Redacted.make("")`) is truthy. */
+ *  before wrapping. */
 export function createCredentialPayloadOrigin(args: {
   readonly origin: CredentialOrigin;
   readonly inputs: readonly CredentialInput[];

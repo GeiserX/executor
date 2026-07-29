@@ -157,8 +157,8 @@ function SecretFormProvider(props: SecretFormProviderProps) {
         integration,
         template,
         identityLabel: displayName || id.trim(),
-        // Wrapped as it leaves the form; `canSubmit` already rejected an empty
-        // field, which a `Redacted` could no longer be tested for (all truthy).
+        // Wrapped as it leaves the form, after `canSubmit` rejected an empty
+        // field.
         value: Redacted.make(state.value.trim()),
       },
       reactivityKeys: connectionWriteKeys,

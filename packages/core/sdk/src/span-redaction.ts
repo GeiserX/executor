@@ -22,20 +22,33 @@
 // serialization wrapper in the browser) stay thin and cannot drift apart.
 // ---------------------------------------------------------------------------
 
-/** Query parameters that are credentials, single-use grants, or CSRF secrets.
- *  Matched case-insensitively against the parameter name. */
-const SENSITIVE_QUERY_KEYS: ReadonlySet<string> = new Set([
+/** Credentials, single-use grants, and CSRF secrets, in both places they are
+ *  scrubbed. Matched case-insensitively against the key name. */
+const SENSITIVE_KEYS: readonly string[] = [
   "access_token",
   "client_secret",
   "code",
   "code_verifier",
-  "error_description",
   "id_token",
   "refresh_token",
   "session_state",
   "state",
   "token",
-]);
+];
+
+/** Query parameters dropped from a URL. Adds `error_description`: on a REDIRECT
+ *  back from an authorization server it is attacker-influenced text that has
+ *  landed in the address bar, and the URL attribute is not where it is read
+ *  from anyway. */
+const SENSITIVE_QUERY_KEYS: ReadonlySet<string> = new Set([...SENSITIVE_KEYS, "error_description"]);
+
+/** Key names replaced in free text. Deliberately WITHOUT `error_description`:
+ *  in a failure message it is the RFC 6749 §5.2 explanation the authorization
+ *  server gave for rejecting the grant ("Token is not valid", "redirect_uri
+ *  mismatch"), which is the whole diagnostic and carries no credential —
+ *  `oauth-helpers.ts` preserves it in the token-endpoint summary for the same
+ *  reason, and blanking it here would undo that a layer later. */
+const SENSITIVE_TEXT_KEYS: ReadonlySet<string> = new Set(SENSITIVE_KEYS);
 
 /** Span attributes whose value is a whole URL. */
 export const SPAN_URL_ATTRIBUTES = ["url.full", "http.url"] as const;
@@ -45,7 +58,9 @@ export const SPAN_QUERY_ATTRIBUTE = "url.query";
  *  by construction — it is the key list, never the values. */
 export const STRIPPED_QUERY_ATTRIBUTE = "url.query.stripped_keys";
 
-const isSensitive = (key: string): boolean => SENSITIVE_QUERY_KEYS.has(key.toLowerCase());
+const isSensitiveQueryKey = (key: string): boolean => SENSITIVE_QUERY_KEYS.has(key.toLowerCase());
+
+const isSensitiveTextKey = (key: string): boolean => SENSITIVE_TEXT_KEYS.has(key.toLowerCase());
 
 /** How deep to follow a query parameter whose value is itself a URL or path
  *  with a query string. Depth 2 covers the real nesting in this app —
@@ -70,7 +85,7 @@ export const redactQuery = (query: string, depth = 0): SpanRedaction => {
   const params = new URLSearchParams(query);
   const stripped = new Set<string>();
   for (const key of Array.from(new Set(params.keys()))) {
-    if (isSensitive(key)) {
+    if (isSensitiveQueryKey(key)) {
       stripped.add(key);
       params.delete(key);
       continue;
@@ -96,11 +111,26 @@ export const redactQuery = (query: string, depth = 0): SpanRedaction => {
 };
 
 /** The URL with every sensitive query parameter dropped. Path, host, and
- *  scheme are untouched. Unparseable values are treated as a bare query string
- *  and dropped entirely rather than passed through — if it cannot be parsed it
- *  cannot be proven safe. */
+ *  scheme are untouched.
+ *
+ *  A value `URL` cannot parse is still scrubbed rather than passed through: a
+ *  `url.full` stamped from a relative request (`/api/oauth/callback?code=…`)
+ *  has no origin to parse but carries the same credential, so it is split at
+ *  its first "?" and only the tail goes through the query scrub — feeding the
+ *  whole string to `URLSearchParams` would swallow the path into a parameter
+ *  name and rewrite the attribute into something unreadable. */
 export const redactUrl = (url: string): SpanRedaction => {
-  if (!URL.canParse(url)) return redactQuery(url);
+  if (!URL.canParse(url)) {
+    const separator = url.indexOf("?");
+    if (separator === -1) return { value: url, stripped: [] };
+    const query = redactQuery(url.slice(separator + 1));
+    if (query.stripped.length === 0) return { value: url, stripped: [] };
+    const path = url.slice(0, separator);
+    return {
+      value: query.value === "" ? path : `${path}?${query.value}`,
+      stripped: query.stripped,
+    };
+  }
   const parsed = new URL(url);
   if (parsed.search === "") return { value: url, stripped: [] };
   const query = redactQuery(parsed.search.slice(1));
@@ -180,13 +210,14 @@ const NUMERIC_VALUE = /^\d+$/;
  *  reaches the exporter as JSON inside a string — no URL involved, nothing for
  *  `Redacted` to have wrapped, and no chance for the URL scrub to see it.
  *
- *  Matching is by KEY NAME, using the same sensitive set as the query scrub, so
- *  it cannot depend on recognizing a secret by shape. A non-credential value
- *  that happens to sit under one of those names is lost from the trace; that is
- *  the accepted cost of the backstop, bounded by keeping numeric values. */
+ *  Matching is by KEY NAME, so it cannot depend on recognizing a secret by
+ *  shape. A non-credential value that happens to sit under one of those names is
+ *  lost from the trace; that is the accepted cost of the backstop, bounded by
+ *  keeping numeric values and by holding `error_description` out of the text set
+ *  (see `SENSITIVE_TEXT_KEYS`). */
 export const redactSensitiveKeyValuesInText = (text: string): string =>
   text.replace(KEY_VALUE_PAIR, (match, quote, key, separator, doubleQuoted, singleQuoted, bare) => {
-    if (!isSensitive(key)) return match;
+    if (!isSensitiveTextKey(key)) return match;
     const value = doubleQuoted ?? singleQuoted ?? bare ?? "";
     if (value === "" || NUMERIC_VALUE.test(value)) return match;
     const rendered =

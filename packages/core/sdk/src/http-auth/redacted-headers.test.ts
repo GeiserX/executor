@@ -72,4 +72,21 @@ describe("REDACTED_HEADER_NAMES", () => {
       }),
     ).toEqual([]);
   });
+
+  it("keeps the trace-correlation headers a bare `key` / `session` segment would swallow", () => {
+    // These name a correlation value, not a credential, and they are precisely
+    // the headers a retry or a session-scoped bug is read through. Pinned so a
+    // future widening of the shape has to argue with this case rather than
+    // silently blanking them.
+    expect(
+      redactedNames({
+        "idempotency-key": "synthetic-idempotency-key",
+        "x-idempotency-key": "synthetic-idempotency-key",
+        "session-id": "synthetic-session-id",
+        "x-session-id": "synthetic-session-id",
+        "mcp-session-id": "synthetic-session-id",
+        "partition-key": "synthetic-partition-key",
+      }),
+    ).toEqual([]);
+  });
 });

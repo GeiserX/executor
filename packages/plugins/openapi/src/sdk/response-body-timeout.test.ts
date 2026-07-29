@@ -141,6 +141,15 @@ describe("OpenAPI response body timeout", () => {
           error: {
             code: "upstream_response_body_timeout",
             message: expect.stringContaining("response body"),
+            // The failure's `message` is non-enumerable, so the credential
+            // scrub has to project it explicitly or `details` arrives as a bag
+            // holding only `statusCode`/`reason` and the timeout loses its
+            // diagnostic.
+            details: {
+              _tag: "OpenApiInvocationError",
+              reason: "response_body_timeout",
+              message: expect.stringContaining("response body"),
+            },
           },
         });
       }),

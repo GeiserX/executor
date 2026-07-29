@@ -83,8 +83,8 @@ export interface RenderedAuthPlacements {
  *  straight onto the wire and nowhere else. Every consumer (mcp, openapi,
  *  graphql) renders through this, which is why none of them unwrap themselves.
  *
- *  Absence is `null`, never falsiness — `Redacted.make("")` is truthy, and an
- *  empty credential is a value a no-auth integration legitimately binds. */
+ *  Absence is `null`, never falsiness: an empty credential is a value a no-auth
+ *  integration legitimately binds. */
 const renderPlacementValue = (
   placement: AuthPlacement,
   values: Record<string, Redacted.Redacted<string> | null>,

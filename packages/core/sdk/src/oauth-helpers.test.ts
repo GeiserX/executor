@@ -1129,9 +1129,8 @@ describe("OAuth token material as Redacted", () => {
   );
 
   it.effect("an AS that returns no refresh_token yields undefined, not a wrapped empty", () =>
-    // Presence must survive the wrapping: `Redacted.make("")` is truthy, so a
-    // downstream truthiness test on the field would report a refresh token that
-    // does not exist and mark the connection refreshable when it is not.
+    // Presence must survive the wrapping: a wrapped empty here would mark the
+    // connection refreshable when it is not.
     withTokenEndpoint(
       tokenResponse({ access_token: "tok", token_type: "Bearer", expires_in: 3600 }),
       ({ tokenUrl }) =>

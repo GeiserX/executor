@@ -201,8 +201,6 @@ const recordedOAuthScope = (
   if (token.scope == null) return requestedScopes.join(" ") || null;
 
   const granted = token.scope.split(/\s+/).filter(Boolean);
-  // Presence, not truthiness: the refresh token is a `Redacted`, and every
-  // `Redacted` is truthy.
   const coveredByRefreshToken =
     token.refresh_token !== undefined && requestedScopes.includes("offline_access")
       ? ["offline_access"]
@@ -393,9 +391,7 @@ interface LoadedOAuthClient {
   readonly grant: OAuthGrant;
   readonly clientId: string;
   /** Resolved secret (read from the provider via the stored item id), or null
-   *  for a public / PKCE client that stored none. Presence stays `null` — an
-   *  emptiness test on the wrapper would read a public client as confidential,
-   *  since `Redacted.make("")` is truthy. */
+   *  for a public / PKCE client that stored none. */
   readonly clientSecret: Redacted.Redacted<string> | null;
   readonly resource: string | null;
 }
@@ -611,10 +607,15 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
       // can only produce "" (HTTP payloads, form fields) normalize through
       // `oauthClientSecretFromInput` before calling. Tested on the unwrapped
       // value: a wrapped "" is just as empty and just as wrong.
+      //
+      // Reported as `StorageError` because that is `createClient`'s declared
+      // failure type, which the OAuthService contract and every caller are
+      // typed against; a dedicated validation error would ripple through the
+      // published contract and belongs in its own change.
       if (
         input.clientSecret != null &&
         (Redacted.isRedacted(input.clientSecret)
-          ? // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: emptiness check only; every `Redacted` is truthy so the wrapper cannot answer it
+          ? // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: emptiness check only; the wrapper cannot answer it
             Redacted.value(input.clientSecret)
           : input.clientSecret) === ""
       ) {
@@ -1043,10 +1044,7 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
               const provider = deps.defaultWritableProvider();
               if (provider) {
                 // The secret stays wrapped from here to the token endpoint; the
-                // helpers unwrap it at the oauth4webapi call. Presence is
-                // normalized against the UNWRAPPED value — `Redacted.make("")`
-                // is truthy, so testing the wrapper would read a public client
-                // as confidential.
+                // helpers unwrap it at the oauth4webapi call.
                 const stored = yield* provider.get(
                   ProviderItemId.make(String(row.client_secret_item_id)),
                 );
@@ -1435,9 +1433,6 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
       yield* provider.set(ProviderItemId.make(itemId), token.access_token);
 
       let refreshItemId: string | null = null;
-      // Absence is `undefined` — never falsiness. Every `Redacted` is truthy, so
-      // a truthiness test would stop distinguishing "no refresh token" the day
-      // the field's presence model changes.
       if (token.refresh_token !== undefined) {
         refreshItemId = refreshItemIdFor(itemId);
         yield* provider.set(ProviderItemId.make(refreshItemId), token.refresh_token);

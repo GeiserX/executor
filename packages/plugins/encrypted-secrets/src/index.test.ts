@@ -83,7 +83,7 @@ const makeProvider = (key: string, owner: Owner = Owner.make("org")) => {
 const id = (value: string) => ProviderItemId.make(value);
 
 /** Unwrap a `get` for comparison against the expected plaintext. Absence stays
- *  `null` — every `Redacted` is truthy, so presence is tested explicitly. */
+ *  `null`, tested explicitly. */
 const resolved = async <E>(effect: Effect.Effect<Redacted.Redacted<string> | null, E>) => {
   const value = await Effect.runPromise(effect);
   return value === null ? null : Redacted.value(value);

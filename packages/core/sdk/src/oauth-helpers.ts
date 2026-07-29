@@ -559,9 +559,8 @@ const pickClientAuth = (
 const tokenResponseFrom = (r: oauth.TokenEndpointResponse): OAuth2TokenResponse => ({
   access_token: Redacted.make(r.access_token),
   token_type: r.token_type,
-  // Presence is `undefined`, never falsiness: `Redacted.make("")` is truthy, so
-  // every downstream test asks whether the field is present. oauth4webapi has
-  // already rejected an empty `refresh_token` by this point.
+  // Presence is `undefined`, never falsiness. oauth4webapi has already rejected
+  // an empty `refresh_token` by this point.
   refresh_token: r.refresh_token === undefined ? undefined : Redacted.make(r.refresh_token),
   expires_in: typeof r.expires_in === "number" ? r.expires_in : undefined,
   scope: r.scope,

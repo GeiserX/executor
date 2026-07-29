@@ -72,9 +72,8 @@ export interface OAuthClient {
 
 /** Presence-normalize a client secret arriving from a form field, the wire, or a
  *  DCR response, where "absent" can only be spelled as the empty string.
- *  Emptiness is tested on the UNWRAPPED value: every `Redacted` is truthy, so a
- *  wrapped `""` would otherwise register a confidential client with an empty
- *  secret. The wrapper is preserved — normalizing does not unwrap.
+ *  Emptiness is tested on the UNWRAPPED value, per `clientSecret` above. The
+ *  wrapper is preserved — normalizing does not unwrap.
  *  Deliberately does NOT trim: a whitespace-bearing secret is a value, and
  *  trimming it here would silently downgrade a confidential client to a public
  *  one. Callers that want the user's leading/trailing whitespace dropped trim

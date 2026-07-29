@@ -29,7 +29,12 @@ export interface CredentialProvider {
    *
    *  Returns `Redacted` so a credential cannot reach a log, a span attribute, or
    *  an error message by accident — this is the chokepoint the guarantee hangs
-   *  off, so implementations must never widen it back to a bare string. */
+   *  off, so implementations must never widen it back to a bare string.
+   *
+   *  Absence is `null`, and every caller in the chain tests it explicitly:
+   *  `Redacted.make("")` is truthy, so a falsiness test would report a stored
+   *  empty value as absent. This is the one place that fact is stated; the
+   *  presence checks downstream are its consequence. */
   readonly get: (
     id: ProviderItemId,
   ) => Effect.Effect<Redacted.Redacted<string> | null, StorageFailure>;

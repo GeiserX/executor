@@ -268,7 +268,7 @@ function HealthCheckLivePreviewBlock(props: {
         owner: preview.owner,
         integration,
         template: slug,
-        // Wrapped after the emptiness check above — every `Redacted` is truthy.
+        // Wrapped after the emptiness check above.
         value: Redacted.make(credential),
         spec,
       },

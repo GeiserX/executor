@@ -26,9 +26,7 @@ export type BearerCredential =
 
 /** Narrows to the one outcome that carries a token, so a call site reaches
  *  `token` only after proving it exists. */
-export const isBearerPresent = Predicate.isTagged("Present") as (
-  value: BearerCredential,
-) => value is Extract<BearerCredential, { readonly _tag: "Present" }>;
+export const isBearerPresent = Predicate.isTagged("Present");
 
 /** The bearer credential an inbound request carries, wrapped as it is sliced. */
 export const bearerCredential = (request: Request): BearerCredential => {

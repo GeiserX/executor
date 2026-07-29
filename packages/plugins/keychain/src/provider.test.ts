@@ -74,8 +74,7 @@ describe("keychain credential provider", () => {
     }),
   );
 
-  // An empty secret is a value, and `Redacted.make("")` is truthy — a provider
-  // that tested falsiness anywhere would report this as absent.
+  // An empty secret is a value, not an absence.
   it.effect("round-trips an empty value as present", () =>
     Effect.gen(function* () {
       keyring.stored.clear();

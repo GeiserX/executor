@@ -70,6 +70,29 @@ describe("redactSpanUrlAttribute", () => {
   it("ignores a non-string value", () => {
     expect(redactSpanUrlAttribute("url.full", 42)).toBeNull();
   });
+
+  it("scrubs a relative url.full, keeping the path readable", () => {
+    // A `url.full` stamped from a relative request has no origin for `URL` to
+    // parse, but carries the same credential. Splitting at the first "?" is
+    // what keeps the path out of the query parser.
+    expect(
+      redactSpanUrlAttribute("url.full", `/api/oauth/callback?code=${CODE}&domain=example.test`),
+    ).toEqual({
+      value: "/api/oauth/callback?domain=example.test",
+      stripped: ["code"],
+    });
+  });
+
+  it("drops the trailing separator when a relative URL's only parameter goes", () => {
+    expect(redactSpanUrlAttribute("url.full", `/api/oauth/callback?code=${CODE}`)).toEqual({
+      value: "/api/oauth/callback",
+      stripped: ["code"],
+    });
+  });
+
+  it("leaves an unparseable value with no query string alone", () => {
+    expect(redactSpanUrlAttribute("url.full", "/api/integrations")).toBeNull();
+  });
 });
 
 describe("redactUrlQueryInText", () => {
@@ -143,6 +166,32 @@ describe("redactSensitiveKeyValuesInText", () => {
     expect(
       redactSensitiveKeyValuesInText('{"slug": "acme", "status": "failed", "encoding": "utf-8"}'),
     ).toBe('{"slug": "acme", "status": "failed", "encoding": "utf-8"}');
+  });
+
+  it("keeps an RFC 6749 error_description — it is the diagnostic, not a credential", () => {
+    // The AS's own explanation for rejecting the grant. `oauth-helpers.ts`
+    // deliberately preserves it in the token-endpoint summary; blanking it here
+    // would undo that a layer later and leave a bare `invalid_grant`.
+    const logged = `{"error": "invalid_grant", "error_description": "Refresh token is expired or revoked", "code": "${CODE}"}`;
+    const scrubbed = redactSensitiveKeyValuesInText(logged);
+
+    expect(scrubbed).toContain('"error_description": "Refresh token is expired or revoked"');
+    expect(scrubbed).toContain('"error": "invalid_grant"');
+    expect(scrubbed).not.toContain(CODE);
+  });
+
+  it("still drops error_description from a URL, where it rode back on a redirect", () => {
+    // Same name, different surface: in the address bar it is attacker-influenced
+    // text on the callback, and nothing reads the diagnostic from there.
+    expect(
+      redactSpanUrlAttribute(
+        "url.full",
+        "https://app.test/api/oauth/callback?error=access_denied&error_description=user+declined",
+      ),
+    ).toEqual({
+      value: "https://app.test/api/oauth/callback?error=access_denied",
+      stripped: ["error_description"],
+    });
   });
 });
 

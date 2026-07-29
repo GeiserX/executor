@@ -156,6 +156,14 @@ describe("OpenAPI response headers timeout", () => {
         error: {
           code: "upstream_response_headers_timeout",
           message: expect.stringContaining("Upstream returned no response headers within 100ms"),
+          // The failure's `message` is non-enumerable, so the credential scrub
+          // has to project it explicitly or `details` arrives as a bag holding
+          // only `statusCode`/`reason` and the timeout loses its diagnostic.
+          details: {
+            _tag: "OpenApiInvocationError",
+            reason: "response_headers_timeout",
+            message: expect.stringContaining("Upstream returned no response headers within 100ms"),
+          },
         },
       });
     }),

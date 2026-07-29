@@ -56,6 +56,20 @@ describe("UrlRedactingSpanProcessor", () => {
     expect(exported?.attributes[STRIPPED_QUERY_ATTRIBUTE]).toBe("code,state");
   });
 
+  it("scrubs a url.full stamped from a relative request", () => {
+    // Not every seam stamps an absolute URL: a relative `url.full` has no
+    // origin for `URL` to parse, and it carries the same callback credential.
+    const exported = exportSpanWith({
+      "url.full": `/api/oauth/callback?code=${CODE}&state=${STATE}&domain=example.test`,
+      "url.path": "/api/oauth/callback",
+    });
+
+    expect(JSON.stringify(exported?.attributes)).not.toContain(CODE);
+    expect(JSON.stringify(exported?.attributes)).not.toContain(STATE);
+    expect(exported?.attributes["url.full"]).toBe("/api/oauth/callback?domain=example.test");
+    expect(exported?.attributes[STRIPPED_QUERY_ATTRIBUTE]).toBe("code,state");
+  });
+
   it("leaves a span with no sensitive parameters unchanged", () => {
     const exported = exportSpanWith({
       "url.full": "https://app.test/api/integrations?owner=org",

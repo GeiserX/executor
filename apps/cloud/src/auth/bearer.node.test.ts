@@ -5,9 +5,8 @@
 // edge auth) route through this helper, so this is where the guarantee that a
 // raw header never becomes a bare string is asserted. The header shapes are
 // enumerated because each one means something different upstream — `Absent`
-// falls through to the cookie session while `NotBearer` is a rejection — and
-// because `Redacted.make("")` is truthy, so an empty token could not be told
-// apart from a real one after wrapping.
+// falls through to the cookie session while `NotBearer` is a rejection, and
+// `Empty` is a shape no call site can recover once the token is wrapped.
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "@effect/vitest";

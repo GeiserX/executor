@@ -19,14 +19,20 @@ import { Predicate, Redacted } from "effect";
  *  mistaken for a value that was serialized while still wrapped. */
 const SCRUB_MARKER = "[redacted]";
 
+/** Substituted for a value already being walked. A decoded response body is a
+ *  tree, but a thrown failure is not: an error's `cause` chain can point back at
+ *  itself, and walking it would recurse until the stack goes. */
+const CIRCULAR_MARKER = "[circular]";
+
 /** Removes every occurrence of a connection's resolved credential values from
  *  text. Total: text carrying no credential comes back unchanged. */
 export interface CredentialScrubber {
   readonly text: (text: string) => string;
   /** Scrub an arbitrary decoded upstream payload (an error body, a parsed JSON
-   *  envelope) before it is attached to a failure. Strings, arrays, and plain
-   *  objects are walked; any other leaf is returned as-is, since these paths
-   *  carry decoded response bodies, whose leaves are JSON scalars. */
+   *  envelope, a thrown failure) before it is attached to a failure. Strings,
+   *  arrays, and plain objects are walked; any other leaf is returned as-is,
+   *  since these paths carry decoded response bodies, whose leaves are JSON
+   *  scalars. */
   readonly payload: (payload: unknown) => unknown;
 }
 
@@ -49,14 +55,39 @@ export const makeCredentialScrubber = (
   const text = (input: string): string =>
     secrets.reduce((out, secret) => out.split(secret).join(SCRUB_MARKER), input);
 
-  const payload = (input: unknown): unknown => {
+  const walk = (input: unknown, seen: ReadonlySet<object>): unknown => {
     if (typeof input === "string") return text(input);
-    if (Array.isArray(input)) return input.map(payload);
-    if (Predicate.isObject(input)) {
-      return Object.fromEntries(Object.entries(input).map(([key, value]) => [key, payload(value)]));
+    if (Array.isArray(input)) {
+      if (seen.has(input)) return CIRCULAR_MARKER;
+      const next = new Set([...seen, input]);
+      return input.map((entry) => walk(entry, next));
     }
-    return input;
+    if (!Predicate.isObject(input)) return input;
+    if (seen.has(input)) return CIRCULAR_MARKER;
+    const next = new Set([...seen, input]);
+    const projected = Object.fromEntries(
+      Object.entries(input).map(([key, value]) => [key, walk(value, next)]),
+    );
+    // oxlint-disable-next-line executor/no-instanceof-error -- boundary: `payload` takes the untyped value a failure carried; narrowing it is how the diagnostics below are recovered
+    if (!(input instanceof Error)) return projected;
+    // `name`, `message`, and `stack` are non-enumerable on an Error, so the
+    // projection above drops them — and the message is exactly where the
+    // credential lands, since a transport failure quotes the request it failed
+    // on. This path receives the raw error a plugin's invocation threw
+    // (`OpenApiInvocationError` on either timeout), whose message is the only
+    // diagnostic it carries; the same explicit projection `redactErrorCause`
+    // makes in `oauth-helpers.ts`, with the value-based scrub applied instead
+    // of that file's key-name policy.
+    return {
+      ...projected,
+      name: text(input.name),
+      // oxlint-disable-next-line executor/no-unknown-error-message -- boundary: narrowed to Error above; the message is scrubbed, not interpreted
+      message: text(input.message),
+      ...(input.stack === undefined ? {} : { stack: text(input.stack) }),
+    };
   };
+
+  const payload = (input: unknown): unknown => walk(input, new Set());
 
   return { text, payload };
 };

@@ -266,7 +266,7 @@ const makeProvider = (
 const id = (value: string) => ProviderItemId.make(value);
 
 /** Unwrap a `get` for comparison against the expected plaintext. Absence stays
- *  `null` — every `Redacted` is truthy, so presence is tested explicitly. */
+ *  `null`, tested explicitly. */
 const resolved = <E>(
   effect: Effect.Effect<Redacted.Redacted<string> | null, E>,
 ): Effect.Effect<string | null, E> =>

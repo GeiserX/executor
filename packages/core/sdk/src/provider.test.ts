@@ -67,8 +67,6 @@ describe("memory credential provider", () => {
     }),
   );
 
-  // `Redacted.make("")` is truthy, so a falsiness test anywhere in the chain
-  // would misreport a stored empty value as absent.
   it.effect("treats a stored empty value as present", () =>
     Effect.gen(function* () {
       const provider = memoryProvider();

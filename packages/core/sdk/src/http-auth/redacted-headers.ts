@@ -23,9 +23,17 @@ import { Layer } from "effect";
 
 /** Credential vocabulary, matched against a whole header name segment so
  *  `x-request-id` and `content-type` are untouched while `api-key`,
- *  `x-figma-token`, and `private-token` are not. */
+ *  `x-figma-token`, and `private-token` are not.
+ *
+ *  A bare `key` and a bare `session` segment are deliberately absent. Both name
+ *  trace-correlation values far more often than credentials — `idempotency-key`
+ *  and `session-id` are exactly the headers that make a trace worth reading,
+ *  and neither is a bearer of anything. The credential spellings that DO carry
+ *  one are still covered by their qualified forms (`api-key`, `access-key`,
+ *  `session-token`), so this narrows the collateral without narrowing the
+ *  guarantee. */
 const CREDENTIAL_HEADER_SHAPE =
-  /(^|-)(api[-_]?key|access[-_]?key|auth|authentication|auth[-_]?token|access[-_]?token|credential|key|password|pat|secret|session|signature|token)(-|$)/i;
+  /(^|-)(api[-_]?key|access[-_]?key|auth|authentication|auth[-_]?token|access[-_]?token|credential|password|pat|secret|session[-_]?key|session[-_]?token|signature|token)(-|$)/i;
 
 /** The names this app's tracers redact: Effect's defaults, the standard auth
  *  headers it omits, and the credential shape an `AuthPlacement` can mint. */
