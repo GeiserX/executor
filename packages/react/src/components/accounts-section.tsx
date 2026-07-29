@@ -30,6 +30,16 @@ import { useOAuthPopupFlow } from "../plugins/oauth-sign-in";
 import { AddAccountModal } from "./add-account-modal";
 import { ConnectionEditSheet } from "./metadata-edit-sheet";
 import type { CreateCustomMethod } from "./add-custom-method-modal";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "./alert-dialog";
 import { Badge } from "./badge";
 import { Button } from "./button";
 import {
@@ -59,6 +69,16 @@ import {
 // ---------------------------------------------------------------------------
 
 const OWNERS: readonly Owner[] = ["org", "user"];
+
+// The confirm dialog names the connection the way the row does — stored
+// identity label first, connection name otherwise. (No live probe identity
+// here; that state lives inside the row.)
+const connectionDisplayLabel = (connection: Connection | null): string => {
+  if (connection === null) return "connection";
+  return connection.identityLabel && connection.identityLabel.length > 0
+    ? connection.identityLabel
+    : String(connection.name);
+};
 
 function AccountRow(props: {
   readonly connection: Connection;
@@ -212,6 +232,10 @@ function OwnerAccounts(props: {
 }) {
   const { integration, owner } = props;
   const connections = useAtomValue(connectionsForIntegrationAtom({ integration, owner }));
+  // Removal confirms in a dialog. State lives here (not in the row) because the
+  // Remove menu item closes its dropdown on click, which would unmount a dialog
+  // nested inside it — so the row only nominates the connection to remove.
+  const [removingConnection, setRemovingConnection] = useState<Connection | null>(null);
   const doRemove = useAtomSet(removeConnectionOptimistic(owner), {
     mode: "promiseExit",
   });
@@ -324,6 +348,7 @@ function OwnerAccounts(props: {
   };
 
   const handleRemove = async (connection: Connection) => {
+    setRemovingConnection(null);
     const exit = await doRemove({
       params: {
         owner: connection.owner,
@@ -354,10 +379,39 @@ function OwnerAccounts(props: {
             showOwnerLabel={props.showOwnerLabels}
             onEdit={() => props.onEdit(connection)}
             onReconnect={() => void handleReconnect(connection)}
-            onRemove={() => void handleRemove(connection)}
+            onRemove={() => setRemovingConnection(connection)}
           />
         ))}
       </CardStackContent>
+      <AlertDialog
+        open={removingConnection !== null}
+        onOpenChange={(open: boolean) => {
+          if (!open) setRemovingConnection(null);
+        }}
+      >
+        <AlertDialogContent size="sm">
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Remove {connectionDisplayLabel(removingConnection)}?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              Tools using this connection lose access. This cannot be undone; reconnecting later
+              creates a new connection.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => {
+                if (removingConnection !== null) void handleRemove(removingConnection);
+              }}
+            >
+              Remove connection
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </CardStack>
   );
 }
