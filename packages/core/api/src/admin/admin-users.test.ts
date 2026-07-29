@@ -5,7 +5,7 @@ import { Context, Effect, Layer, type Scope } from "effect";
 
 import { Subject, Tenant, collectTables, createExecutor, type Executor } from "@executor-js/sdk";
 import { createSqliteTestFumaDb, type SqliteTestFumaDb } from "@executor-js/sdk/testing";
-import { touchSubject } from "@executor-js/sdk/host-internal";
+import { resetSubjectTouchCache, touchSubject } from "@executor-js/sdk/host-internal";
 
 import { AdminUsersHttpApi, AdminUsersForbidden, AdminUsersUnauthorized } from "./api";
 import { AdminUsersHandlers } from "./handlers";
@@ -114,6 +114,11 @@ const insertConnection = (
  *  that A's admin plane must never see. */
 const seed = (db: SqliteTestFumaDb): Effect.Effect<void> =>
   Effect.gen(function* () {
+    // `touchSubject` keeps a process-local memory of principals it already
+    // filed, so a second seed against a FRESH database would be skipped as a
+    // repeat sighting and leave the table empty. Each seed is a new world.
+    resetSubjectTouchCache();
+
     yield* touchSubject(db.db, { tenant: TENANT_A, externalId: USER_A1 });
     yield* touchSubject(db.db, { tenant: TENANT_A, externalId: USER_A2 });
     yield* touchSubject(db.db, { tenant: TENANT_B, externalId: USER_B1 });
