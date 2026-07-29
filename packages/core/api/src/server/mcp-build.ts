@@ -74,6 +74,7 @@ export const makeMcpBuildServer =
           ...(hostOptions?.smokeRenderArtifact
             ? { smokeRenderArtifact: hostOptions.smokeRenderArtifact }
             : {}),
+          ...(hostOptions?.onArtifactUsage ? { onArtifactUsage: hostOptions.onArtifactUsage } : {}),
           // Same org pinning as `RequestOrgSlug` above: self-host serves its
           // console under `/<org-slug>` (`default` when unconfigured), so the
           // deep link carries the principal's slug rather than relying on the
@@ -101,6 +102,10 @@ export interface McpBuildHostOptions {
    *  the server pass `smokeRenderArtifact` from `@executor-js/mcp-apps-shell`,
    *  which loads it behind a dynamic import; omitting it skips the check. */
   readonly smokeRenderArtifact?: (code: string) => Promise<ArtifactSmokeRenderResult>;
+  /** Forwarded to the tool server's `onArtifactUsage`: best-effort observation
+   *  of agent-driven artifact operations, for hosts recording product
+   *  analytics. */
+  readonly onArtifactUsage?: (action: "created" | "viewed" | "updated") => Effect.Effect<void>;
 }
 
 /**

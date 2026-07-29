@@ -27,6 +27,14 @@
  */
 export type ExecutionPlane = "mcp" | "api";
 
+/**
+ * Which door an artifact operation came through: an agent calling the MCP
+ * artifact tools, or a human in the console UI (whose data layer is the
+ * artifacts HTTP API). Bound at each door's composition point, mirroring
+ * `ExecutionPlane`.
+ */
+export type ArtifactVia = "agent" | "ui";
+
 export interface AnalyticsEvents {
   /**
    * A code execution reached a terminal outcome. Recorded once per execution
@@ -49,6 +57,18 @@ export interface AnalyticsEvents {
     readonly plugin_key: string;
     readonly integration_slug: string;
   };
+  /** A generative-UI artifact was saved as a new row. */
+  artifact_created: { readonly via: ArtifactVia };
+  /**
+   * An artifact was opened for its content: the agent's `show-artifact` or
+   * the console detail page. Internal reads (binding resolution inside an
+   * execution) deliberately do not count.
+   */
+  artifact_viewed: { readonly via: ArtifactVia };
+  /** An existing artifact was overwritten in place, or renamed. */
+  artifact_updated: { readonly via: ArtifactVia };
+  /** An artifact was deleted. Only the UI offers deletion today. */
+  artifact_deleted: { readonly via: ArtifactVia };
 }
 
 export type AnalyticsEventName = keyof AnalyticsEvents;

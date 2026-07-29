@@ -202,6 +202,15 @@ type SharedMcpServerConfig = {
    * has no URL to offer.
    */
   readonly artifactUrl?: (artifactId: string) => string;
+  /**
+   * Notified when an agent-facing artifact tool completes a user-meaningful
+   * operation: `create-artifact` (created, or updated when it overwrote an
+   * existing id) and `show-artifact` (viewed). Internal artifact reads —
+   * binding resolution inside `execute-action` — deliberately do not notify.
+   * Best-effort observation: failures are swallowed and cannot affect the tool
+   * result. Hosts recording product analytics supply it; core stays agnostic.
+   */
+  readonly onArtifactUsage?: (action: "created" | "viewed" | "updated") => Effect.Effect<void>;
 };
 
 /**
@@ -1501,6 +1510,12 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
     let executeActionTool: { enable: () => void; disable: () => void } | undefined;
     let executeActionResumeTool: { enable: () => void; disable: () => void } | undefined;
 
+    // Best-effort usage observation; a failing observer never affects the tool.
+    const notifyArtifactUsage = (action: "created" | "viewed" | "updated"): Effect.Effect<void> =>
+      config.onArtifactUsage
+        ? config.onArtifactUsage(action).pipe(Effect.ignoreCause({ log: false }))
+        : Effect.void;
+
     const saveAndDeliverArtifact = (input: {
       readonly code: string;
       readonly title: string;
@@ -1520,6 +1535,7 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
           ...(input.bindings === undefined ? {} : { bindings: input.bindings }),
           preview: input.preview ?? null,
         });
+        yield* notifyArtifactUsage(input.existingId === undefined ? "created" : "updated");
         yield* Effect.annotateCurrentSpan({
           "mcp.artifact.id": saved.id,
           "mcp.artifact.apps_enabled": appsEnabled,
@@ -1689,6 +1705,7 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
           .get(id)
           .pipe(Effect.catchCause(() => Effect.succeed(null)));
         if (!artifact) return artifactNotFoundResult(id);
+        yield* notifyArtifactUsage("viewed");
         return deliverArtifact({
           code: artifact.code,
           artifactId: artifact.id,

@@ -7,8 +7,16 @@ import {
 } from "@executor-js/sdk";
 
 import { ExecutorApi } from "../api";
-import { ExecutorService } from "../services";
+import { ArtifactUsageObserver, ExecutorService, type ArtifactUsageAction } from "../services";
 import { capture } from "@executor-js/api";
+
+// Best-effort usage observation (see `ArtifactUsageObserver`): notified after
+// the operation succeeded, failures swallowed, so analytics can never fail or
+// slow an artifact request.
+const notifyArtifactUsage = (action: ArtifactUsageAction) =>
+  Effect.flatMap(Effect.service(ArtifactUsageObserver), (observer) =>
+    observer ? observer(action).pipe(Effect.ignoreCause({ log: false })) : Effect.void,
+  );
 
 const summaryToResponse = (a: ArtifactSummary) => ({
   id: a.id,
@@ -42,6 +50,7 @@ export const ArtifactsHandlers = HttpApiBuilder.group(ExecutorApi, "artifacts", 
         Effect.gen(function* () {
           const executor = yield* ExecutorService;
           const artifact = yield* executor.artifacts.get(path.artifactId);
+          yield* notifyArtifactUsage("viewed");
           return artifactToResponse(artifact);
         }),
       ),
@@ -57,6 +66,7 @@ export const ArtifactsHandlers = HttpApiBuilder.group(ExecutorApi, "artifacts", 
             code: payload.code,
             bindings: payload.bindings,
           });
+          yield* notifyArtifactUsage(payload.id === undefined ? "created" : "updated");
           return artifactToResponse(saved);
         }),
       ),
@@ -69,6 +79,7 @@ export const ArtifactsHandlers = HttpApiBuilder.group(ExecutorApi, "artifacts", 
             id: path.artifactId,
             title: payload.title,
           });
+          yield* notifyArtifactUsage("updated");
           return artifactToResponse(renamed);
         }),
       ),
@@ -78,6 +89,7 @@ export const ArtifactsHandlers = HttpApiBuilder.group(ExecutorApi, "artifacts", 
         Effect.gen(function* () {
           const executor = yield* ExecutorService;
           yield* executor.artifacts.remove({ id: path.artifactId });
+          yield* notifyArtifactUsage("deleted");
           return { removed: true };
         }),
       ),

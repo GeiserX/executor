@@ -114,6 +114,9 @@ export const createServerHandlers = async (token: string): Promise<ServerHandler
       loadAppShellHtml: loadMcpAppsShellHtml,
       smokeRenderArtifact,
       artifactUrl: artifactUrlFor(webBaseUrl),
+      // Artifact operations on this surface come from an agent's MCP tools.
+      onArtifactUsage: (action: "created" | "viewed" | "updated") =>
+        localAnalytics.record(`artifact_${action}`, { via: "agent" }),
     };
     mcp = createMcpRequestHandler({
       defaultConfig: {

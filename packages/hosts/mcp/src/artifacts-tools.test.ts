@@ -1033,6 +1033,63 @@ describe("MCP host — artifact retrieval", () => {
     );
   });
 
+  it("notifies onArtifactUsage: created on new save, updated on overwrite, viewed on show", async () => {
+    const store = makeArtifactStore();
+    const usage: string[] = [];
+    await withClient(
+      makeStubEngine({}),
+      APPS_CAPS,
+      async (client) => {
+        await client.callTool({
+          name: "create-artifact",
+          arguments: { code: COUNTER_CODE, title: "Dashboard" },
+        });
+        expect(usage).toEqual(["created"]);
+
+        await client.callTool({
+          name: "create-artifact",
+          arguments: { code: COUNTER_CODE, title: "Dashboard v2", artifactId: "art_1" },
+        });
+        expect(usage).toEqual(["created", "updated"]);
+
+        await client.callTool({ name: "show-artifact", arguments: { id: "art_1" } });
+        expect(usage).toEqual(["created", "updated", "viewed"]);
+
+        // A miss is not a view.
+        await client.callTool({ name: "show-artifact", arguments: { id: "art_missing" } });
+        expect(usage).toEqual(["created", "updated", "viewed"]);
+
+        // Listing is not a view either.
+        await client.callTool({ name: "list-artifacts", arguments: {} });
+        expect(usage).toEqual(["created", "updated", "viewed"]);
+      },
+      {
+        artifacts: store.port,
+        onArtifactUsage: (action) => Effect.sync(() => void usage.push(action)),
+      },
+    );
+  });
+
+  it("a failing onArtifactUsage observer never fails the tool", async () => {
+    const store = makeArtifactStore();
+    await withClient(
+      makeStubEngine({}),
+      APPS_CAPS,
+      async (client) => {
+        const result = await client.callTool({
+          name: "create-artifact",
+          arguments: { code: COUNTER_CODE, title: "Dashboard" },
+        });
+        expect(result.isError).toBeFalsy();
+        expect(structuredOf(result)).toEqual({ code: COUNTER_CODE, artifactId: "art_1" });
+      },
+      {
+        artifacts: store.port,
+        onArtifactUsage: () => Effect.die("observer exploded"),
+      },
+    );
+  });
+
   it("delivers a saved artifact as a deep link to clients without apps support", async () => {
     const store = makeArtifactStore();
     await Effect.runPromise(

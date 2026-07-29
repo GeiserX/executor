@@ -1,4 +1,9 @@
-export { ExecutorService, ExecutionEngineService } from "./services";
+export {
+  ArtifactUsageObserver,
+  ExecutorService,
+  ExecutionEngineService,
+  type ArtifactUsageAction,
+} from "./services";
 export {
   CoreHandlers,
   ToolsHandlers,

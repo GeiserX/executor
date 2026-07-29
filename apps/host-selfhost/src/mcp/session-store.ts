@@ -8,6 +8,7 @@ import {
   type InMemoryMcpSessionStore,
 } from "@executor-js/host-mcp/in-memory-session-store";
 
+import { selfHostAnalytics } from "../analytics";
 import { ErrorCaptureLive } from "../observability";
 import { SelfHostDb, type SelfHostDbHandle } from "../db/self-host-db";
 import { SelfHostExecutionStackLayer } from "../execution";
@@ -39,7 +40,13 @@ export const makeSelfHostMcpSessionStore = (
   makeInMemoryMcpSessionStore(
     makeMcpBuildServer(
       SelfHostExecutionStackLayer.pipe(Layer.provide(Layer.succeed(SelfHostDb)(db))),
-      { loadAppShellHtml: loadMcpAppsShellHtml, smokeRenderArtifact },
+      {
+        loadAppShellHtml: loadMcpAppsShellHtml,
+        smokeRenderArtifact,
+        // Artifact operations on the MCP plane come from an agent's tools.
+        onArtifactUsage: (action) =>
+          selfHostAnalytics.record(`artifact_${action}`, { via: "agent" }),
+      },
     ),
     { webBaseUrl },
   );

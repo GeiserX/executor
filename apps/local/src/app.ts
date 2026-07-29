@@ -2,6 +2,7 @@ import { HttpApiSwagger } from "effect/unstable/httpapi";
 import { Layer } from "effect";
 
 import {
+  ArtifactUsageObserver,
   composePluginApi,
   ExecutorApp,
   FixedExecutionProvider,
@@ -126,8 +127,16 @@ export const makeLocalApiHandler = async (token: string): Promise<LocalApiHandle
     config: { failure: textFailureStrategy },
     // The boot-scoped context provideMerge'd under everything: the identity
     // provider (captured once by the fixed-execution middleware) + the fixed
-    // execution seam (the one executor + engine + extension map).
-    boot: Layer.merge(identity, fixedExecution),
+    // execution seam (the one executor + engine + extension map) + the
+    // artifact-usage observer (this HTTP plane is the console UI's data layer,
+    // so operations it serves file as `via: "ui"`).
+    boot: Layer.mergeAll(
+      identity,
+      fixedExecution,
+      Layer.succeed(ArtifactUsageObserver)((action) =>
+        localAnalytics.record(`artifact_${action}`, { via: "ui" }),
+      ),
+    ),
   });
 
   const web = toWebHandler();
