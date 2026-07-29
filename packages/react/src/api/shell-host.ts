@@ -20,7 +20,11 @@
  * structural for exactly this reason — see its declaration.
  */
 
-import { getExecutorApiBaseUrl, getExecutorServerAuthorizationHeader } from "./server-connection";
+import {
+  getExecutorApiBaseUrl,
+  getExecutorOrganizationHeaders,
+  getExecutorServerAuthorizationHeader,
+} from "./server-connection";
 
 /** The wire shape of `POST /executions` and `POST /executions/:id/resume`. */
 type ExecutionResponse =
@@ -114,14 +118,37 @@ export const createHttpShellHost = (options?: {
 }): HttpShellHost => {
   const doFetch = options?.fetch ?? globalThis.fetch.bind(globalThis);
 
-  const post = async (path: string, payload: Record<string, unknown>): Promise<unknown> => {
-    const headers: Record<string, string> = { "content-type": "application/json" };
+  /**
+   * Every request this host makes, headed the same way as the typed API client
+   * (`api/client.tsx`'s `transformClient`): bearer when the connection carries
+   * one, plus the active org selector.
+   *
+   * The selector is what an org-scoped host (cloud) scopes the request by, and
+   * it fails CLOSED — a session request that omits it is rejected outright
+   * rather than falling back to the session's stored org. Without it here every
+   * artifact tool call 403'd with `no_organization`. Resolved per request, not
+   * captured at construction: the host is memoized for the page's lifetime,
+   * while the scope authority is set during render, so a captured value could
+   * outlive the org it named.
+   *
+   * Hosts without org scoping (local, desktop, self-host) produce no slug and
+   * so send no header, which is the same convention the neighboring clients
+   * follow.
+   */
+  const requestHeaders = (): Record<string, string> => {
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      ...getExecutorOrganizationHeaders(),
+    };
     const authorization = getExecutorServerAuthorizationHeader();
     if (authorization) headers.authorization = authorization;
+    return headers;
+  };
 
+  const post = async (path: string, payload: Record<string, unknown>): Promise<unknown> => {
     const response = await doFetch(`${getExecutorApiBaseUrl()}${path}`, {
       method: "POST",
-      headers,
+      headers: requestHeaders(),
       body: JSON.stringify(payload),
     });
     if (!response.ok) {
@@ -153,12 +180,9 @@ export const createHttpShellHost = (options?: {
      * `McpAppsShellHost`.
      */
     savePreview: (artifactId: string, preview: string): void => {
-      const headers: Record<string, string> = { "content-type": "application/json" };
-      const authorization = getExecutorServerAuthorizationHeader();
-      if (authorization) headers.authorization = authorization;
       void doFetch(
         `${getExecutorApiBaseUrl()}/artifacts/${encodeURIComponent(artifactId)}/preview`,
-        { method: "PUT", headers, body: JSON.stringify({ preview }) },
+        { method: "PUT", headers: requestHeaders(), body: JSON.stringify({ preview }) },
       ).then(
         () => undefined,
         // Deliberately silent, and not an Effect: there is no caller to report
