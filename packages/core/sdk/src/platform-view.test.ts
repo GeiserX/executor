@@ -4,7 +4,7 @@ import { Effect } from "effect";
 import { collectTables, createExecutor, type Executor } from "./executor";
 import { createSqliteTestFumaDb, type SqliteTestFumaDb } from "./sqlite-test-db";
 import { Subject, Tenant } from "./ids";
-import { touchSubject } from "./subject-registry";
+import { resetSubjectTouchCache, touchSubject } from "./subject-registry";
 
 // The platform view: `executor.admin`, an OPT-IN read-only surface that reads
 // across every subject in the tenant. Written against the real SQLite bring-up
@@ -88,6 +88,11 @@ const insertConnection = (
  *  another subject's rows. */
 const seed = (db: SqliteTestFumaDb): Effect.Effect<void> =>
   Effect.gen(function* () {
+    // `touchSubject` keeps a process-local memory of principals it already
+    // filed, so a second seed against a FRESH database would be skipped as a
+    // repeat sighting and leave the table empty. Each seed is a new world.
+    resetSubjectTouchCache();
+
     yield* touchSubject(db.db, { tenant: TENANT, externalId: SUBJECT_A });
     yield* touchSubject(db.db, { tenant: TENANT, externalId: SUBJECT_B });
     yield* touchSubject(db.db, { tenant: OTHER_TENANT, externalId: "user_elsewhere" });
