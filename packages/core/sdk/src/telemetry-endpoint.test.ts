@@ -35,6 +35,12 @@ describe("endpointForTelemetry", () => {
     );
   });
 
+  it("does not URL-normalize a credential-free endpoint", () => {
+    // A bare origin round-tripped through URL gains a trailing slash; the
+    // stamped attribute must stay byte-identical to the configured endpoint.
+    expect(endpointForTelemetry("http://127.0.0.1:55003")).toBe("http://127.0.0.1:55003");
+  });
+
   it("returns unparseable input as-is", () => {
     expect(endpointForTelemetry("not a url")).toBe("not a url");
   });

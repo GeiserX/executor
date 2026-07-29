@@ -23,6 +23,12 @@
 export const endpointForTelemetry = (endpoint: string): string => {
   if (!URL.canParse(endpoint)) return endpoint;
   const url = new URL(endpoint);
+  // A clean endpoint is returned verbatim: round-tripping through URL
+  // normalizes (e.g. appends a trailing slash to an origin), which would make
+  // the stamped attribute diverge from the configured value.
+  if (url.search === "" && url.hash === "" && url.username === "" && url.password === "") {
+    return endpoint;
+  }
   url.search = "";
   url.hash = "";
   url.username = "";
