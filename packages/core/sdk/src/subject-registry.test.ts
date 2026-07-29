@@ -1,4 +1,4 @@
-import { describe, expect, it } from "@effect/vitest";
+import { beforeEach, describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
 import { withQueryContext } from "@executor-js/fumadb/query";
 
@@ -7,7 +7,7 @@ import { AuthTemplateSlug, ConnectionName, IntegrationSlug, ToolName } from "./i
 import type { ExecutorOwnerPolicyContext } from "./owner-policy";
 import { definePlugin } from "./plugin";
 import { createSqliteTestFumaDb, type SqliteTestFumaDb } from "./sqlite-test-db";
-import { touchSubject } from "./subject-registry";
+import { resetSubjectTouchCache, touchSubject } from "./subject-registry";
 import { makeTestWorkspaceHarness, memoryCredentialsPlugin } from "./test-config";
 
 // `touchSubject` is the only writer of the `subject` table. Written against the
@@ -48,6 +48,14 @@ const storedSubjects = (
     }));
   });
 
+// `touchSubject` remembers, per process, which principals it already filed
+// inside the throttle window. Every case below reuses the same tenant/principal
+// against a FRESH database, so that memory has to be dropped between them or a
+// later case would skip the query its assertion depends on.
+beforeEach(() => {
+  resetSubjectTouchCache();
+});
+
 describe("touchSubject", () => {
   it.effect("creates the row on first sight", () =>
     withDb((db) =>
@@ -75,8 +83,8 @@ describe("touchSubject", () => {
         });
         const [first] = yield* storedSubjects(db);
 
-        // The hot path: N requests in quick succession must cost N reads and
-        // zero writes, so the persisted stamp is unchanged afterwards.
+        // The hot path: N requests in quick succession must cost zero writes,
+        // so the persisted stamp is unchanged afterwards.
         yield* Effect.forEach([1, 2, 3], () =>
           touchSubject(db.db, {
             tenant: TENANT,
@@ -108,6 +116,11 @@ describe("touchSubject", () => {
             set: { last_seen_at: BigInt(stale) },
           }),
         );
+        // Backdating the row stands in for elapsed time, and elapsed time ages
+        // the process-local sighting memory too — otherwise this would assert
+        // against a clock the memory never saw. Expiring it is what the passage
+        // of time does; the assertion below is unchanged.
+        resetSubjectTouchCache();
 
         yield* touchSubject(db.db, {
           tenant: TENANT,
@@ -118,6 +131,125 @@ describe("touchSubject", () => {
         const rows = yield* storedSubjects(db);
         expect(rows).toHaveLength(1);
         expect(rows[0]?.lastSeenMs).toBeGreaterThan(stale);
+      }),
+    ),
+  );
+
+  it.effect("issues no query at all for a repeat sighting inside the throttle", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        // THE regression this guards: the request seam runs `touchSubject` on
+        // every HTTP request and MCP session, so a sighting that still costs an
+        // indexed read per request adds a round-trip to every request in the
+        // product. Dropping the table after the first sighting makes any
+        // further query fail loudly — and `touchSubject` swallows storage
+        // failures, so a surviving query would be invisible in the row state.
+        // Counting statements is the only way to see it.
+        yield* touchSubject(db.db, {
+          tenant: TENANT,
+          externalId: "user_a",
+          lastSeenThrottleMs: THROTTLE_MS,
+        });
+
+        let queries = 0;
+        const client = db.client as { execute: (...args: never[]) => unknown };
+        const execute = client.execute.bind(client) as (...args: never[]) => unknown;
+        client.execute = (...args: never[]) => {
+          queries += 1;
+          return execute(...args);
+        };
+
+        yield* Effect.forEach([1, 2, 3], () =>
+          touchSubject(db.db, {
+            tenant: TENANT,
+            externalId: "user_a",
+            lastSeenThrottleMs: THROTTLE_MS,
+          }),
+        );
+
+        client.execute = execute as typeof client.execute;
+        expect(queries).toBe(0);
+      }),
+    ),
+  );
+
+  it.effect("re-reads once the remembered sighting ages past the throttle", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        // The memory must expire with the throttle, not pin a principal as
+        // "recently seen" forever: `last_seen_at` still has to advance for a
+        // principal who keeps calling across windows.
+        yield* touchSubject(db.db, {
+          tenant: TENANT,
+          externalId: "user_a",
+          lastSeenThrottleMs: THROTTLE_MS,
+        });
+        const [first] = yield* storedSubjects(db);
+
+        // A zero throttle makes every remembered sighting instantly stale,
+        // which is what a caller crossing the window observes.
+        yield* touchSubject(db.db, {
+          tenant: TENANT,
+          externalId: "user_a",
+          lastSeenThrottleMs: 0,
+        });
+
+        const rows = yield* storedSubjects(db);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]?.lastSeenMs).toBeGreaterThanOrEqual(first?.lastSeenMs ?? 0);
+      }),
+    ),
+  );
+
+  it.effect("remembers a first sighting per tenant, not per principal", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        // One account acting in two orgs is two rows. A memory keyed on the
+        // principal alone would file the first tenant and skip the second,
+        // losing the row the other tenant's admin view depends on.
+        yield* touchSubject(db.db, {
+          tenant: TENANT,
+          externalId: "user_a",
+          lastSeenThrottleMs: THROTTLE_MS,
+        });
+        yield* touchSubject(db.db, {
+          tenant: OTHER_TENANT,
+          externalId: "user_a",
+          lastSeenThrottleMs: THROTTLE_MS,
+        });
+
+        expect((yield* storedSubjects(db, OTHER_TENANT)).map((row) => row.externalId)).toEqual([
+          "user_a",
+        ]);
+      }),
+    ),
+  );
+
+  it.effect("does not remember a sighting that failed to persist", () =>
+    withDb((db) =>
+      Effect.gen(function* () {
+        // A storage failure is swallowed so the request survives. It must not
+        // also be recorded as a successful sighting, or the principal would
+        // stay unfiled for a whole throttle window after the fault cleared.
+        yield* Effect.promise(() => db.client.execute("DROP TABLE subject"));
+        yield* touchSubject(db.db, {
+          tenant: TENANT,
+          externalId: "user_a",
+          lastSeenThrottleMs: THROTTLE_MS,
+        });
+
+        yield* Effect.promise(() =>
+          db.client.execute(
+            "CREATE TABLE subject (row_id text PRIMARY KEY NOT NULL, tenant text NOT NULL, external_id text NOT NULL, created_at integer NOT NULL, last_seen_at blob, status text)",
+          ),
+        );
+        yield* touchSubject(db.db, {
+          tenant: TENANT,
+          externalId: "user_a",
+          lastSeenThrottleMs: THROTTLE_MS,
+        });
+
+        expect((yield* storedSubjects(db)).map((row) => row.externalId)).toEqual(["user_a"]);
       }),
     ),
   );
