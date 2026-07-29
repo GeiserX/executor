@@ -14,7 +14,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { expect } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Redacted } from "effect";
 import { composePluginApi } from "@executor-js/api/server";
 import { graphqlHttpPlugin } from "@executor-js/plugin-graphql/api";
 import {
@@ -162,7 +162,7 @@ scenario(
           name: MAIN,
           integration: slug,
           template: API_KEY,
-          value: "static-token",
+          value: Redacted.make("static-token"),
         },
       });
 
@@ -271,7 +271,7 @@ scenario(
           name: MAIN,
           integration: slug,
           template: NONE,
-          value: "unused",
+          value: Redacted.make("unused"),
         },
       });
 
@@ -328,7 +328,7 @@ scenario(
           name: MAIN,
           integration: slug,
           template: NONE,
-          value: "unused",
+          value: Redacted.make("unused"),
         },
       });
 
@@ -390,7 +390,7 @@ scenario(
         name: MAIN,
         integration: slug,
         template: API_KEY,
-        value: "org-secret",
+        value: Redacted.make("org-secret"),
       },
     });
     yield* client.connections.create({
@@ -399,7 +399,7 @@ scenario(
         name: PERSONAL,
         integration: slug,
         template: API_KEY,
-        value: "personal-secret",
+        value: Redacted.make("personal-secret"),
       },
     });
 

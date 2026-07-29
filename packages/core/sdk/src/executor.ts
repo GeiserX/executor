@@ -2824,10 +2824,15 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         const out: Record<string, Redacted.Redacted<string> | null> = {};
         for (const { variable, origin } of normalizeConnectionInputs(input)) {
           if ("value" in origin) {
-            // A pasted value never went through a provider, so it arrives bare;
-            // wrap it here so the probe sees the same shape a saved connection
-            // produces. Nothing on this path is persisted.
-            out[variable] = Redacted.make(origin.value);
+            // A pasted value never went through a provider. Over HTTP it is
+            // already wrapped (the payload schema decodes into `Redacted`); an
+            // in-process caller may still pass a bare string. Normalize so the
+            // probe sees the same shape a saved connection produces — wrapping
+            // an already-wrapped value would nest it and probe "<redacted>".
+            // Nothing on this path is persisted.
+            out[variable] = Redacted.isRedacted(origin.value)
+              ? origin.value
+              : Redacted.make(origin.value);
             continue;
           }
           const provider = credentialProviders.get(String(origin.from.provider));

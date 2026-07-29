@@ -19,7 +19,7 @@
 // production, a hard timeout); after it, it is sub-second.
 
 import { expect } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Redacted } from "effect";
 import { AuthTemplateSlug, ConnectionName, IntegrationSlug } from "@executor-js/sdk/shared";
 
 import { scenario } from "../src/scenario";
@@ -110,7 +110,7 @@ scenario(
             name: ConnectionName.make("conn0"),
             integration: IntegrationSlug.make(controlIntegration),
             template: AuthTemplateSlug.make("apiKey"),
-            value: "unused-token",
+            value: Redacted.make("unused-token"),
           },
         });
         const toolkit = yield* controlClient.toolkits.create({

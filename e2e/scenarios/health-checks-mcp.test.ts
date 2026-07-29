@@ -17,7 +17,7 @@
 // expiry correctly.
 import { randomBytes } from "node:crypto";
 
-import { Effect } from "effect";
+import { Effect, Redacted } from "effect";
 import { expect } from "@effect/vitest";
 import type { HttpApiClient } from "effect/unstable/httpapi";
 import { composePluginApi } from "@executor-js/api/server";
@@ -84,7 +84,7 @@ scenario(
               name,
               integration: slug,
               template: AuthTemplateSlug.make("bearer"),
-              value: goodToken,
+              value: Redacted.make(goodToken),
             },
           });
 
@@ -101,7 +101,7 @@ scenario(
               owner: "org",
               integration: slug,
               template: AuthTemplateSlug.make("bearer"),
-              value: goodToken,
+              value: Redacted.make(goodToken),
             },
           });
           expect(validated.status, "validating a live key is healthy").toBe("healthy");
@@ -110,7 +110,7 @@ scenario(
               owner: "org",
               integration: slug,
               template: AuthTemplateSlug.make("bearer"),
-              value: "wrong-token",
+              value: Redacted.make("wrong-token"),
             },
           });
           expect(rejected.status, "validating a rejected key is expired").toBe("expired");

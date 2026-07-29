@@ -9,7 +9,7 @@
 import { randomBytes } from "node:crypto";
 
 import { expect } from "@effect/vitest";
-import { Effect, Predicate } from "effect";
+import { Effect, Predicate, Redacted } from "effect";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { composePluginApi } from "@executor-js/api/server";
 import { mcpHttpPlugin } from "@executor-js/plugin-mcp/api";
@@ -104,7 +104,7 @@ scenario(
             name: ConnectionName.make("main"),
             integration: IntegrationSlug.make(slug),
             template: AuthTemplateSlug.make("none"),
-            value: "",
+            value: Redacted.make(""),
           },
         });
 

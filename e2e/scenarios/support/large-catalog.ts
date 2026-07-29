@@ -16,7 +16,7 @@ import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { Effect } from "effect";
+import { Effect, Redacted } from "effect";
 import type { HttpApi, HttpApiClient } from "effect/unstable/httpapi";
 import { composePluginApi } from "@executor-js/api/server";
 import { openApiHttpPlugin } from "@executor-js/plugin-openapi/api";
@@ -184,7 +184,7 @@ export const seedLargeCatalog = (
           name: ConnectionName.make("conn0"),
           integration: IntegrationSlug.make(integration.slug),
           template: AuthTemplateSlug.make("apiKey"),
-          value: "unused-token",
+          value: Redacted.make("unused-token"),
         },
       });
     }

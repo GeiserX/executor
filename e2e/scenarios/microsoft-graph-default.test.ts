@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 
 import { expect } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Redacted } from "effect";
 import { composePluginApi } from "@executor-js/api/server";
 import {
   MICROSOFT_AUTH_TEMPLATE_SLUG,
@@ -129,7 +129,7 @@ scenario(
             name: connection,
             integration: IntegrationSlug.make(integration),
             template: AuthTemplateSlug.make(MICROSOFT_AUTH_TEMPLATE_SLUG),
-            value: "token-xyz",
+            value: Redacted.make("token-xyz"),
           },
         });
 

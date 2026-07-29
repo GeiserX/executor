@@ -23,7 +23,7 @@ import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 
 import { expect } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Redacted } from "effect";
 import { composePluginApi } from "@executor-js/api/server";
 import { mcpHttpPlugin } from "@executor-js/plugin-mcp/api";
 import { makeMutableCatalogMcpServer, serveMcpServer } from "@executor-js/plugin-mcp/testing";
@@ -203,7 +203,7 @@ scenario(
             name: ConnectionName.make("main"),
             integration: IntegrationSlug.make(slug),
             template: AuthTemplateSlug.make("none"),
-            value: "",
+            value: Redacted.make(""),
           },
         });
 
@@ -283,7 +283,7 @@ scenario(
             name: ConnectionName.make("main"),
             integration: IntegrationSlug.make(slug),
             template: AuthTemplateSlug.make("none"),
-            value: "",
+            value: Redacted.make(""),
           },
         });
 
@@ -389,7 +389,7 @@ scenario(
             name: ConnectionName.make("main"),
             integration: IntegrationSlug.make(slug),
             template: AuthTemplateSlug.make("none"),
-            value: "",
+            value: Redacted.make(""),
           },
         });
 
@@ -456,7 +456,7 @@ scenario(
             name: ConnectionName.make("main"),
             integration: IntegrationSlug.make(slug),
             template: AuthTemplateSlug.make("none"),
-            value: "",
+            value: Redacted.make(""),
           },
         });
 

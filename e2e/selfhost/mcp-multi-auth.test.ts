@@ -9,7 +9,7 @@
 import { randomBytes } from "node:crypto";
 
 import { expect } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Redacted } from "effect";
 import { composePluginApi } from "@executor-js/api/server";
 import { mcpHttpPlugin } from "@executor-js/plugin-mcp/api";
 import { makeGreetingMcpServer, serveMcpServer } from "@executor-js/plugin-mcp/testing";
@@ -66,7 +66,7 @@ scenario(
             name: ConnectionName.make("wire-auth-key"),
             integration: IntegrationSlug.make(slug),
             template: AuthTemplateSlug.make("header"),
-            value: token,
+            value: Redacted.make(token),
           },
         });
 

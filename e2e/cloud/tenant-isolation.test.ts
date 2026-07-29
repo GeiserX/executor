@@ -6,7 +6,7 @@
 import { randomBytes } from "node:crypto";
 
 import { expect } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Redacted } from "effect";
 import type { HttpApiClient } from "effect/unstable/httpapi";
 import { composePluginApi } from "@executor-js/api/server";
 import { openApiHttpPlugin } from "@executor-js/plugin-openapi/api";
@@ -71,7 +71,7 @@ scenario(
         name: connectionName,
         integration: slug,
         template: TEMPLATE_API_KEY,
-        value: secretValue,
+        value: Redacted.make(secretValue),
       },
     });
 

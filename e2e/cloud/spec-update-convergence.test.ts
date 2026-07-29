@@ -12,7 +12,7 @@ import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 
 import { expect } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Redacted } from "effect";
 import type { HttpApiClient } from "effect/unstable/httpapi";
 import { composePluginApi } from "@executor-js/api/server";
 import { openApiHttpPlugin } from "@executor-js/plugin-openapi/api";
@@ -161,7 +161,7 @@ const personalConnection = (client: Client, integration: IntegrationSlug, name: 
       name,
       integration,
       template: AuthTemplateSlug.make("apiKey"),
-      value: `tok-${randomBytes(8).toString("hex")}`,
+      value: Redacted.make(`tok-${randomBytes(8).toString("hex")}`),
     },
   });
 

@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 
 import { expect } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Redacted } from "effect";
 import { composePluginApi } from "@executor-js/api/server";
 import { openApiHttpPlugin } from "@executor-js/plugin-openapi/api";
 import { toolkitsPlugin } from "@executor-js/plugin-toolkits/server";
@@ -100,7 +100,7 @@ scenario(
           name: ConnectionName.make(hiddenPersonalConnection),
           integration: IntegrationSlug.make(hiddenPersonalIntegration),
           template: AuthTemplateSlug.make("apiKey"),
-          value: "unused-token",
+          value: Redacted.make("unused-token"),
         },
       });
 

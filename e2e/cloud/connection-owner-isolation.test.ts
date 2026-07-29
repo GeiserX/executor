@@ -12,7 +12,7 @@
 import { randomBytes } from "node:crypto";
 
 import { expect } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Redacted } from "effect";
 import type { HttpApiClient } from "effect/unstable/httpapi";
 import { composePluginApi } from "@executor-js/api/server";
 import { openApiHttpPlugin } from "@executor-js/plugin-openapi/api";
@@ -173,7 +173,7 @@ scenario(
         name,
         integration,
         template: TEMPLATE_API_KEY,
-        value: secretValue,
+        value: Redacted.make(secretValue),
       },
     });
 
@@ -230,7 +230,7 @@ scenario(
         name,
         integration,
         template: TEMPLATE_API_KEY,
-        value: "shared-org-key",
+        value: Redacted.make("shared-org-key"),
       },
     });
 
@@ -269,7 +269,7 @@ scenario(
         name,
         integration,
         template: TEMPLATE_API_KEY,
-        value: "value-in-org-a",
+        value: Redacted.make("value-in-org-a"),
       },
     });
 

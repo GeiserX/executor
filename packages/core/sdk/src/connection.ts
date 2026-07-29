@@ -1,3 +1,5 @@
+import type { Redacted } from "effect";
+
 import type {
   AuthTemplateSlug,
   ConnectionAddress,
@@ -70,13 +72,21 @@ export interface ConnectionRef {
   readonly integration: IntegrationSlug;
 }
 
+/** A pasted credential as it enters the SDK. `Redacted` is what the HTTP layer
+ *  produces (the payload schema decodes straight into it) and what a caller
+ *  holding an already-wrapped secret passes; a bare string stays accepted so the
+ *  documented plain-string calls keep working. Widening, never narrowing — the
+ *  guarantee lives on the OUTPUT side, where `CredentialProvider.get` returns
+ *  `Redacted`. */
+export type ConnectionSecretInput = string | Redacted.Redacted<string>;
+
 /** Where a single credential input comes from. `value` is pasted raw and written
  *  to the default provider; `from` references an external provider (1Password,
  *  keychain) by opaque id — we store the routing and resolve on demand, never
  *  holding the value. Applied to a template lazily, never pre-baked into
  *  `Bearer …`. */
 export type ConnectionInputOrigin =
-  | { readonly value: string }
+  | { readonly value: ConnectionSecretInput }
   | { readonly from: { readonly provider: ProviderKey; readonly id: ProviderItemId } };
 
 /** The value origin(s) for a new credential. A connection resolves a MAP of named
@@ -86,9 +96,9 @@ export type ConnectionInputOrigin =
  *  is pasted multi-input; `inputs` is the canonical per-variable origin map (mixes
  *  pasted + external). All inputs of one connection share one provider. */
 export type ConnectionValueInput =
-  | { readonly value: string }
+  | { readonly value: ConnectionSecretInput }
   | { readonly from: { readonly provider: ProviderKey; readonly id: ProviderItemId } }
-  | { readonly values: Record<string, string> }
+  | { readonly values: Record<string, ConnectionSecretInput> }
   | { readonly inputs: Record<string, ConnectionInputOrigin> };
 
 /** Save a credential for one integration (born wired). `template` picks which of

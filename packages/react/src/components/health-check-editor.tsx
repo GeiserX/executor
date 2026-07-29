@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useAtomValue, useAtomSet } from "@effect/atom-react";
 import * as AsyncResult from "effect/unstable/reactivity/AsyncResult";
 import * as Exit from "effect/Exit";
+import * as Redacted from "effect/Redacted";
 import {
   rankResponseSample,
   type AuthTemplateSlug,
@@ -263,7 +264,14 @@ function HealthCheckLivePreviewBlock(props: {
     };
     setRunning(true);
     const exit = await doValidate({
-      payload: { owner: preview.owner, integration, template: slug, value: credential, spec },
+      payload: {
+        owner: preview.owner,
+        integration,
+        template: slug,
+        // Wrapped after the emptiness check above — every `Redacted` is truthy.
+        value: Redacted.make(credential),
+        spec,
+      },
     });
     setRunning(false);
     if (Exit.isFailure(exit)) {

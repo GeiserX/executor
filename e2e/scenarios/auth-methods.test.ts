@@ -11,7 +11,7 @@
 import { randomBytes } from "node:crypto";
 
 import { expect } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Redacted } from "effect";
 import { composePluginApi } from "@executor-js/api/server";
 import { mcpHttpPlugin } from "@executor-js/plugin-mcp/api";
 import { makeEchoMcpServer, serveMcpServer } from "@executor-js/plugin-mcp/testing";
@@ -330,7 +330,7 @@ scenario(
             name: ConnectionName.make("mixed"),
             integration: IntegrationSlug.make(slug),
             template: AuthTemplateSlug.make("token_and_team"),
-            values: { api_token: "tok_mixed", team_id: "team_42" },
+            values: { api_token: Redacted.make("tok_mixed"), team_id: Redacted.make("team_42") },
           },
         });
         yield* client.connections.create({
@@ -339,7 +339,7 @@ scenario(
             name: ConnectionName.make("bearer"),
             integration: IntegrationSlug.make(slug),
             template: AuthTemplateSlug.make("bearer"),
-            value: "tok_bearer",
+            value: Redacted.make("tok_bearer"),
           },
         });
         yield* client.connections.create({
@@ -348,7 +348,7 @@ scenario(
             name: ConnectionName.make("token"),
             integration: IntegrationSlug.make(slug),
             template: AuthTemplateSlug.make("query_token"),
-            value: "tok_query",
+            value: Redacted.make("tok_query"),
           },
         });
 

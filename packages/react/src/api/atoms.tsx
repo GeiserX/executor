@@ -16,6 +16,7 @@ import {
 import * as Atom from "effect/unstable/reactivity/Atom";
 import * as AsyncResult from "effect/unstable/reactivity/AsyncResult";
 import * as Effect from "effect/Effect";
+import type * as Redacted from "effect/Redacted";
 
 import { ExecutorApiClient } from "./client";
 import { connectionWriteKeys, ReactivityKey } from "./reactivity-keys";
@@ -314,7 +315,9 @@ export const connectionsForIntegrationAtom = Atom.family(
 // The connection-create payload mirrors `CreateConnectionPayload` from the core
 // API: the common fields plus exactly one value origin — a single pasted `value`
 // (the `token` input), a `values` map (one per named input, e.g. Datadog's two
-// keys), or an external `from` reference.
+// keys), or an external `from` reference. Pasted secrets are `Redacted` on this
+// side too: the payload schema unwraps them while encoding the request body, so
+// the credential is never a bare string in browser state.
 type CreateConnectionArg = {
   readonly payload: {
     readonly owner: Owner;
@@ -324,8 +327,8 @@ type CreateConnectionArg = {
     readonly identityLabel?: string | null;
     readonly description?: string | null;
   } & (
-    | { readonly value: string }
-    | { readonly values: Record<string, string> }
+    | { readonly value: Redacted.Redacted<string> }
+    | { readonly values: Record<string, Redacted.Redacted<string>> }
     | {
         readonly from: {
           readonly provider: ProviderKey;

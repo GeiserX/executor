@@ -21,7 +21,7 @@
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 
-import { Effect } from "effect";
+import { Effect, Redacted } from "effect";
 import { expect } from "@effect/vitest";
 import type { HttpApiClient } from "effect/unstable/httpapi";
 import type { Page } from "playwright";
@@ -694,7 +694,7 @@ scenario(
               name,
               integration: slug,
               template: TEMPLATE,
-              value: goodToken,
+              value: Redacted.make(goodToken),
             },
           });
 
@@ -862,7 +862,7 @@ scenario(
               name,
               integration: slug,
               template: TEMPLATE,
-              value: goodToken,
+              value: Redacted.make(goodToken),
             },
           });
 
@@ -1118,7 +1118,7 @@ scenario(
               name,
               integration: slug,
               template: AuthTemplateSlug.make("bearer"),
-              value: "revoked-token",
+              value: Redacted.make("revoked-token"),
             },
           });
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAtomSet, useAtomValue } from "@effect/atom-react";
 import * as Exit from "effect/Exit";
+import * as Redacted from "effect/Redacted";
 import * as AsyncResult from "effect/unstable/reactivity/AsyncResult";
 import {
   ConnectionName,
@@ -128,7 +129,7 @@ type CredentialOrigin = "paste" | "onepassword";
 type CredentialInput = { readonly variable: string; readonly label: string };
 
 type CredentialPayloadOrigin =
-  | { readonly values: Record<string, string> }
+  | { readonly values: Record<string, Redacted.Redacted<string>> }
   | {
       readonly from: {
         readonly provider: ProviderKey;
@@ -136,6 +137,10 @@ type CredentialPayloadOrigin =
       };
     };
 
+/** Wraps as it leaves the form: from here the pasted key is only ever a
+ *  `Redacted`, which the payload schema unwraps at the one place it belongs —
+ *  encoding the request body. Emptiness is decided on the bare string above,
+ *  since every `Redacted` (including `Redacted.make("")`) is truthy. */
 export function createCredentialPayloadOrigin(args: {
   readonly origin: CredentialOrigin;
   readonly inputs: readonly CredentialInput[];
@@ -143,7 +148,9 @@ export function createCredentialPayloadOrigin(args: {
   readonly onePasswordItemId: string;
   readonly singleInput: boolean;
 }): CredentialPayloadOrigin | null {
-  if (args.inputs.length === 0) return { values: { token: "" } };
+  // The no-auth template binds no credential; the empty `token` is the sentinel
+  // the server reads as "zero inputs", not a secret.
+  if (args.inputs.length === 0) return { values: { token: Redacted.make("") } };
   if (args.origin === "onepassword") {
     const id = args.onePasswordItemId.trim();
     if (!args.singleInput || id.length === 0) return null;
@@ -152,10 +159,12 @@ export function createCredentialPayloadOrigin(args: {
     };
   }
 
-  const values = Object.fromEntries(
-    args.inputs.map((input) => [input.variable, (args.values[input.variable] ?? "").trim()]),
+  const values = args.inputs.map(
+    (input) => [input.variable, (args.values[input.variable] ?? "").trim()] as const,
   );
-  return Object.values(values).every((value) => value.length > 0) ? { values } : null;
+  return values.every(([, value]) => value.length > 0)
+    ? { values: Object.fromEntries(values.map(([key, value]) => [key, Redacted.make(value)])) }
+    : null;
 }
 
 const numberBadge = (n: number) => (

@@ -20,7 +20,7 @@
 import { randomBytes } from "node:crypto";
 
 import { expect } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Redacted } from "effect";
 import { composePluginApi } from "@executor-js/api/server";
 import { openApiHttpPlugin } from "@executor-js/plugin-openapi/api";
 import { AuthTemplateSlug, ConnectionName, IntegrationSlug } from "@executor-js/sdk/shared";
@@ -132,7 +132,7 @@ scenario(
             integration,
             template: TEMPLATE_API_KEY,
             identityLabel: `${name} key`,
-            value: `sk-${name}`,
+            value: Redacted.make(`sk-${name}`),
           },
         }),
       );

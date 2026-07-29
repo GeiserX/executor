@@ -18,7 +18,7 @@ import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 
 import { expect } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Redacted } from "effect";
 import type { HttpApiClient } from "effect/unstable/httpapi";
 import { composePluginApi } from "@executor-js/api/server";
 import { openApiHttpPlugin } from "@executor-js/plugin-openapi/api";
@@ -262,7 +262,12 @@ scenario(
           // Key-first connect: a pasted key is probed WITHOUT saving, and the
           // probe surfaces the identity the UI fills the connection name from.
           const healthy = yield* client.connections.validate({
-            payload: { owner: "org", integration: slug, template: TEMPLATE, value: goodToken },
+            payload: {
+              owner: "org",
+              integration: slug,
+              template: TEMPLATE,
+              value: Redacted.make(goodToken),
+            },
           });
           expect(healthy.status, "a live key validates as healthy").toBe("healthy");
           expect(healthy.httpStatus, "the probe saw the 200").toBe(200);
@@ -270,7 +275,12 @@ scenario(
 
           // A revoked / wrong key validates as expired, with no identity.
           const expired = yield* client.connections.validate({
-            payload: { owner: "org", integration: slug, template: TEMPLATE, value: "wrong-key" },
+            payload: {
+              owner: "org",
+              integration: slug,
+              template: TEMPLATE,
+              value: Redacted.make("wrong-key"),
+            },
           });
           expect(expired.status, "a rejected key validates as expired").toBe("expired");
           expect(expired.httpStatus, "the probe saw the 401").toBe(401);
@@ -312,7 +322,7 @@ scenario(
               name,
               integration: slug,
               template: TEMPLATE,
-              value: goodToken,
+              value: Redacted.make(goodToken),
             },
           });
           const healthy = yield* client.connections.checkHealth({
@@ -331,7 +341,7 @@ scenario(
               name,
               integration: slug,
               template: TEMPLATE,
-              value: "rotated-away",
+              value: Redacted.make("rotated-away"),
             },
           });
           const expired = yield* client.connections.checkHealth({
@@ -444,7 +454,7 @@ scenario(
               name,
               integration: slug,
               template: TEMPLATE,
-              value: goodToken,
+              value: Redacted.make(goodToken),
             },
           });
           const result = yield* client.connections.checkHealth({
@@ -501,7 +511,7 @@ scenario(
               name,
               integration: slug,
               template: TEMPLATE,
-              value: goodToken,
+              value: Redacted.make(goodToken),
             },
           });
 
@@ -584,7 +594,7 @@ scenario(
               name,
               integration: slug,
               template: TEMPLATE,
-              value: secret,
+              value: Redacted.make(secret),
             },
           });
 
@@ -638,7 +648,7 @@ scenario(
               name,
               integration: slug,
               template: TEMPLATE,
-              value: goodToken,
+              value: Redacted.make(goodToken),
             },
           });
 
@@ -655,7 +665,7 @@ scenario(
               name,
               integration: slug,
               template: TEMPLATE,
-              value: "rotated-away",
+              value: Redacted.make("rotated-away"),
             },
           });
 

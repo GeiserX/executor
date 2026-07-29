@@ -9,6 +9,7 @@ import {
 } from "react";
 import { useAtomSet } from "@effect/atom-react";
 import * as Exit from "effect/Exit";
+import * as Redacted from "effect/Redacted";
 
 import { createConnection } from "../api/atoms";
 import { connectionWriteKeys } from "../api/reactivity-keys";
@@ -156,7 +157,9 @@ function SecretFormProvider(props: SecretFormProviderProps) {
         integration,
         template,
         identityLabel: displayName || id.trim(),
-        value: state.value.trim(),
+        // Wrapped as it leaves the form; `canSubmit` already rejected an empty
+        // field, which a `Redacted` could no longer be tested for (all truthy).
+        value: Redacted.make(state.value.trim()),
       },
       reactivityKeys: connectionWriteKeys,
     });

@@ -8,7 +8,7 @@
 import { randomBytes } from "node:crypto";
 
 import { expect } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Redacted } from "effect";
 import type { HttpApiClient } from "effect/unstable/httpapi";
 import { composePluginApi } from "@executor-js/api/server";
 import { openApiHttpPlugin } from "@executor-js/plugin-openapi/api";
@@ -76,7 +76,7 @@ scenario(
         integration,
         template: TEMPLATE_API_KEY,
         identityLabel: "My API Token",
-        value: secretValue,
+        value: Redacted.make(secretValue),
       },
     });
     expect(created.name, "create returns the stored connection name").toBe(name);
@@ -119,7 +119,7 @@ scenario(
         integration,
         template: TEMPLATE_API_KEY,
         identityLabel: "first key",
-        value: "first-value",
+        value: Redacted.make("first-value"),
       },
     });
     const first = yield* client.connections.list({ query: { integration } });
@@ -135,7 +135,7 @@ scenario(
         integration,
         template: TEMPLATE_API_KEY,
         identityLabel: "rotated key",
-        value: "second-value",
+        value: Redacted.make("second-value"),
       },
     });
     const second = yield* client.connections.list({ query: { integration } });
@@ -158,7 +158,13 @@ scenario(
     const name = freshConnectionName();
 
     yield* client.connections.create({
-      payload: { owner: "org", name, integration, template: TEMPLATE_API_KEY, value: "v" },
+      payload: {
+        owner: "org",
+        name,
+        integration,
+        template: TEMPLATE_API_KEY,
+        value: Redacted.make("v"),
+      },
     });
 
     const removed = yield* client.connections.remove({

@@ -8,7 +8,7 @@
 // ---------------------------------------------------------------------------
 
 import { HttpApiEndpoint, HttpApiGroup } from "effect/unstable/httpapi";
-import { Predicate, Schema } from "effect";
+import { Predicate, Redacted, Schema, SchemaGetter } from "effect";
 
 import {
   AuthTemplateSlug,
@@ -96,10 +96,21 @@ const UpdateConnectionPayload = Schema.Struct({
   identityLabel: Schema.optional(Schema.NullOr(Schema.String)),
 });
 
-const CreateConnectionPayload = Schema.Struct({
+// The user-pasted credential, wrapped the instant it is decoded so nothing
+// downstream of this line handles it bare. Hand-rolled rather than
+// `Schema.Redacted`, whose encode is forbidden: this same schema encodes on the
+// browser client that SENDS the credential, so the encode side is required.
+const PastedSecret = Schema.String.pipe(
+  Schema.decodeTo(Schema.Redacted(Schema.String), {
+    decode: SchemaGetter.transform(Redacted.make<string>),
+    encode: SchemaGetter.transform(Redacted.value<string>),
+  }),
+);
+
+export const CreateConnectionPayload = Schema.Struct({
   ...CommonCreateFields,
-  value: Schema.optional(Schema.String),
-  values: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  value: Schema.optional(PastedSecret),
+  values: Schema.optional(Schema.Record(Schema.String, PastedSecret)),
   from: Schema.optional(
     Schema.Struct({
       provider: ProviderKey,
@@ -123,8 +134,8 @@ const ValidateConnectionPayload = Schema.Struct({
   integration: IntegrationSlug,
   template: AuthTemplateSlug,
   spec: Schema.optional(HealthCheckSpec),
-  value: Schema.optional(Schema.String),
-  values: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  value: Schema.optional(PastedSecret),
+  values: Schema.optional(Schema.Record(Schema.String, PastedSecret)),
   from: Schema.optional(
     Schema.Struct({
       provider: ProviderKey,

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
+import { Redacted } from "effect";
 import {
   AuthTemplateSlug,
   IntegrationSlug,
@@ -212,29 +213,41 @@ describe("mergeCustomMethods (in-session custom method append)", () => {
   });
 });
 
+// Unwrap for assertions: comparing `Redacted`s structurally would compare two
+// opaque wrappers and pass even if the payload carried the wrong secret.
+const pastedValues = (origin: ReturnType<typeof createCredentialPayloadOrigin>) => {
+  if (origin === null || !("values" in origin)) throw new Error("expected a pasted-values origin");
+  return Object.fromEntries(
+    Object.entries(origin.values).map(([key, value]) => [key, Redacted.value(value)]),
+  );
+};
+
 describe("createCredentialPayloadOrigin", () => {
   it("creates an empty-string sentinel value for no-auth connection methods", () => {
     expect(
-      createCredentialPayloadOrigin({
-        origin: "paste",
-        inputs: [],
-        values: {},
-        onePasswordItemId: "",
-        singleInput: true,
-      }),
-    ).toEqual({ values: { token: "" } });
+      pastedValues(
+        createCredentialPayloadOrigin({
+          origin: "paste",
+          inputs: [],
+          values: {},
+          onePasswordItemId: "",
+          singleInput: true,
+        }),
+      ),
+    ).toEqual({ token: "" });
   });
 
   it("keeps pasted credential values trimmed and keyed by input variable", () => {
-    expect(
-      createCredentialPayloadOrigin({
-        origin: "paste",
-        inputs: [{ variable: "token", label: "Authorization" }],
-        values: { token: "  secret-token  " },
-        onePasswordItemId: "",
-        singleInput: true,
-      }),
-    ).toEqual({ values: { token: "secret-token" } });
+    const origin = createCredentialPayloadOrigin({
+      origin: "paste",
+      inputs: [{ variable: "token", label: "Authorization" }],
+      values: { token: "  secret-token  " },
+      onePasswordItemId: "",
+      singleInput: true,
+    });
+    expect(pastedValues(origin)).toEqual({ token: "secret-token" });
+    // Wrapped on the way out, so browser state never holds the bare key.
+    expect(JSON.stringify(origin)).not.toContain("secret-token");
   });
 
   it("creates a 1Password external origin for single-input methods", () => {
