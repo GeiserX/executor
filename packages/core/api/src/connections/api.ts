@@ -103,6 +103,7 @@ const UpdateConnectionPayload = Schema.Struct({
 const PastedSecret = Schema.String.pipe(
   Schema.decodeTo(Schema.Redacted(Schema.String), {
     decode: SchemaGetter.transform(Redacted.make<string>),
+    // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: the encode side of the wire codec; the transport is the only place it is bare
     encode: SchemaGetter.transform(Redacted.value<string>),
   }),
 );

@@ -87,6 +87,7 @@ export function oauthClientSecretFromInput(
   value: string | Redacted.Redacted<string> | null | undefined,
 ): string | Redacted.Redacted<string> | null {
   if (value == null) return null;
+  // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: only the length is read; the wrapper is what is returned
   const literal = Redacted.isRedacted(value) ? Redacted.value(value) : value;
   return literal.length === 0 ? null : value;
 }

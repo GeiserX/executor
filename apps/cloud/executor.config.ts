@@ -155,8 +155,12 @@ export default defineExecutorConfig({
         allowPrivateGitHosts: allowLocalNetwork === true,
       }),
       toolkitsPlugin({ activeToolkitSlug }),
+      // Neither credentials nor an injected client is a misconfiguration, not a
+      // mode: passing empty ones would build a vault client that 401s on the
+      // first credential read. Omitting both lets the plugin fail at startup,
+      // which is where a missing WORKOS_* binding belongs.
       workosVaultPlugin({
-        credentials: workosCredentials ?? { apiKey: "", clientId: "" },
+        ...(workosCredentials ? { credentials: workosCredentials } : {}),
         ...(workosVaultClient ? { client: workosVaultClient } : {}),
       }),
     ] as const,

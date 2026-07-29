@@ -41,6 +41,7 @@ export const makeCredentialScrubber = (
 ): CredentialScrubber => {
   const secrets = Object.values(values)
     .filter(Predicate.isNotNull)
+    // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: the plaintext is the needle to strip out; it is only ever compared, never emitted
     .map(Redacted.value)
     .filter((secret) => secret.length > 0)
     .sort((a, b) => b.length - a.length);

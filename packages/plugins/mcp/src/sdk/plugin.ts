@@ -517,6 +517,7 @@ const makeOAuthProvider = (accessToken: Redacted.Redacted<string>): OAuthClientP
   // to the transport's Authorization header and its type is a plain string, so
   // the token must be unwrapped to cross into third-party code. Kept inside the
   // accessor so the unwrapped value exists only for the duration of a dial.
+  // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: the MCP SDK's OAuthClientProvider hands `access_token` straight to the transport's Authorization header
   tokens: () => ({ access_token: Redacted.value(accessToken), token_type: "Bearer" }),
   saveTokens: () => undefined,
   redirectToAuthorization: async () => {
@@ -585,6 +586,7 @@ const buildConnectorInput = (
         const value = values[variable];
         // Boundary: the child process's environment block is a wire format —
         // it takes strings. This is the stdio twin of `renderPlacementValue`.
+        // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: the child process's environment block is a wire format
         if (value != null) env[variable] = Redacted.value(value);
       }
     }
@@ -653,6 +655,7 @@ const credentialIdentity = (
     Object.fromEntries(
       Object.entries(values).map(([variable, value]) => [
         variable,
+        // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: the pool key must differ when the credential differs; it never leaves this process
         value === null ? null : Redacted.value(value),
       ]),
     ),

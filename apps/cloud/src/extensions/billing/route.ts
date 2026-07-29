@@ -76,6 +76,20 @@ const handler = Effect.gen(function* () {
         )
       : undefined;
 
+  // An empty secret key is not a spelling of "no billing backend": autumn-js
+  // would accept it and every upstream call would 401, which surfaces as a
+  // billing failure rather than the misconfiguration it is. `AutumnService`
+  // degrades to a no-op tracker on the same missing key; this route has no
+  // no-op mode, so it fails loudly instead.
+  const secretKey = env.AUTUMN_SECRET_KEY;
+  if (!secretKey) {
+    return yield* new HttpResponseError({
+      status: 503,
+      code: "billing_not_configured",
+      message: "Billing is not configured",
+    });
+  }
+
   const { statusCode, response } = yield* Effect.promise(() =>
     autumnHandler({
       request: {
@@ -89,7 +103,7 @@ const handler = Effect.gen(function* () {
         email: session.email,
       },
       clientOptions: {
-        secretKey: env.AUTUMN_SECRET_KEY ?? "",
+        secretKey,
         // autumn-js's handler reads `baseURL` to override the Autumn endpoint
         // (not `serverURL`, which it silently ignores). Without this, a non-prod
         // AUTUMN_API_URL (the e2e emulator, a self-hosted Autumn) is dropped and

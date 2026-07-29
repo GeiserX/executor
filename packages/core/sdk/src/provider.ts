@@ -54,4 +54,5 @@ export interface CredentialProvider {
  *  "<redacted>", so a value that reaches a backend still wrapped is persisted as
  *  that literal instead of failing. */
 export const credentialValueToWrite = (value: string | Redacted.Redacted<string>): string =>
+  // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: THE serialization line every provider backend's `set` writes through
   Redacted.isRedacted(value) ? Redacted.value(value) : value;

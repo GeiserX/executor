@@ -614,7 +614,8 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
       if (
         input.clientSecret != null &&
         (Redacted.isRedacted(input.clientSecret)
-          ? Redacted.value(input.clientSecret)
+          ? // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: emptiness check only; every `Redacted` is truthy so the wrapper cannot answer it
+            Redacted.value(input.clientSecret)
           : input.clientSecret) === ""
       ) {
         return yield* new StorageError({
@@ -1050,7 +1051,9 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
                   ProviderItemId.make(String(row.client_secret_item_id)),
                 );
                 clientSecret =
-                  stored !== null && oauthClientSecretFromInput(Redacted.value(stored)) !== null
+                  stored !== null &&
+                  // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: emptiness check only; the wrapper is what is assigned
+                  oauthClientSecretFromInput(Redacted.value(stored)) !== null
                     ? stored
                     : null;
               }
@@ -1196,6 +1199,7 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
       // the authorize URL, and returned to the caller so `complete` can quote
       // it. It cannot stay wrapped, so the unwrap happens here at the branded-id
       // constructor rather than being spread across those call sites.
+      // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: `OAuthState` is a correlation key matched by equality and echoed in the authorize URL
       const state = OAuthState.make(Redacted.value(createOAuthState()));
       const providerState = encodeOAuthCallbackState({
         state: String(state),
@@ -1219,6 +1223,7 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
           // "<redacted>", so a missed unwrap here would silently store that
           // literal and every later `complete` would fail PKCE validation.
           // (The column itself is plaintext; encrypting it is a separate change.)
+          // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: the `oauth_session.pkce_verifier` persistence line
           pkce_verifier: Redacted.value(verifier),
           identity_label: input.identityLabel ?? null,
           // Persist the requested scope set (declared ∪ client, filtered to the

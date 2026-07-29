@@ -179,6 +179,7 @@ export class McpOrganizationAuth extends Context.Service<
 // Unwrapped for the signature check itself — jose verifies the token's own
 // bytes; nothing derived from them is retained.
 const verifyJwt = (token: Redacted.Redacted<string>) =>
+  // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: jose verifies the token's own bytes
   verifyWorkOSMcpAccessToken(Redacted.value(token), jwks, {
     issuer: AUTHKIT_DOMAIN,
     audience: WORKOS_CLIENT_ID,

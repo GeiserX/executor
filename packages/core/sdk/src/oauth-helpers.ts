@@ -50,6 +50,7 @@ export type OAuth2SecretInput = string | Redacted.Redacted<string>;
 /** Unwrap at an allowlisted boundary: `oauth4webapi` takes bare strings and puts
  *  them on the wire. Every call site is a form field or an HTTP header. */
 const secretToSend = (value: OAuth2SecretInput): string =>
+  // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: `oauth4webapi` takes bare strings; every call site is a form field or an HTTP header
   Redacted.isRedacted(value) ? Redacted.value(value) : value;
 
 export type OAuth2TokenResponse = {

@@ -112,6 +112,7 @@ const resolveJwtPrincipal = (token: Redacted.Redacted<string>, jwt: JwtBearerCon
   Effect.gen(function* () {
     // Unwrapped for the signature check itself — jose verifies the token's own
     // bytes; nothing derived from them is retained.
+    // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: jose verifies the token's own bytes
     const verified = yield* verifyWorkosUserManagementToken(Redacted.value(token), jwt.jwks).pipe(
       Effect.catchTag("McpJwtVerificationError", (error) =>
         Effect.fail(

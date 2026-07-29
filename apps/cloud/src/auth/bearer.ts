@@ -45,4 +45,5 @@ export const bearerCredential = (request: Request): BearerCredential => {
  *  dispatch on. Reads the plaintext to count segments and retains none of it,
  *  so the call sites stay `Redacted`-only. */
 export const isJwtBearer = (token: Redacted.Redacted<string>): boolean =>
+  // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: the shape of the credential is the dispatch key; only the segment count escapes
   Redacted.value(token).split(".").length === 3;

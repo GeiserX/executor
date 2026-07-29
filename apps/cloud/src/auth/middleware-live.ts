@@ -27,6 +27,7 @@ export const SessionAuthLive = Layer.effect(
       cookie: (httpEffect, { credential }) =>
         Effect.gen(function* () {
           const result = yield* workos
+            // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: the WorkOS SDK unseals the cookie itself and takes the sealed string
             .authenticateSealedSession(Redacted.value(credential))
             .pipe(Effect.orElseSucceed(() => null));
 
@@ -52,6 +53,7 @@ export const SessionAuthLive = Layer.effect(
             },
           };
 
+          // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: `Session.sealedSession` is re-set as a Set-Cookie header, so it holds the sealed string
           const session = sessionFromSealed(result, Redacted.value(credential));
           const response = yield* httpEffect.pipe(
             Effect.provideService(SessionContext, session),
@@ -74,6 +76,7 @@ export const OrgAuthLive = Layer.effect(
       cookie: (httpEffect, { credential }) =>
         Effect.gen(function* () {
           const result = yield* workos
+            // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: the WorkOS SDK unseals the cookie itself and takes the sealed string
             .authenticateSealedSession(Redacted.value(credential))
             .pipe(Effect.orElseSucceed(() => null));
 
@@ -85,6 +88,7 @@ export const OrgAuthLive = Layer.effect(
             return yield* Effect.fail(new NoOrganization());
           }
 
+          // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: `Session.sealedSession` is re-set as a Set-Cookie header, so it holds the sealed string
           const session = sessionFromSealed(result, Redacted.value(credential));
           const auth = {
             accountId: session.accountId,

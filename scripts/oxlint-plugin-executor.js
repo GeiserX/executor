@@ -18,6 +18,7 @@ import noPromiseReject from "./oxlint-plugin-executor/rules/no-promise-reject.js
 import noRawDurableObjectId from "./oxlint-plugin-executor/rules/no-raw-durable-object-id.js";
 import noRawFetch from "./oxlint-plugin-executor/rules/no-raw-fetch.js";
 import noRawErrorThrow from "./oxlint-plugin-executor/rules/no-raw-error-throw.js";
+import noRedactedUnwrap from "./oxlint-plugin-executor/rules/no-redacted-unwrap.js";
 import noRedundantPrimitiveCast from "./oxlint-plugin-executor/rules/no-redundant-primitive-cast.js";
 import noRedundantErrorFactory from "./oxlint-plugin-executor/rules/no-redundant-error-factory.js";
 import noSchemaClass from "./oxlint-plugin-executor/rules/no-schema-class.js";
@@ -62,6 +63,7 @@ export default {
     "no-raw-durable-object-id": noRawDurableObjectId,
     "no-raw-fetch": noRawFetch,
     "no-raw-error-throw": noRawErrorThrow,
+    "no-redacted-unwrap": noRedactedUnwrap,
     "no-redundant-primitive-cast": noRedundantPrimitiveCast,
     "no-redundant-error-factory": noRedundantErrorFactory,
     "no-schema-class": noSchemaClass,

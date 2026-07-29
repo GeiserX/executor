@@ -125,6 +125,7 @@ export type DynamicClientMetadata = {
 const RedactedString = Schema.String.pipe(
   Schema.decodeTo(Schema.Redacted(Schema.String), {
     decode: SchemaGetter.transform(Redacted.make<string>),
+    // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: the encode side of the DCR client-information codec, which round-trips through the cache
     encode: SchemaGetter.transform(Redacted.value<string>),
   }),
 );
@@ -542,9 +543,9 @@ export const registerDynamicClient = (
       accept: "application/json",
     };
     if (input.initialAccessToken != null) {
-      // Boundary: the RFC 7591 initial access token goes out as a bearer header.
       const token = Redacted.isRedacted(input.initialAccessToken)
-        ? Redacted.value(input.initialAccessToken)
+        ? // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: the RFC 7591 initial access token goes out as a bearer header
+          Redacted.value(input.initialAccessToken)
         : input.initialAccessToken;
       if (token.length > 0) headers.authorization = `Bearer ${token}`;
     }

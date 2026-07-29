@@ -679,6 +679,7 @@ export const invokeOpenApiBackedTool = (input: {
     if (template) {
       const missing = requiredTemplateVariables(template).filter((name) => {
         const value = input.credential.values[name];
+        // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: emptiness check only; `Redacted.make("")` is truthy so the wrapper cannot answer it
         return value == null || Redacted.value(value) === "";
       });
       if (missing.length > 0) {
@@ -933,6 +934,7 @@ export const checkHealthOpenApi = (input: {
     if (template) {
       const missing = requiredTemplateVariables(template).filter((name) => {
         const value = input.credential.values[name];
+        // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: emptiness check only; `Redacted.make("")` is truthy so the wrapper cannot answer it
         return value == null || Redacted.value(value) === "";
       });
       if (missing.length > 0) {

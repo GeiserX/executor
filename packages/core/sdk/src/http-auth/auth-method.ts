@@ -92,6 +92,7 @@ const renderPlacementValue = (
   if (placement.literal !== undefined) return placement.literal;
   const wrapped = values[placement.variable ?? TOKEN_VARIABLE];
   if (wrapped == null) return null;
+  // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: THE unwrap line for HTTP plugins; the string produced here goes straight onto the outbound request
   const value = Redacted.value(wrapped);
   return placement.prefix ? `${placement.prefix}${value}` : value;
 };

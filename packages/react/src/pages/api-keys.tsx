@@ -106,6 +106,7 @@ export function ApiKeysPage() {
   // create dialog, and the user cannot copy a "<redacted>" rendering. Scoped to
   // the dialog's lifetime — `closeCreate` drops `createdKey`, so the plaintext
   // is gone as soon as the dialog closes.
+  // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: the one-time display is the whole point of the create dialog; scoped to its lifetime
   const createdKeyPlaintext = createdKey ? Redacted.value(createdKey.value) : null;
 
   const closeCreate = (open: boolean) => {

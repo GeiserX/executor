@@ -521,6 +521,7 @@ const make = Effect.gen(function* () {
      */
     validateApiKey: (value: Redacted.Redacted<string>) =>
       use(
+        // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: WorkOS has to receive the caller's actual key to answer whether it is valid
         (wos) => wos.apiKeys.validateApiKey({ value: Redacted.value(value) }) as Promise<unknown>,
       ),
 

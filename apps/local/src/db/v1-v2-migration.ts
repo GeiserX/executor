@@ -676,6 +676,7 @@ const providerGet = async (
     // The migration re-persists the value under its v2 id, so it needs the
     // plaintext here and nowhere else.
     const value = await Effect.runPromise(oldProvider.get(secretId as never));
+    // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: the v1 plaintext is re-persisted under its v2 id
     return value === null ? null : Redacted.value(value);
   }
   return null;

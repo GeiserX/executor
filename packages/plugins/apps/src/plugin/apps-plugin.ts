@@ -262,6 +262,7 @@ const gitTokenFor = (
         ProviderKey.make(config.tokenProvider),
         ProviderItemId.make(config.tokenItemId),
       );
+      // oxlint-disable-next-line executor/no-redacted-unwrap -- boundary: the git source API takes a bare bearer token
       return token === null ? null : Redacted.value(token);
     }
     return null;
