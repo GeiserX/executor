@@ -181,7 +181,7 @@ export const definition = pgTable(
     integration: varchar("integration", { length: 255 }).notNull(),
     connection: varchar("connection", { length: 255 }).notNull(),
     plugin_id: text("plugin_id").notNull(),
-    name: varchar("name", { length: 255 }).notNull(),
+    name: text("name").notNull(),
     schema: json("schema").notNull(),
     created_at: timestamp("created_at").notNull(),
     row_id: varchar("row_id", { length: 255 })

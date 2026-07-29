@@ -336,7 +336,12 @@ export const coreTables = defineTables({
       integration: keyColumn("integration"),
       connection: keyColumn("connection"),
       plugin_id: textColumn("plugin_id"),
-      name: keyColumn("name"),
+      // text, NOT keyColumn: $def names exceed 255 chars in production (deep
+      // OpenAPI component paths), and the live cloud column has been TEXT
+      // since the baseline was patched for it. A varchar(255) here re-emits a
+      // narrowing ALTER on every drizzle-kit generate, which fails on real
+      // rows (22001) — that drift broke cloud migration 0013 once already.
+      name: textColumn("name"),
       schema: jsonColumn("schema"),
       created_at: dateColumn("created_at"),
     },

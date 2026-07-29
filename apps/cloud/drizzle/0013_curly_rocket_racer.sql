@@ -11,5 +11,4 @@ CREATE TABLE "artifact" (
 	"subject" varchar(255) NOT NULL
 );
 --> statement-breakpoint
-ALTER TABLE "definition" ALTER COLUMN "name" SET DATA TYPE varchar(255);--> statement-breakpoint
 CREATE UNIQUE INDEX "artifact_uidx" ON "artifact" USING btree ("tenant","owner","subject","id");
