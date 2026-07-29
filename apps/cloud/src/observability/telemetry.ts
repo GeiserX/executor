@@ -45,6 +45,8 @@ import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from "@opentelemetry/semantic
 import { env } from "cloudflare:workers";
 import { Effect, Layer } from "effect";
 
+import { RedactedHeaderNamesLive } from "@executor-js/sdk/http-auth";
+
 import {
   CountingSpanExporter,
   CountingSpanProcessor,
@@ -129,6 +131,10 @@ export const flushTracerProvider = async (): Promise<void> => {
   }
 };
 
+// The widened redacted-header list travels WITH the tracer, not just with the
+// app layer: the MCP worker handler and the session Durable Object each run
+// their programs under this layer directly (`Effect.runPromise` from the raw
+// worker entry), and those fibers open client spans too.
 const makeTelemetryLive = (): Layer.Layer<never> =>
   Layer.unwrap(
     Effect.sync(() =>
@@ -137,8 +143,9 @@ const makeTelemetryLive = (): Layer.Layer<never> =>
             Layer.provide(
               Resource.layer({ serviceName: SERVICE_NAME, serviceVersion: SERVICE_VERSION }),
             ),
+            Layer.merge(RedactedHeaderNamesLive),
           )
-        : Layer.empty,
+        : RedactedHeaderNamesLive,
     ),
   );
 

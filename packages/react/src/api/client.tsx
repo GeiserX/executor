@@ -4,6 +4,7 @@ import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/
 import * as HttpClientError from "effect/unstable/http/HttpClientError";
 import { OtlpSerialization, OtlpTracer } from "effect/unstable/observability";
 import { ExecutorApi } from "@executor-js/api/client";
+import { RedactedHeaderNamesLive } from "@executor-js/sdk/http-auth";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -11,6 +12,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import { reportHandledFrontendError } from "./error-reporting";
+import { layerRedacted } from "./otlp-redaction";
 import { notifyLocalAuthRequired } from "./local-auth";
 import {
   EXECUTOR_ORG_HEADER,
@@ -105,8 +107,20 @@ if (otlpTracesUrl && typeof document !== "undefined" && Math.random() < otlpSamp
         // Browser sessions are short; the 5s default loses the tail spans
         // when the tab closes.
         exportInterval: "1 second",
-      }).pipe(Layer.provide(OtlpSerialization.layerJson), Layer.provide(FetchHttpClient.layer)),
+      }).pipe(
+        // The browser's spans go to the same Axiom dataset the worker's do, so
+        // they get the same scrub: HttpClient stamps `url.full`/`url.query` on
+        // every API request, and a failed span carries the interpolated message
+        // and cause as event text. Wrapping the serializer is the browser's
+        // equivalent of the worker's outermost span processor.
+        Layer.provide(layerRedacted(OtlpSerialization.layerJson)),
+        Layer.provide(FetchHttpClient.layer),
+      ),
       Layer.succeed(HttpClient.TracerDisabledWhen, (request) => request.url.includes("/v1/traces")),
+      // Widen the header names the tracer wraps: an integration's API key rides
+      // on whatever header its auth placement names, and Effect's default list
+      // is only authorization/cookie/set-cookie/x-api-key.
+      RedactedHeaderNamesLive,
     ),
   );
 }

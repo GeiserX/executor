@@ -102,7 +102,21 @@ describe("oauth callback telemetry", () => {
       const serverSpan = spans.find((span) => span.name.startsWith("http.server"));
       expect(serverSpan).toBeDefined();
 
-      const serialized = JSON.stringify(spans.map((span) => span.attributes));
+      // Every surface that leaves the isolate, not just the attributes: a
+      // failed span carries the grant a second time through its exception
+      // events and status message (Effect's tracer logger and the OTel bridge's
+      // recordException), which an attribute-only assertion cannot see. Named
+      // fields rather than the whole `ReadableSpan` because the SDK's span
+      // objects hold a back-reference to their processor and do not serialize.
+      const serialized = JSON.stringify(
+        spans.map((span) => ({
+          name: span.name,
+          attributes: span.attributes,
+          events: span.events,
+          status: span.status,
+          links: span.links,
+        })),
+      );
       expect(serialized).not.toContain(CODE);
       expect(serialized).not.toContain(STATE);
 

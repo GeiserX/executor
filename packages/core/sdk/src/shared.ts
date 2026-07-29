@@ -179,3 +179,22 @@ export {
   type OAuthPopupResult,
   isOAuthPopupResult,
 } from "./oauth-popup-types";
+
+// Span-value redaction. Browser-safe on purpose: the web client's OTLP
+// exporter and the Workers isolates' OTel span processor apply the SAME
+// policy, so it cannot live in either isolate.
+export {
+  MAX_SPAN_TEXT_CHARS,
+  SPAN_QUERY_ATTRIBUTE,
+  SPAN_URL_ATTRIBUTES,
+  STRIPPED_QUERY_ATTRIBUTE,
+  redactQuery,
+  redactSensitiveKeyValuesInText,
+  redactSpanUrlAttribute,
+  redactSpanUrlAttributes,
+  redactUrl,
+  redactUrlQueryInText,
+  scrubSpanText,
+  truncateSpanText,
+  type SpanRedaction,
+} from "./span-redaction";

@@ -1,6 +1,6 @@
 import { Effect, Exit, Fiber, Layer, Option, Schema, Stream } from "effect";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
-import type { ToolFileValue } from "@executor-js/sdk/core";
+import { endpointForTelemetry, type ToolFileValue } from "@executor-js/sdk/core";
 
 import { OpenApiInvocationError } from "./errors";
 import { isNdjsonMediaType, NDJSON_MEDIA_TYPES, resolveServerUrl } from "./openapi-utils";
@@ -1293,7 +1293,10 @@ export const invokeWithLayer = (
       attributes: {
         "plugin.openapi.method": operation.method.toUpperCase(),
         "plugin.openapi.path_template": operation.pathTemplate,
-        "plugin.openapi.base_url": effectiveBaseUrl,
+        // The connection's `baseUrl` is a user-supplied URL from the same class
+        // as the mcp/graphql endpoints: it may carry `?token=…` or `user:pass@`
+        // userinfo. Sanitize before stamping.
+        "plugin.openapi.base_url": endpointForTelemetry(effectiveBaseUrl),
       },
     }),
   );

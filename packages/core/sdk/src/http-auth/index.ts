@@ -14,6 +14,10 @@ export {
   type RenderedAuthPlacements,
 } from "./auth-method";
 
+// Tracer header redaction — a placement can mint any header name, so the
+// tracer's redacted-name list has to be widened past Effect's default.
+export { REDACTED_HEADER_NAMES, RedactedHeaderNamesLive } from "./redacted-headers";
+
 // Request-shaped authoring dialect — accepted on every plugin's auth inputs,
 // normalized to canonical placements at the boundary.
 export {

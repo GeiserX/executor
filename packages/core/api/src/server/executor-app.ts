@@ -43,6 +43,7 @@ import { HttpRouter } from "effect/unstable/http";
 import { Effect, Layer } from "effect";
 
 import type { AnyPlugin } from "@executor-js/sdk";
+import { RedactedHeaderNamesLive } from "@executor-js/sdk/http-auth";
 import type { DbProvider } from "./executor-fuma-db";
 import { HostConfig } from "./scoped-executor";
 import type { PluginsProvider } from "./scoped-executor";
@@ -584,7 +585,16 @@ export const make = <
   // socket ONCE at boot. It is folded into the execution-stack middleware (above)
   // and into the account middleware + extension routes (the host self-combines
   // those) so each rebuilds per request. `boot` is the long-lived context.
-  const appLayer: AppRouteLayer = merged.pipe(Layer.provideMerge(options.boot));
+  //
+  // `RedactedHeaderNamesLive` rides on `boot` so it reaches every fiber this
+  // host serves: `HttpMiddleware.tracer` reads `Headers.CurrentRedactedNames`
+  // for the inbound span, and every outbound `HttpClient` built under the same
+  // context reads it for the client span. Effect's default list stops at
+  // authorization/cookie/set-cookie/x-api-key, which is narrower than the
+  // header names an integration's auth placement can mint.
+  const appLayer: AppRouteLayer = merged.pipe(
+    Layer.provideMerge(Layer.merge(options.boot, RedactedHeaderNamesLive)),
+  );
 
   return {
     api: protectedApi.api,

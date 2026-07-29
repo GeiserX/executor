@@ -19,6 +19,7 @@ import {
   type ResumeFallbackOutcome,
 } from "@executor-js/host-mcp/tool-server";
 import { defaultMcpResource, type McpResource } from "@executor-js/host-mcp";
+import { scrubSpanText } from "@executor-js/sdk/shared";
 
 import type { IncomingPropagationHeaders, McpElicitationMode } from "./do-headers";
 import type {
@@ -35,6 +36,26 @@ import {
 } from "./session-alarm-policy";
 
 export type IncomingTraceHeaders = IncomingPropagationHeaders;
+
+/** The `exception.*` attributes for a failing cause, or `null` when the cause
+ *  carries no error.
+ *
+ *  These land as plain span ATTRIBUTES, not as exception events and not as URL
+ *  attributes, so neither the URL scrubber nor the event scrub at the export
+ *  seam reaches them: the message and the pretty cause are free text that may
+ *  quote an upstream request URL with its query string, and the pretty cause is
+ *  unbounded. `scrubSpanText` is the same policy the export seam applies to
+ *  event text. */
+export const causeSpanAttributes = (cause: Cause.Cause<unknown>): Record<string, string> | null => {
+  const errors = Cause.prettyErrors(cause);
+  if (errors.length === 0) return null;
+  const first = errors[0];
+  return {
+    "exception.type": first?.name ?? "Error",
+    "exception.message": scrubSpanText(first?.message ?? "unknown"),
+    "exception.stacktrace": scrubSpanText(Cause.pretty(cause)),
+  };
+};
 
 export interface McpSessionInit {
   readonly organizationId: string;
@@ -471,14 +492,8 @@ export abstract class McpAgentSessionDOBase<
   }
 
   private recordCauseOnSpan(cause: Cause.Cause<unknown>): Effect.Effect<void> {
-    const errors = Cause.prettyErrors(cause);
-    if (errors.length === 0) return Effect.void;
-    const first = errors[0];
-    return Effect.annotateCurrentSpan({
-      "exception.type": first?.name ?? "Error",
-      "exception.message": first?.message ?? "unknown",
-      "exception.stacktrace": Cause.pretty(cause),
-    });
+    const attributes = causeSpanAttributes(cause);
+    return attributes === null ? Effect.void : Effect.annotateCurrentSpan(attributes);
   }
 
   private logExecutionOwnerDirectoryFailure(input: {
