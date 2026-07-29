@@ -462,11 +462,11 @@
       "name": "@executor-js/analytics",
       "version": "0.1.0",
       "dependencies": {
+        "@effect/platform-node": "catalog:",
         "@executor-js/execution": "workspace:*",
         "effect": "catalog:",
       },
       "devDependencies": {
-        "@effect/platform-node": "catalog:",
         "@effect/vitest": "catalog:",
         "@executor-js/sdk": "workspace:*",
         "tsup": "catalog:",
