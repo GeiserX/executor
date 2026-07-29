@@ -13,8 +13,11 @@
 //   - Never secrets, tokens, credentials, code, tool arguments or results.
 //   - Never user free text: no connection names, no tool addresses, no
 //     toolkit slugs (user-entered labels — send booleans/counts instead).
-//   - Integration slugs and plugin keys ARE allowed (spec-derived vocabulary,
-//     matching the browser catalog's `integration_slug` / `plugin_key`).
+//   - Plugin keys (`openapi`, `mcp`, `graphql`, ...) ARE allowed: a fixed,
+//     product-defined vocabulary. Integration slugs are NOT — stricter than
+//     the browser catalog: these events leave the user's own infrastructure,
+//     and WHICH integrations someone uses is their business, not ours. The
+//     kind of integration is the product question; the slug is not.
 //   - Identity is the anonymous per-install id only; no emails, no hostnames,
 //     no person or org names.
 // ---------------------------------------------------------------------------
@@ -48,15 +51,9 @@ export interface AnalyticsEvents {
     readonly toolkit: boolean;
   };
   /** An integration row was created (upsert re-registers are not counted). */
-  integration_added: {
-    readonly plugin_key: string;
-    readonly integration_slug: string;
-  };
+  integration_added: { readonly plugin_key: string };
   /** An integration was removed by the user. */
-  integration_removed: {
-    readonly plugin_key: string;
-    readonly integration_slug: string;
-  };
+  integration_removed: { readonly plugin_key: string };
   /** A generative-UI artifact was saved as a new row. */
   artifact_created: { readonly via: ArtifactVia };
   /**

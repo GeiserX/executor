@@ -58,7 +58,7 @@ export const SelfHostHostConfig: Layer.Layer<HostConfig> = Layer.sync(HostConfig
     onIntegrationChange: (event) =>
       selfHostAnalytics.record(
         event.kind === "added" ? "integration_added" : "integration_removed",
-        { plugin_key: event.pluginKey, integration_slug: String(event.slug) },
+        { plugin_key: event.pluginKey },
       ),
   };
 });

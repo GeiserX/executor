@@ -94,10 +94,7 @@ describe("Analytics", () => {
             plane: "mcp",
             toolkit: false,
           });
-          yield* analytics.record("integration_added", {
-            plugin_key: "openapi",
-            integration_slug: "github",
-          });
+          yield* analytics.record("integration_added", { plugin_key: "openapi" });
           yield* analytics.flush;
 
           const batches = yield* Ref.get(http.batches);
