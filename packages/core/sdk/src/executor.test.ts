@@ -180,6 +180,65 @@ describe("createExecutor", () => {
     }),
   );
 
+  it.effect("notifies onIntegrationChange on create and remove, not on re-register", () =>
+    Effect.gen(function* () {
+      const events: Array<{ kind: string; pluginKey: string; slug: string }> = [];
+      const executor = yield* makeTestExecutor({
+        plugins: [demoPlugin] as const,
+        onIntegrationChange: (event) =>
+          Effect.sync(() => {
+            events.push({
+              kind: event.kind,
+              pluginKey: event.pluginKey,
+              slug: String(event.slug),
+            });
+          }),
+      });
+
+      yield* executor.demo.seed();
+      expect(events).toEqual([{ kind: "added", pluginKey: "demo", slug: String(INTEG) }]);
+
+      // Upsert re-register of the same slug is not a durable change.
+      yield* executor.demo.seed();
+      expect(events).toHaveLength(1);
+
+      yield* executor.integrations.remove(INTEG);
+      expect(events).toEqual([
+        { kind: "added", pluginKey: "demo", slug: String(INTEG) },
+        { kind: "removed", pluginKey: "demo", slug: String(INTEG) },
+      ]);
+
+      // Removing an already-absent slug notifies nothing.
+      yield* executor.integrations.remove(INTEG);
+      expect(events).toHaveLength(2);
+    }),
+  );
+
+  it.effect("a failing onIntegrationChange observer never fails the operation", () =>
+    Effect.gen(function* () {
+      const executor = yield* makeTestExecutor({
+        plugins: [demoPlugin] as const,
+        onIntegrationChange: () => Effect.die("observer exploded"),
+      });
+      yield* executor.demo.seed();
+      const integrations = yield* executor.integrations.list();
+      expect(integrations.map((i) => String(i.slug))).toContain(String(INTEG));
+    }),
+  );
+
+  it.effect("a rolled-back transaction never notifies onIntegrationChange", () =>
+    Effect.gen(function* () {
+      const events: string[] = [];
+      const executor = yield* makeTestExecutor({
+        plugins: [demoPlugin] as const,
+        onIntegrationChange: (event) => Effect.sync(() => void events.push(String(event.slug))),
+      });
+      const result = yield* Effect.result(executor.demo.failAfterPluginAndCoreWrites());
+      expect(Result.isFailure(result)).toBe(true);
+      expect(events).not.toContain("tx-integration");
+    }),
+  );
+
   it.effect("projects core tools as the built-in Executor integration", () =>
     Effect.gen(function* () {
       const executor = yield* makeTestExecutor({

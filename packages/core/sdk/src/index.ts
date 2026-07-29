@@ -85,6 +85,7 @@ export type {
   AuthMethodOAuthDescriptor,
   AuthPlacementDescriptor,
   Integration,
+  IntegrationChangeEvent,
   IntegrationConfig,
   IntegrationDisplayDescriptor,
   RegisterIntegrationInput,

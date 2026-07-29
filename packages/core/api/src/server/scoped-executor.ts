@@ -40,6 +40,7 @@ import {
   Tenant,
   type AnyPlugin,
   type Executor,
+  type ExecutorConfig,
   type StorageFailure,
 } from "@executor-js/sdk";
 import {
@@ -90,6 +91,12 @@ export interface HostConfigShape {
    * detail of credential storage.
    */
   readonly exposeCredentialProviders?: boolean;
+  /**
+   * Forwarded to `ExecutorConfig.onIntegrationChange`: best-effort post-commit
+   * observation of durable integration-catalog changes (see the sdk contract).
+   * Hosts that record product analytics supply it; omitted -> no observation.
+   */
+  readonly onIntegrationChange?: ExecutorConfig["onIntegrationChange"];
 }
 
 export class HostConfig extends Context.Service<HostConfig, HostConfigShape>()(
@@ -276,6 +283,7 @@ export const makeScopedExecutor = <
       plugins,
       httpClientLayer,
       fetch: hostedFetch,
+      onIntegrationChange: config.onIntegrationChange,
       onElicitation: "accept-all",
       redirectUri,
       oauthCallbackStateOrgSlug: orgSlug,

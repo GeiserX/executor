@@ -22,6 +22,7 @@
     "@cloudflare/worker-bundler": "0.2.1",
     "@effect/atom-react": "catalog:",
     "@effect/platform-bun": "catalog:",
+    "@executor-js/analytics": "workspace:*",
     "@executor-js/api": "workspace:*",
     "@executor-js/app": "workspace:*",
     "@executor-js/execution": "workspace:*",

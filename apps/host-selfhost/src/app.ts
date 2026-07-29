@@ -14,6 +14,7 @@ import { makeSelfHostSystemApiLayer } from "./system/handlers";
 import { selfHostAccountMiddleware } from "./account";
 import { loadConfig, SELF_HOST_NAMESPACE, SELF_HOST_SCHEMA_VERSION } from "./config";
 import { createSelfHostDb, SelfHostDb, SelfHostDbProvider } from "./db/self-host-db";
+import { SelfHostAnalyticsEngineDecorator } from "./analytics";
 import {
   SelfHostCodeExecutorProvider,
   SelfHostHostConfig,
@@ -98,7 +99,12 @@ export const makeSelfHostApp = async (options: MakeSelfHostAppOptions = {}) => {
       identity: identityLayer,
       account: selfHostAccountMiddleware(betterAuth),
       db: SelfHostDbProvider,
-      engine: { codeExecutor: SelfHostCodeExecutorProvider }, // decorator defaults to no-op (no metering)
+      engine: {
+        codeExecutor: SelfHostCodeExecutorProvider,
+        // Anonymous execution analytics (this seam is the HTTP plane; the MCP
+        // plane's decorator is wired in mcp/session-store.ts's stack layer).
+        decorator: SelfHostAnalyticsEngineDecorator,
+      },
       mcp: { auth: mcp.auth, sessions: mcp.sessions, reporter: mcp.reporter },
       plugins: { provider: SelfHostPluginsProvider, config: SelfHostHostConfig },
       errorCapture: ErrorCaptureLive,

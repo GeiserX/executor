@@ -1,10 +1,12 @@
 import { Context, Data, Effect, Layer, ManagedRuntime } from "effect";
 
+import { withExecutionAnalytics } from "@executor-js/analytics";
 import { createExecutionEngine } from "@executor-js/execution";
 import { artifactUrlFor } from "@executor-js/host-mcp/create-artifact";
 import { loadMcpAppsShellHtml } from "@executor-js/mcp-apps-shell";
 import { smokeRenderArtifact } from "@executor-js/mcp-apps-shell/smoke-render";
 import { makeQuickJsExecutor } from "@executor-js/runtime-quickjs";
+import { localAnalytics } from "./analytics";
 import { makeLocalApiHandler } from "./app";
 import { createExecutorHandle, disposeExecutor, getExecutorBundle } from "./executor";
 import { createMcpRequestHandler, type McpRequestHandler } from "./mcp";
@@ -85,10 +87,17 @@ export const createServerHandlers = async (token: string): Promise<ServerHandler
     // part of the shared API). Reuse the shared boot bundle so the MCP executor is
     // byte-identical to the one the API serves.
     const { executor, webBaseUrl } = await getExecutorBundle();
-    const engine = createExecutionEngine({
-      executor,
-      codeExecutor: makeQuickJsExecutor(),
-    });
+    // Both engines below serve MCP endpoints, so the wrap binds the "mcp"
+    // plane structurally; the toolkit-scoped engine additionally marks
+    // `toolkit` (the slug itself is a user label and never recorded).
+    const engine = withExecutionAnalytics(
+      createExecutionEngine({
+        executor,
+        codeExecutor: makeQuickJsExecutor(),
+      }),
+      localAnalytics,
+      { plane: "mcp", toolkit: false },
+    );
     // The generative-UI surface, shared by every resource this daemon serves.
     // Each toolkit gets its own executor, so `artifacts` is bound per resource
     // below rather than hoisted with the rest.
@@ -127,10 +136,14 @@ export const createServerHandlers = async (token: string): Promise<ServerHandler
         const handle = await createExecutorHandle({
           activeToolkitSlug: resource.slug,
         });
-        const toolkitEngine = createExecutionEngine({
-          executor: handle.executor,
-          codeExecutor: makeQuickJsExecutor(),
-        });
+        const toolkitEngine = withExecutionAnalytics(
+          createExecutionEngine({
+            executor: handle.executor,
+            codeExecutor: makeQuickJsExecutor(),
+          }),
+          localAnalytics,
+          { plane: "mcp", toolkit: true },
+        );
         return {
           config: {
             engine: toolkitEngine,

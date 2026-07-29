@@ -22,6 +22,7 @@
   "dependencies": {
     "@effect/atom-react": "catalog:",
     "@effect/platform-node": "catalog:",
+    "@executor-js/analytics": "workspace:*",
     "@executor-js/api": "workspace:*",
     "@executor-js/app": "workspace:*",
     "@executor-js/config": "workspace:*",

@@ -7,6 +7,7 @@ import { schema as fumaSchema, type RelationsMap } from "@executor-js/fumadb/sch
 import type { AnyColumn } from "@executor-js/fumadb/schema";
 import {
   StorageError,
+  afterCommit,
   isStorageFailure,
   makeFumaClient,
   type FumaDb,
@@ -97,6 +98,7 @@ import {
 import type {
   AuthMethodDescriptor,
   Integration,
+  IntegrationChangeEvent,
   IntegrationConfig,
   IntegrationDisplayDescriptor,
   RegisterIntegrationInput,
@@ -642,6 +644,14 @@ export interface ExecutorConfig<TPlugins extends readonly AnyPlugin[] = readonly
    * config-revision re-sync still apply).
    */
   readonly toolsSyncTtlMs?: number | null;
+  /**
+   * Notified after a durable integration-catalog change commits (a row
+   * created or removed). Best-effort observation only: the notification runs
+   * AFTER the transaction, its failures are swallowed, and it cannot affect
+   * the operation's outcome. Hosts use it for product analytics; core stays
+   * analytics-agnostic.
+   */
+  readonly onIntegrationChange?: (event: IntegrationChangeEvent) => Effect.Effect<void>;
   /**
    * Opt into the PLATFORM VIEW: a read-only, tenant-wide `executor.admin`
    * surface that reads across every subject in the tenant (see
@@ -2191,6 +2201,15 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         ),
       );
 
+    // Best-effort post-commit notification for `ExecutorConfig.onIntegrationChange`.
+    // Routed through `afterCommit` so the observer sees only DURABLE changes:
+    // when the write ran inside a (possibly plugin-owned outer) transaction the
+    // notification is queued on the outermost commit and discarded on rollback.
+    // Failures and defects are swallowed so a host's analytics can never fail a
+    // catalog write.
+    const notifyIntegrationChange = (event: IntegrationChangeEvent): Effect.Effect<void> =>
+      config.onIntegrationChange ? afterCommit(config.onIntegrationChange(event)) : Effect.void;
+
     const integrationsRegister = (
       pluginId: string,
       input: RegisterIntegrationInput,
@@ -2213,7 +2232,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
                 updated_at: now,
               },
             });
-            return;
+            return false;
           }
           yield* core.create("integration", {
             tenant,
@@ -2227,7 +2246,15 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
             created_at: now,
             updated_at: now,
           });
+          return true;
         }),
+      ).pipe(
+        Effect.tap((created) =>
+          created
+            ? notifyIntegrationChange({ kind: "added", pluginKey: pluginId, slug: input.slug })
+            : Effect.void,
+        ),
+        Effect.asVoid,
       );
 
     const integrationsUpdate = (
@@ -2273,7 +2300,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
       transaction(
         Effect.gen(function* () {
           const existing = yield* findIntegrationRow(slug);
-          if (!existing) return;
+          if (!existing) return null;
           if (!existing.can_remove) {
             return yield* new IntegrationRemovalNotAllowedError({ slug });
           }
@@ -2298,7 +2325,15 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
           yield* core.deleteMany("integration", {
             where: (b: AnyCb) => b("slug", "=", String(slug)),
           });
+          return existing.plugin_id;
         }),
+      ).pipe(
+        Effect.tap((removedPluginId) =>
+          removedPluginId !== null
+            ? notifyIntegrationChange({ kind: "removed", pluginKey: removedPluginId, slug })
+            : Effect.void,
+        ),
+        Effect.asVoid,
       );
 
     const integrationsDetect = (

@@ -7,9 +7,11 @@ import {
   FixedExecutionProvider,
   textFailureStrategy,
 } from "@executor-js/api/server";
+import { withExecutionAnalytics } from "@executor-js/analytics";
 import { createExecutionEngine } from "@executor-js/execution";
 import { makeQuickJsExecutor } from "@executor-js/runtime-quickjs";
 
+import { localAnalytics } from "./analytics";
 import { getExecutorBundle, type LocalExecutor } from "./executor";
 import { makeLocalIdentityLayer } from "./identity";
 import { ErrorCaptureLive } from "./observability";
@@ -53,10 +55,16 @@ import { ErrorCaptureLive } from "./observability";
 const localFixedExecutionLayer = (executor: LocalExecutor): Layer.Layer<FixedExecutionProvider> =>
   Layer.succeed(FixedExecutionProvider)({
     executor,
-    engine: createExecutionEngine({
-      executor,
-      codeExecutor: makeQuickJsExecutor(),
-    }),
+    // This engine serves the HTTP executions API (`executor call`/`resume`,
+    // the web console) — the wrap binds the "api" plane structurally.
+    engine: withExecutionAnalytics(
+      createExecutionEngine({
+        executor,
+        codeExecutor: makeQuickJsExecutor(),
+      }),
+      localAnalytics,
+      { plane: "api", toolkit: false },
+    ),
     // The executor IS its own plugin-extension map (`executor[pluginId]`); the
     // fixed middleware reads `executor[id]` to satisfy each plugin's
     // `*ExtensionService` Tag per request — identical binding to the prior

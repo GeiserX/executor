@@ -17,6 +17,7 @@ import { loadPluginsFromJsonc } from "@executor-js/config";
 import type { McpPluginExtension } from "@executor-js/plugin-mcp";
 
 import executorConfig from "../executor.config";
+import { localAnalytics } from "./analytics";
 import { localDataMigrations } from "./db/data-migrations";
 import { openOwnedLocalDatabase } from "./db/owned-database";
 
@@ -195,6 +196,11 @@ const createLocalExecutorLayer = (options: LocalExecutorOptions = {}) => {
         subject: Subject.make(LOCAL_SUBJECT),
         db: sqlite.db,
         plugins,
+        onIntegrationChange: (event) =>
+          localAnalytics.record(
+            event.kind === "added" ? "integration_added" : "integration_removed",
+            { plugin_key: event.pluginKey, integration_slug: String(event.slug) },
+          ),
         onElicitation: "accept-all",
         oauthEndpointUrlPolicy: { allowHttp: true },
         // EXPLICIT OAuth callback — the daemon serves the v2 `/api/oauth/callback`
