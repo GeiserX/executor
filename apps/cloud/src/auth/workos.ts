@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import { env } from "cloudflare:workers";
-import { Context, Data, Effect, Layer, Option, Predicate, Schema } from "effect";
+import { Context, Data, Effect, Layer, Option, Predicate, Redacted, Schema } from "effect";
 import { GeneratePortalLinkIntent, WorkOS } from "@workos-inc/node/worker";
 import { defaults as ironDefaults, unseal as unsealIron } from "iron-webcrypto";
 import { decodeJwt, jwtVerify } from "jose";
@@ -515,9 +515,14 @@ const make = Effect.gen(function* () {
      * organization-owned key types, while WorkOS's API also returns user-owned
      * keys. Keep this boundary unknown and decode the precise app shape in
      * auth/api-keys.ts.
+     *
+     * Unwrapping here is the deliberate boundary: WorkOS has to receive the
+     * caller's actual key to answer whether it is valid.
      */
-    validateApiKey: (value: string) =>
-      use((wos) => wos.apiKeys.validateApiKey({ value }) as Promise<unknown>),
+    validateApiKey: (value: Redacted.Redacted<string>) =>
+      use(
+        (wos) => wos.apiKeys.validateApiKey({ value: Redacted.value(value) }) as Promise<unknown>,
+      ),
 
     listUserApiKeys: (userId: string, organizationId: string) =>
       use(async (wos) => {

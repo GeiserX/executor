@@ -1,4 +1,4 @@
-import { Effect, Layer } from "effect";
+import { Effect, Layer, Redacted } from "effect";
 
 import { AccountProvider, type AccountHeaders } from "@executor-js/api/server";
 import { AccountError, AccountUnauthorized } from "@executor-js/api";
@@ -97,7 +97,10 @@ export const betterAuthAccountProvider: Layer.Layer<AccountProvider, never, Bett
               createdAt: iso(key.createdAt),
               updatedAt: iso(key.updatedAt),
               lastUsedAt: isoOrNull(key.lastRequest),
-              value: key.key,
+              // Better Auth hands back the plaintext key here and nowhere else;
+              // wrapped as it leaves this adapter so the one-time secret is
+              // never a bare string in the neutral account surface.
+              value: Redacted.make(key.key),
             })),
           ),
 

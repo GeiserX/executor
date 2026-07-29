@@ -27,7 +27,7 @@
 // NOT a function-level requirement (that is what forced a forked tag before).
 // ---------------------------------------------------------------------------
 
-import { Effect, Layer } from "effect";
+import { Effect, Layer, Predicate, Redacted } from "effect";
 import { HttpServerResponse } from "effect/unstable/http";
 import type { JWTVerifyGetKey } from "jose";
 
@@ -41,7 +41,7 @@ import type { FailureRenderingStrategy, IdentityFailure, Principal } from "@exec
 
 import { ApiKeyService } from "./api-keys";
 import { workosApiJwtBearerConfig } from "./api-jwt-bearer";
-import { BEARER_PREFIX } from "./bearer";
+import { bearerCredential, isBearerPresent, isJwtBearer } from "./bearer";
 import {
   authorizeOrganization,
   authorizeOrganizationSelector,
@@ -99,11 +99,6 @@ const NO_ORGANIZATION_IN_ACCESS_TOKEN = {
   message: "No organization in access token",
 };
 
-// A bearer value with three dot-separated segments is a JWT (a WorkOS access
-// token from the CLI device-login); anything else is treated as an API key.
-// Same discriminator the MCP plane uses (`mcp/auth.ts`).
-const looksLikeJwt = (token: string): boolean => token.split(".").length === 3;
-
 /**
  * Resolve a WorkOS device-login (user_management) access token into a protected
  * `Principal`. Verifies the token's signature + expiry against the client-scoped
@@ -113,9 +108,11 @@ const looksLikeJwt = (token: string): boolean => token.split(".").length === 3;
  * `/oauth2` tokens (different keyset, no audience), so it does NOT reuse the MCP
  * verifier or its JWKS, audience, and issuer.
  */
-const resolveJwtPrincipal = (token: string, jwt: JwtBearerConfig) =>
+const resolveJwtPrincipal = (token: Redacted.Redacted<string>, jwt: JwtBearerConfig) =>
   Effect.gen(function* () {
-    const verified = yield* verifyWorkosUserManagementToken(token, jwt.jwks).pipe(
+    // Unwrapped for the signature check itself — jose verifies the token's own
+    // bytes; nothing derived from them is retained.
+    const verified = yield* verifyWorkosUserManagementToken(Redacted.value(token), jwt.jwks).pipe(
       Effect.catchTag("McpJwtVerificationError", (error) =>
         Effect.fail(
           error.reason === "system"
@@ -154,21 +151,19 @@ const resolveJwtPrincipal = (token: string, jwt: JwtBearerConfig) =>
  */
 export const resolveApiKeyPrincipal = (request: Request, jwt: JwtBearerConfig | null = null) =>
   Effect.gen(function* () {
-    const authHeader = request.headers.get("authorization");
-    if (!authHeader) return null;
-
-    if (!authHeader.startsWith(BEARER_PREFIX)) {
+    const credential = bearerCredential(request);
+    if (Predicate.isTagged(credential, "Absent")) return null;
+    if (Predicate.isTagged(credential, "NotBearer")) {
       return yield* new Unauthorized(INVALID_AUTHORIZATION_HEADER);
     }
+    if (!isBearerPresent(credential)) return yield* new Unauthorized(INVALID_API_KEY);
 
-    const value = authHeader.slice(BEARER_PREFIX.length).trim();
-    if (!value) return yield* new Unauthorized(INVALID_API_KEY);
-
-    if (jwt && looksLikeJwt(value)) return yield* resolveJwtPrincipal(value, jwt);
+    const { token } = credential;
+    if (jwt && isJwtBearer(token)) return yield* resolveJwtPrincipal(token, jwt);
 
     const apiKeys = yield* ApiKeyService;
     const principal = yield* apiKeys
-      .validate(value)
+      .validate(token)
       .pipe(
         Effect.catchTag("ApiKeyValidationError", () =>
           Effect.fail(new Unavailable(API_KEY_VALIDATION_UNAVAILABLE)),

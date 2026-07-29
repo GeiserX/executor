@@ -1,8 +1,12 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, Layer } from "effect";
+import { Effect, Layer, Redacted } from "effect";
 
 import { ApiKeyService } from "./api-keys";
 import { WorkOSClient, type WorkOSClientService } from "./workos";
+
+// Synthetic, and asserted by exact match, so `Redacted`'s "<redacted>"
+// rendering cannot pass for the real key.
+const CREATED_SECRET = "synthetic-created-key";
 
 const stubWorkOS = (overrides: Partial<WorkOSClientService>) =>
   Layer.succeed(
@@ -18,7 +22,7 @@ const stubWorkOS = (overrides: Partial<WorkOSClientService>) =>
 const validate = (response: unknown) =>
   Effect.gen(function* () {
     const apiKeys = yield* ApiKeyService;
-    return yield* apiKeys.validate("test_key");
+    return yield* apiKeys.validate(Redacted.make("synthetic-inbound-key"));
   }).pipe(
     Effect.provide(
       ApiKeyService.WorkOS.pipe(
@@ -134,7 +138,7 @@ describe("ApiKeyService.WorkOS", () => {
                   Effect.succeed({
                     id: "api_key_created",
                     name: "Local CLI",
-                    value: "sk_created",
+                    value: CREATED_SECRET,
                     obfuscated_value: "sk_...ated",
                     created_at: "2026-01-01T00:00:00.000Z",
                     updated_at: "2026-01-01T00:00:00.000Z",
@@ -162,7 +166,50 @@ describe("ApiKeyService.WorkOS", () => {
           lastUsedAt: null,
         },
       ]);
-      expect(result.created.value).toBe("sk_created");
+      // The created secret is `Redacted` from the decode onward, and still
+      // holds the real bytes — WorkOS returns it exactly once, so a wrapper
+      // that lost the value would be indistinguishable from a working one until
+      // a customer tried the key.
+      expect(Redacted.isRedacted(result.created.value)).toBe(true);
+      expect(Redacted.value(result.created.value)).toBe(CREATED_SECRET);
+
+      // What a log line or a span attribute would produce for the whole record.
+      const serialized = JSON.stringify(result.created);
+      expect(serialized).not.toContain(CREATED_SECRET);
+      expect(serialized).toContain("<redacted>");
+    }),
+  );
+
+  it.effect("hands WorkOS the caller's real key when validating", () =>
+    Effect.gen(function* () {
+      const seen: string[] = [];
+      const owner = yield* Effect.gen(function* () {
+        const apiKeys = yield* ApiKeyService;
+        return yield* apiKeys.validate(Redacted.make("synthetic-inbound-key"));
+      }).pipe(
+        Effect.provide(
+          ApiKeyService.WorkOS.pipe(
+            Layer.provide(
+              stubWorkOS({
+                validateApiKey: (value) => {
+                  seen.push(Redacted.value(value));
+                  return Effect.succeed({
+                    apiKey: {
+                      id: "api_key_123",
+                      owner: { type: "user", id: "user_123", organizationId: "org_123" },
+                    },
+                  });
+                },
+              }),
+            ),
+          ),
+        ),
+      );
+
+      // The unwrap at the WorkOS boundary is deliberate: the control plane can
+      // only answer for the caller's actual key, not for "<redacted>".
+      expect(seen).toEqual(["synthetic-inbound-key"]);
+      expect(owner?.accountId).toBe("user_123");
     }),
   );
 });

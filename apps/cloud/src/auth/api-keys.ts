@@ -1,4 +1,4 @@
-import { Context, Data, Effect, Layer, Option, Schema } from "effect";
+import { Context, Data, Effect, Layer, Option, Redacted, Schema } from "effect";
 
 import { ApiKeyManagementError } from "./errors";
 import { WorkOSClient } from "./workos";
@@ -20,8 +20,12 @@ export type ApiKeySummary = {
   readonly lastUsedAt: string | null;
 };
 
+/** A summary plus the plaintext key WorkOS returns exactly once. The secret is
+ *  `Redacted` from the decode onwards — it is otherwise indistinguishable from
+ *  the key's `name`, and this shape travels through the account service and out
+ *  as an HTTP body. */
 export type CreatedApiKey = ApiKeySummary & {
-  readonly value: string;
+  readonly value: Redacted.Redacted<string>;
 };
 
 export class ApiKeyValidationError extends Data.TaggedError("ApiKeyValidationError")<{
@@ -65,7 +69,9 @@ const RawCreatedApiKey = Schema.Struct({
   updated_at: Schema.optional(Schema.String),
   lastUsedAt: Schema.optional(Schema.NullOr(Schema.String)),
   last_used_at: Schema.optional(Schema.NullOr(Schema.String)),
-  value: Schema.String,
+  // Decode-only: this schema reads the WorkOS create response and is never
+  // encoded, so `RedactedFromValue`'s forbidden encode costs nothing here.
+  value: Schema.RedactedFromValue(Schema.String),
 });
 
 const ListApiKeysResponse = Schema.Struct({
@@ -134,7 +140,9 @@ const createdFromResponse = (value: unknown): CreatedApiKey | null =>
 export class ApiKeyService extends Context.Service<
   ApiKeyService,
   {
-    readonly validate: (value: string) => Effect.Effect<ApiKeyOwner | null, ApiKeyValidationError>;
+    readonly validate: (
+      value: Redacted.Redacted<string>,
+    ) => Effect.Effect<ApiKeyOwner | null, ApiKeyValidationError>;
     readonly listUserKeys: (input: {
       readonly accountId: string;
       readonly organizationId: string;
@@ -153,7 +161,7 @@ export class ApiKeyService extends Context.Service<
     Effect.gen(function* () {
       const workos = yield* WorkOSClient;
       return {
-        validate: (value: string) =>
+        validate: (value) =>
           workos.validateApiKey(value).pipe(
             Effect.map(ownerFromResponse),
             Effect.mapError((cause) => new ApiKeyValidationError({ cause })),

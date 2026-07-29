@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Exit } from "effect";
+import { Exit, Redacted } from "effect";
 import * as AsyncResult from "effect/unstable/reactivity/AsyncResult";
 import { useAtomRefresh, useAtomSet, useAtomValue } from "@effect/atom-react";
 import { toast } from "sonner";
@@ -39,7 +39,9 @@ type ApiKeySummary = {
   readonly lastUsedAt: string | null;
 };
 
-type CreatedKey = ApiKeySummary & { readonly value: string };
+// The one-time secret arrives `Redacted` — the create response decodes it that
+// way — and stays wrapped in component state.
+type CreatedKey = ApiKeySummary & { readonly value: Redacted.Redacted<string> };
 
 const formatDate = (value: string | null): string => {
   if (!value) return "Never";
@@ -99,6 +101,12 @@ export function ApiKeysPage() {
     }
     toast.error("Failed to revoke API key");
   };
+
+  // The deliberate unwrap: showing the key once is the whole point of the
+  // create dialog, and the user cannot copy a "<redacted>" rendering. Scoped to
+  // the dialog's lifetime — `closeCreate` drops `createdKey`, so the plaintext
+  // is gone as soon as the dialog closes.
+  const createdKeyPlaintext = createdKey ? Redacted.value(createdKey.value) : null;
 
   const closeCreate = (open: boolean) => {
     setCreateOpen(open);
@@ -210,19 +218,19 @@ export function ApiKeysPage() {
             </DialogDescription>
           </DialogHeader>
 
-          {createdKey ? (
+          {createdKeyPlaintext !== null ? (
             <div className="grid gap-4 py-3">
               <div className="grid gap-1.5">
                 <Label className="text-sm font-medium text-foreground">New key</Label>
                 <div className="flex items-center gap-2">
                   <Input
-                    value={createdKey.value}
+                    value={createdKeyPlaintext}
                     readOnly
                     className="font-mono text-xs"
                     data-ph-mask
                   />
                   <CopyButton
-                    value={createdKey.value}
+                    value={createdKeyPlaintext}
                     onCopy={() => trackEvent("api_key_copied", { kind: "value" })}
                   />
                 </div>
@@ -231,13 +239,13 @@ export function ApiKeysPage() {
                 <Label className="text-sm font-medium text-foreground">Bearer header</Label>
                 <div className="flex items-center gap-2">
                   <Input
-                    value={`Authorization: Bearer ${createdKey.value}`}
+                    value={`Authorization: Bearer ${createdKeyPlaintext}`}
                     readOnly
                     className="font-mono text-xs"
                     data-ph-mask
                   />
                   <CopyButton
-                    value={`Authorization: Bearer ${createdKey.value}`}
+                    value={`Authorization: Bearer ${createdKeyPlaintext}`}
                     onCopy={() => trackEvent("api_key_copied", { kind: "bearer_header" })}
                   />
                 </div>

@@ -1,5 +1,5 @@
 import { HttpApi, HttpApiEndpoint, HttpApiGroup } from "effect/unstable/httpapi";
-import { Schema } from "effect";
+import { Redacted, Schema, SchemaGetter } from "effect";
 
 // ---------------------------------------------------------------------------
 // Provider-neutral Account API.
@@ -86,7 +86,20 @@ export const CreateApiKeyBody = Schema.Struct({
   name: Schema.String,
 });
 
-/** Create returns the summary PLUS the one-time plaintext `value`. */
+/** Create returns the summary PLUS the one-time secret `value`, which is
+ *  `Redacted` on both sides of the wire: the provider hands the handler a
+ *  wrapped secret and this schema unwraps it into the response body, the client
+ *  wraps it again as the body decodes. Only the transport carries it bare, and
+ *  the UI's one-time display is the single deliberate unwrap. Hand-rolled
+ *  rather than `Schema.Redacted`, whose encode is forbidden — this schema has
+ *  to encode, since it is a RESPONSE. */
+const OneTimeSecret = Schema.String.pipe(
+  Schema.decodeTo(Schema.Redacted(Schema.String), {
+    decode: SchemaGetter.transform(Redacted.make<string>),
+    encode: SchemaGetter.transform(Redacted.value<string>),
+  }),
+);
+
 export const CreatedApiKeyResponse = Schema.Struct({
   id: Schema.String,
   name: Schema.String,
@@ -94,7 +107,7 @@ export const CreatedApiKeyResponse = Schema.Struct({
   createdAt: Schema.String,
   updatedAt: Schema.String,
   lastUsedAt: Schema.NullOr(Schema.String),
-  value: Schema.String,
+  value: OneTimeSecret,
 });
 
 export const OrgMember = Schema.Struct({

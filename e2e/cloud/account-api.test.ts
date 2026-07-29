@@ -4,7 +4,7 @@
 // refusal edges and the bearer cross-check use raw fetch with the identity's
 // real sealed-session cookie (the org-limit cross-check pattern).
 import { expect } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Redacted } from "effect";
 import { AccountHttpApi } from "@executor-js/api";
 
 import { scenario } from "../src/scenario";
@@ -37,18 +37,24 @@ scenario(
     const identity = yield* target.newIdentity();
     const client = yield* apiClient(AccountHttpApi, identity);
 
-    // Create: the plaintext secret is returned exactly once, masked everywhere else.
+    // Create: the plaintext secret is returned exactly once, masked everywhere
+    // else. It decodes as `Redacted`; unwrapping it here is what the console's
+    // one-time display does, and is the only way to exercise it as a credential.
     const created = yield* client.account.createApiKey({ payload: { name: "e2e key" } });
+    const secret = Redacted.value(created.value);
     expect(created.name, "the key carries the requested name").toBe("e2e key");
-    expect(created.value, "create returns the one-time plaintext secret").not.toBe("");
-    expect(created.obfuscatedValue, "the display value is masked, not the secret").not.toBe(
-      created.value,
-    );
+    expect(secret, "create returns the one-time plaintext secret").not.toBe("");
+    expect(
+      secret,
+      "the response body carried the real key, not Redacted's own rendering",
+    ).not.toContain("<redacted>");
+    expect(created.obfuscatedValue, "the display value is masked, not the secret").not.toBe(secret);
 
-    // The created secret is a working credential for the protected API.
+    // The created secret is a working credential for the protected API — the
+    // proof the wrapping preserved the bytes end to end.
     const bearer = yield* Effect.promise(() =>
       fetch(new URL("/api/integrations", target.baseUrl), {
-        headers: { authorization: `Bearer ${created.value}` },
+        headers: { authorization: `Bearer ${secret}` },
       }),
     );
     expect(bearer.status, "the bearer authenticates the protected API").toBe(200);
@@ -65,7 +71,7 @@ scenario(
     const mine = listed.apiKeys.find((key) => key.id === created.id);
     expect(mine?.name, "the created key appears in the list").toBe("e2e key");
     expect(JSON.stringify(listed), "the list never leaks the plaintext secret").not.toContain(
-      created.value,
+      secret,
     );
 
     // Revoke: the key disappears from the account.

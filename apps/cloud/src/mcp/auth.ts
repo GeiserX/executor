@@ -10,11 +10,11 @@
 // ---------------------------------------------------------------------------
 
 import { env } from "cloudflare:workers";
-import { Context, Effect, Layer, Predicate } from "effect";
+import { Context, Effect, Layer, Predicate, Redacted } from "effect";
 
 import { createCachedRemoteJWKSet } from "../auth/jwks-cache";
 import { ApiKeyService } from "../auth/api-keys";
-import { BEARER_PREFIX } from "../auth/bearer";
+import { bearerCredential, isBearerPresent, isJwtBearer } from "../auth/bearer";
 import { authorizeOrganization } from "../auth/organization";
 import { UserStoreService, makeUserStoreLayer } from "../auth/context";
 import { CoreSharedServices } from "../auth/workos";
@@ -176,8 +176,10 @@ export class McpOrganizationAuth extends Context.Service<
   }
 >()("@executor-js/cloud/McpOrganizationAuth") {}
 
-const verifyJwt = (token: string) =>
-  verifyWorkOSMcpAccessToken(token, jwks, {
+// Unwrapped for the signature check itself — jose verifies the token's own
+// bytes; nothing derived from them is retained.
+const verifyJwt = (token: Redacted.Redacted<string>) =>
+  verifyWorkOSMcpAccessToken(Redacted.value(token), jwks, {
     issuer: AUTHKIT_DOMAIN,
     audience: WORKOS_CLIENT_ID,
   });
@@ -222,14 +224,14 @@ export const McpOrganizationAuthLive = Layer.succeed(McpOrganizationAuth)({
     ),
 });
 
-const looksLikeJwt = (token: string): boolean => token.split(".").length === 3;
-
 export const McpAuthLive = Layer.effect(
   McpAuth,
   Effect.gen(function* () {
     const apiKeys = yield* ApiKeyService;
 
-    const verifyApiKey = Effect.fn("mcp.auth.verify_api_key")(function* (token: string) {
+    const verifyApiKey = Effect.fn("mcp.auth.verify_api_key")(function* (
+      token: Redacted.Redacted<string>,
+    ) {
       const principal = yield* apiKeys.validate(token).pipe(
         Effect.catchTag("ApiKeyValidationError", (error) =>
           Effect.fail(
@@ -259,7 +261,9 @@ export const McpAuthLive = Layer.effect(
       });
     });
 
-    const verifyJwtBearer = Effect.fn("mcp.auth.verify_jwt_bearer")(function* (token: string) {
+    const verifyJwtBearer = Effect.fn("mcp.auth.verify_jwt_bearer")(function* (
+      token: Redacted.Redacted<string>,
+    ) {
       const verified = yield* verifyJwt(token).pipe(
         Effect.catchTag("McpJwtVerificationError", (error) => {
           if (error.reason === "system") return Effect.fail(error);
@@ -293,14 +297,21 @@ export const McpAuthLive = Layer.effect(
 
     return {
       verifyBearer: Effect.fn("mcp.auth.verify_bearer")(function* (request) {
-        const authHeader = request.headers.get("authorization");
-        if (!authHeader?.startsWith(BEARER_PREFIX)) {
+        const credential = bearerCredential(request);
+        // A non-Bearer header is the same "no MCP credential" outcome a missing
+        // header is — the MCP plane accepts no other scheme.
+        if (
+          Predicate.isTagged(credential, "Absent") ||
+          Predicate.isTagged(credential, "NotBearer")
+        ) {
           yield* Effect.annotateCurrentSpan({ "mcp.auth.outcome": "missing_bearer" });
           return mcpUnauthorized("missing_bearer");
         }
-        const token = authHeader.slice(BEARER_PREFIX.length).trim();
-        if (!token) return mcpUnauthorized("invalid_token", "The bearer token is invalid");
-        return yield* looksLikeJwt(token) ? verifyJwtBearer(token) : verifyApiKey(token);
+        if (!isBearerPresent(credential)) {
+          return mcpUnauthorized("invalid_token", "The bearer token is invalid");
+        }
+        const { token } = credential;
+        return yield* isJwtBearer(token) ? verifyJwtBearer(token) : verifyApiKey(token);
       }),
     };
   }),
