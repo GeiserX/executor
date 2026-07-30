@@ -276,10 +276,10 @@ export class McpSessionDOSqlite extends McpAgentSessionDOBase<Env, CloudSessionD
         description,
         artifacts: executor.artifacts,
         connections: executor.connections,
-        // Artifacts are opt-in per connection. Sessions persisted before the
-        // flag existed carry no value; absent now means off, same as a fresh
-        // connection that did not ask for `?artifacts=true`.
-        artifactsEnabled: sessionMeta.artifactsEnabled ?? false,
+        // Artifacts are on by default, opt-out per connection. A session
+        // persisted without a value restores to the default, same as a fresh
+        // connection whose URL says nothing about `?artifacts=`.
+        artifactsEnabled: sessionMeta.artifactsEnabled ?? true,
         // Cold restores rebuild this server with no `initialize` to replay, so
         // the negotiated apps support comes back from storage instead.
         restoredAppsEnabled: sessionMeta.appsEnabled ?? false,

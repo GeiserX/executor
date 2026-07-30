@@ -156,8 +156,8 @@ type SharedMcpServerConfig = {
    */
   readonly loadAppShellHtml?: () => Promise<string>;
   /**
-   * Per-connection artifacts opt-in. Defaults to false. A client that connects
-   * without `?artifacts=true` gets NO artifact surface at all: none of the five
+   * Per-connection artifacts opt-out. Defaults to true. A client that connects
+   * with `?artifacts=false` gets NO artifact surface at all: none of the five
    * artifact tools, no `ui://` shell resource, and no artifact entries in the
    * `skills` inventory — the same shape a host without `loadAppShellHtml`
    * serves. `execute`, `skills` and `resume` are untouched.
@@ -1037,10 +1037,10 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
     // The same live integration inventory the description carries, re-used by
     // the `skills` tool so the `execute` guide lists what is connected too.
     const executeInventory = extractInventory(description);
-    // Artifacts are off unless this connection opted in (`?artifacts=true`).
+    // Artifacts are on unless this connection opted out (`?artifacts=false`).
     // One flag decides the whole surface: the tools, the shell resource, and
     // the skills catalog below.
-    const artifactsEnabled = config.artifactsEnabled ?? false;
+    const artifactsEnabled = config.artifactsEnabled ?? true;
     const skillCatalog: readonly Skill[] = skillCatalogFor({ artifacts: artifactsEnabled });
 
     // Captured at construction time. SDK callbacks fire later (often
@@ -1812,7 +1812,7 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
       );
 
     // Two independent reasons to serve no artifact surface: the host cannot
-    // (no shell loader), or this connection did not ask for it (`?artifacts=true`).
+    // (no shell loader), or this connection opted out (`?artifacts=false`).
     // Either way nothing below registers, so a disabled session is byte-for-byte
     // a session on a host that never had artifacts.
     const loadAppShellHtml = artifactsEnabled ? config.loadAppShellHtml : undefined;

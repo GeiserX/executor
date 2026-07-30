@@ -41,7 +41,7 @@ export interface McpSessionInit {
   readonly userId: string;
   readonly elicitationMode: McpElicitationMode;
   /** Whether this session serves artifacts, read off `?artifacts=` at connect
-   *  time. Absent means the default (disabled). */
+   *  time. Absent means the default (enabled). */
   readonly artifactsEnabled?: boolean;
   /** The MCP resource the session was minted against (`/mcp` default vs a
    *  `/mcp/toolkits/<slug>` toolkit), so the tool catalog is scoped to it. */
@@ -103,7 +103,7 @@ export interface SessionMeta {
   readonly elicitationMode?: McpElicitationMode;
   /** Whether the session serves artifacts (carried from {@link McpSessionInit}).
    *  Absent — including for sessions persisted before the flag existed — means
-   *  disabled. */
+   *  the default (enabled). */
   readonly artifactsEnabled?: boolean;
   /** The MCP resource the session serves (carried from {@link McpSessionInit});
    *  `buildMcpServer` scopes the tool catalog to it. */

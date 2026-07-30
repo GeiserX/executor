@@ -609,7 +609,7 @@ export const SKILLS: readonly Skill[] = [
 ];
 
 /** The skills that only make sense when the session serves artifacts. A
- *  connection that did not opt in to artifacts (`?artifacts=true`) has no tool
+ *  connection that opted out of artifacts (`?artifacts=false`) has no tool
  *  to apply them to, so they are dropped from its catalog rather than served as
  *  guidance for a surface it cannot reach. */
 const ARTIFACT_SKILLS: ReadonlySet<Skill> = new Set([CREATE_ARTIFACT_SKILL, ARTIFACT_STYLE_SKILL]);

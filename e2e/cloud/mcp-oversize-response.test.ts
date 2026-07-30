@@ -92,8 +92,8 @@ scenario(
     const mcp = yield* Mcp;
     const identity = yield* target.newIdentity();
     const bearer = yield* mcp.mintBearer(emailOf(identity));
-    // Artifacts opt-in is what registers the shell resource on the session.
-    const mcpUrl = `${target.mcpUrl}?artifacts=true`;
+    // Artifacts are on by default, which registers the shell resource.
+    const mcpUrl = target.mcpUrl;
 
     const sessionId = yield* Effect.promise(() => openSession(mcpUrl, bearer));
 

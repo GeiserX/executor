@@ -140,11 +140,11 @@ const withClient = async <E extends Cause.YieldableError>(
     createExecutorMcpServer({
       engine,
       loadAppShellHtml: () => Promise.resolve(SHELL_HTML),
-      // Artifacts are opt-in per connection, and nearly every test in this file
-      // exercises the artifact surface — so the helper connects the way a real
-      // `?artifacts=true` client does. The cases that assert the OFF surface
-      // pass `artifactsEnabled: false`, and the default (no flag at all) is
-      // proved by building the server directly below.
+      // Artifacts are on by default and nearly every test in this file
+      // exercises the artifact surface; spelled out here anyway so the cases
+      // that assert the OFF surface (`artifactsEnabled: false`) read as the
+      // deliberate contrast. The default (no flag at all) is proved directly
+      // in the opt-out describe block.
       artifactsEnabled: true,
       ...config,
     } as ExecutorMcpServerConfig<E>),
@@ -479,11 +479,11 @@ describe("MCP host — artifact tool visibility", () => {
     await serverTransport.close();
   });
 
-  // A session that did not opt in (`?artifacts=true`) gets no artifact surface
-  // at all. The host here is fully artifact-capable — shell loader, store, the
-  // apps client capability — so what these assert is the connection default
-  // itself, not a host that never had artifacts.
-  it("registers no artifact tools on a default connection", async () => {
+  // A session that opted out (`?artifacts=false`) gets no artifact surface at
+  // all. The host here is fully artifact-capable — shell loader, store, the
+  // apps client capability — so what these assert is the opt-out itself, not
+  // a host that never had artifacts.
+  it("registers no artifact tools on an opted-out connection", async () => {
     const store = makeArtifactStore();
     await withClient(
       makeStubEngine({}),
@@ -500,9 +500,9 @@ describe("MCP host — artifact tool visibility", () => {
         expect(names).toContain("skills");
         expect(names).toContain("resume");
       },
-      // No `artifactsEnabled` at all: the real shape of a client that connected
-      // to a bare `/mcp` endpoint.
-      { artifacts: store.port, artifactsEnabled: undefined },
+      // The explicit opt-out: the shape of a client that connected with
+      // `?artifacts=false`.
+      { artifacts: store.port, artifactsEnabled: false },
     );
   });
 
@@ -510,7 +510,7 @@ describe("MCP host — artifact tool visibility", () => {
   // The read is what proves it: with no resource registered at all, the SDK
   // does not install a resources handler either, so `resources/list` itself is
   // unavailable — the same shape a host without a shell loader has always had.
-  it("serves no shell resource on a default connection", async () => {
+  it("serves no shell resource on an opted-out connection", async () => {
     const store = makeArtifactStore();
     await withClient(
       makeStubEngine({}),
@@ -518,11 +518,11 @@ describe("MCP host — artifact tool visibility", () => {
       async (client) => {
         await expect(client.readResource({ uri: MCP_APPS_SHELL_RESOURCE_URI })).rejects.toThrow();
       },
-      { artifacts: store.port, artifactsEnabled: undefined },
+      { artifacts: store.port, artifactsEnabled: false },
     );
   });
 
-  it("drops the artifact skills from a default session's inventory", async () => {
+  it("drops the artifact skills from an opted-out session's inventory", async () => {
     const store = makeArtifactStore();
     await withClient(
       makeStubEngine({}),
@@ -542,11 +542,11 @@ describe("MCP host — artifact tool visibility", () => {
         expect(fetched.isError).toBe(true);
         expect(textOf(fetched)).toContain('No skill named "create-artifact"');
       },
-      { artifacts: store.port, artifactsEnabled: undefined },
+      { artifacts: store.port, artifactsEnabled: false },
     );
   });
 
-  it("serves the full artifact surface to a session that opted in", async () => {
+  it("serves the full artifact surface on the connection default (no flag at all)", async () => {
     const store = makeArtifactStore();
     await withClient(
       makeStubEngine({}),
@@ -566,7 +566,9 @@ describe("MCP host — artifact tool visibility", () => {
         expect(index).toContain("`create-artifact`");
         expect(index).toContain("`artifact-style`");
       },
-      { artifacts: store.port },
+      // Overrides the helper's explicit `artifactsEnabled: true` with the real
+      // absent-flag shape, so this pins the DEFAULT, not an opt-in.
+      { artifacts: store.port, artifactsEnabled: undefined },
     );
   });
 
@@ -2235,24 +2237,25 @@ describe("artifactUrlFor", () => {
 // The `?artifacts=` endpoint query
 // ---------------------------------------------------------------------------
 
-describe("artifacts opt-in query", () => {
+describe("artifacts opt-out query", () => {
   const read = (query: string) =>
     readArtifactsEnabled(new Request(`https://executor.example/mcp${query}`));
 
-  it("keeps artifacts off for a clean endpoint", () => {
-    expect(read("")).toBe(false);
-    expect(read("?elicitation_mode=browser")).toBe(false);
+  it("serves artifacts on a clean endpoint", () => {
+    expect(read("")).toBe(true);
+    expect(read("?elicitation_mode=browser")).toBe(true);
   });
 
-  it("turns artifacts on for the documented true values", () => {
+  it("keeps artifacts on for the explicit true values", () => {
     for (const value of ["true", "TRUE", "1", "yes", "on"]) {
       expect(read(`?artifacts=${value}`)).toBe(true);
     }
   });
 
-  // Anything else reads as "not an opt-in", so a typo cannot silently hand a
-  // connection a surface the user never asked for.
-  it("keeps artifacts off for any other value", () => {
+  // Once the flag is present, anything but a documented true value reads as
+  // the opt-out — a user who touched the flag at all was reaching for "off",
+  // so a typo lands on the side they were steering toward.
+  it("turns artifacts off for the opt-out and any other explicit value", () => {
     for (const value of ["false", "0", "no", "ture", ""]) {
       expect(read(`?artifacts=${value}`)).toBe(false);
     }

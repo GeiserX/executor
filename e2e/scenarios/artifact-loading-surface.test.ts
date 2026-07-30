@@ -197,9 +197,9 @@ scenario(
 
     const identity = yield* target.newIdentity();
     const client = yield* apiClient(api, identity);
-    // Artifacts are opt-in per MCP connection, so this session asks for the
-    // surface it is here to exercise (`?artifacts=true`).
-    const session = mcp.session(identity, { artifacts: true });
+    // Artifacts are on by default; the plain session carries the surface
+    // this scenario exercises.
+    const session = mcp.session(identity);
 
     const suffix = uniqueSuffix();
     const title = `Loading Surface ${suffix}`;
