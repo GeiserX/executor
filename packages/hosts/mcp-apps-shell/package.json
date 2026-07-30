@@ -12,6 +12,10 @@
       "types": "./src/shell-html.ts",
       "default": "./src/shell-html.ts"
     },
+    "./worker": {
+      "types": "./src/worker.ts",
+      "default": "./src/worker.ts"
+    },
     "./smoke-render": {
       "types": "./src/smoke-render-entry.ts",
       "default": "./src/smoke-render-entry.ts"

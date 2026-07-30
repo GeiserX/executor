@@ -31,10 +31,10 @@ const resolveQuickJsWasmPath = (): string => {
 // The MCP host serves the shell as the `ui://executor/shell.html` resource, and
 // `@executor-js/mcp-apps-shell` reads it from disk at runtime. That runtime
 // `fs.readFile` is invisible to `bun build --compile`, so without this the
-// packaged binary would serve the "Shell not built" placeholder and every
-// generated UI would render blank. Build it if missing and copy it next to the
-// executable, where the loader finds it via `process.execPath` — the same
-// colocation trick used for `libsql.node` / `emscripten-module.wasm`.
+// packaged binary would fail every artifact resource read. Build it if missing
+// and copy it next to the executable, where the loader finds it via
+// `process.execPath` — the same colocation trick used for `libsql.node` /
+// `emscripten-module.wasm`.
 // ---------------------------------------------------------------------------
 
 const mcpAppsShellDir = resolve(repoRoot, "packages/hosts/mcp-apps-shell");

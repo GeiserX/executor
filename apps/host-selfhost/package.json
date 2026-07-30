@@ -10,7 +10,7 @@
   },
   "scripts": {
     "dev": "bunx --bun vite dev",
-    "build": "turbo run build --filter @executor-js/vite-plugin && vite build",
+    "build": "turbo run build --filter @executor-js/vite-plugin && vite build && node scripts/assert-shell-asset.mjs",
     "start": "bun run src/serve.ts",
     "typecheck": "tsgo --noEmit",
     "test": "vitest run",

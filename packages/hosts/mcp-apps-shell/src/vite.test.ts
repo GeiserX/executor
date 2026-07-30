@@ -14,4 +14,15 @@ describe("mcpAppsShellAsset", () => {
         "export default shellHtmlUrl;\n",
     );
   });
+
+  it("resolves the dev-html module to undefined in a build, so Workers use the ASSETS binding", async () => {
+    const plugin = mcpAppsShellAsset();
+    plugin.configResolved({ command: "build" });
+
+    const resolved = plugin.resolveId("virtual:executor-mcp-apps-shell-dev-html");
+    expect(resolved).toBeDefined();
+    expect(await plugin.load(resolved ?? "")).toBe(
+      "export const devShellHtml = undefined;\nexport default devShellHtml;\n",
+    );
+  });
 });

@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "vite build",
-    "deploy": "vite build && wrangler deploy",
+    "build": "vite build && node scripts/assert-shell-asset.mjs",
+    "deploy": "vite build && node scripts/assert-shell-asset.mjs && wrangler deploy",
     "dev": "wrangler dev",
     "dev:web": "vite dev",
     "typecheck": "tsgo --noEmit",

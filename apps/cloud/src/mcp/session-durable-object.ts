@@ -26,7 +26,7 @@ import {
 } from "@executor-js/host-mcp/tool-server";
 import { buildResumeApprovalUrl } from "@executor-js/host-mcp/browser-approval";
 import { artifactUrlFor } from "@executor-js/host-mcp/create-artifact";
-import { loadMcpAppsShellHtml } from "@executor-js/mcp-apps-shell";
+import { makeAssetsShellHtmlLoader } from "@executor-js/mcp-apps-shell/worker";
 import { smokeRenderArtifact } from "@executor-js/mcp-apps-shell/smoke-render";
 import {
   McpAgentSessionDOBase,
@@ -156,6 +156,18 @@ const makeSessionServices = (dbHandle: CloudSessionDbHandle) => {
   return Layer.mergeAll(DbLive, UserStoreLive, CoreSharedServices);
 };
 
+// The `ui://executor/shell.html` resource, over the ASSETS binding: the
+// deployed Worker has no filesystem, so the document is the stable-named
+// asset the client build emitted (`mcpAppsShellAsset`), fetched at first
+// artifact resource read. Module scope so the fetch-and-verify happens once
+// per isolate, not once per session. The dev thunk carries the built shell
+// inline under `vite dev`, where no assets exist yet for the binding to find.
+const loadAppShellHtml = makeAssetsShellHtmlLoader({
+  assets: env.ASSETS,
+  devShellHtml: () =>
+    import("virtual:executor-mcp-apps-shell-dev-html").then((mod) => mod.devShellHtml),
+});
+
 // ---------------------------------------------------------------------------
 // Durable Object
 // ---------------------------------------------------------------------------
@@ -268,7 +280,7 @@ export class McpSessionDOSqlite extends McpAgentSessionDOBase<Env, CloudSessionD
         // flag existed carry no value; absent now means off, same as a fresh
         // connection that did not ask for `?artifacts=true`.
         artifactsEnabled: sessionMeta.artifactsEnabled ?? false,
-        loadAppShellHtml: loadMcpAppsShellHtml,
+        loadAppShellHtml,
         smokeRenderArtifact,
         artifactUrl: artifactUrlFor(
           env.VITE_PUBLIC_SITE_URL ?? "https://executor.sh",

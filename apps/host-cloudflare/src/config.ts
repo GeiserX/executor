@@ -21,6 +21,10 @@ export interface CloudflareEnv {
   readonly DB: D1Database;
   /** R2 bucket binding — holds values too large for a D1 row (~1-2MB cap). */
   readonly BLOBS?: R2Bucket;
+  /** Static assets binding (wrangler.jsonc `assets.binding`). The MCP session
+   *  DO fetches the built MCP-Apps shell document through it — a deployed
+   *  Worker has no filesystem to read the shell from. */
+  readonly ASSETS: { readonly fetch: (request: Request) => Promise<Response> };
   /** MCP session Durable Object namespace — one addressable isolate per MCP
    *  session (the DO id IS the session id), so a session survives across the
    *  Worker's stateless isolates. */
@@ -74,7 +78,7 @@ export interface CloudflareConfig {
 
 type CloudflareConfigEnv = Omit<
   CloudflareEnv,
-  "DB" | "BLOBS" | "MCP_SESSION" | "MCP_EXECUTION_OWNER"
+  "DB" | "BLOBS" | "ASSETS" | "MCP_SESSION" | "MCP_EXECUTION_OWNER"
 >;
 
 type CloudflareAccessEnv = Pick<

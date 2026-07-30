@@ -25,6 +25,11 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  MCP_APPS_SHELL_DOCUMENT_MARKER,
+  MCP_APPS_SHELL_STABLE_ASSET_PATH,
+} from "./shell-asset-path.ts";
+
 /** The structural shape of the Vite plugin object, declared locally so this
  *  module imports no Vite types (apps pin their own Vite version). */
 export interface InnerRendererVitePlugin {
@@ -172,6 +177,12 @@ export const tailwindBrowserSourcePlugin = (): InnerRendererVitePlugin => ({
 const SHELL_VIRTUAL_ID = "virtual:executor-mcp-apps-shell-html";
 const SHELL_RESOLVED_ID = `\0${SHELL_VIRTUAL_ID}`;
 const DEV_SHELL_URL = "/assets/executor-mcp-apps-shell-dev.html";
+// The document's BYTES for the Worker in dev, where the stable asset does not
+// exist yet (assets are only emitted by a build) and the dev ASSETS binding
+// resolves against files on disk. `makeAssetsShellHtmlLoader` imports this
+// lazily, so the shell only builds when an artifact resource is actually read.
+const DEV_HTML_VIRTUAL_ID = "virtual:executor-mcp-apps-shell-dev-html";
+const DEV_HTML_RESOLVED_ID = `\0${DEV_HTML_VIRTUAL_ID}`;
 
 /** Where `build:shell` writes the self-contained shell document. */
 export const mcpAppsShellHtmlPath = (): string => path.resolve(packageRoot, "dist/mcp-app.html");
@@ -283,6 +294,17 @@ export const mcpAppsShellAsset = (): McpAppsShellAssetVitePlugin => {
   const load = async (): Promise<{ readonly html: string; readonly url: string }> => {
     if (cached) return cached;
     const html = await buildMcpAppsShellHtml();
+    // Build-blocking: runtime loaders authenticate the document by this
+    // fragment (an ASSETS-binding miss under SPA not-found handling answers
+    // with index.html and a 200), so a shell that lost it would make every
+    // deployed resource read fail. Catch that here, in the build.
+    if (!html.includes(MCP_APPS_SHELL_DOCUMENT_MARKER)) {
+      // oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: Vite plugin hooks report build failures by throwing
+      throw new Error(
+        `Built MCP-Apps shell is missing its identity marker (${MCP_APPS_SHELL_DOCUMENT_MARKER}); ` +
+          "check the <meta> in src/shell/mcp-app.html.",
+      );
+    }
     const digest = createHash("sha256").update(html).digest("hex").slice(0, 12);
     cached = { html, url: `/assets/executor-mcp-apps-shell-${digest}.html` };
     return cached;
@@ -300,8 +322,24 @@ export const mcpAppsShellAsset = (): McpAppsShellAssetVitePlugin => {
       // only carries the single-environment case, where the two agree.
       ssr = Boolean(config.build?.ssr);
     },
-    resolveId: (id) => (id === SHELL_VIRTUAL_ID ? SHELL_RESOLVED_ID : undefined),
+    resolveId: (id) => {
+      if (id === SHELL_VIRTUAL_ID) return SHELL_RESOLVED_ID;
+      if (id === DEV_HTML_VIRTUAL_ID) return DEV_HTML_RESOLVED_ID;
+      return undefined;
+    },
     load: async (id) => {
+      if (id === DEV_HTML_RESOLVED_ID) {
+        // The Worker's dev-only escape hatch: under `build` it exports
+        // `undefined` and `makeAssetsShellHtmlLoader` uses the ASSETS binding;
+        // under `serve` it carries the built document inline, because no
+        // assets have been emitted for the binding to find. Guarded the same
+        // way as the URL module below — the build must not run at startup.
+        if (command !== "serve") {
+          return "export const devShellHtml = undefined;\nexport default devShellHtml;\n";
+        }
+        const { html } = await load();
+        return `export const devShellHtml = ${JSON.stringify(html)};\nexport default devShellHtml;\n`;
+      }
       if (id !== SHELL_RESOLVED_ID) return undefined;
       // Resolving the virtual module is part of Vite's startup graph. Building
       // the multi-megabyte shell here makes every dev server pay that cost
@@ -355,6 +393,16 @@ export const mcpAppsShellAsset = (): McpAppsShellAssetVitePlugin => {
       // configured — which `process.cwd()`-relative writes get wrong for
       // TanStack Start, where the client build writes to `dist/client`.
       this.emitFile({ type: "asset", fileName: url.replace(/^\//, ""), source: html });
+      // A second copy at the STABLE name, for the server side: a Workers host
+      // serves the `ui://executor/shell.html` MCP resource by fetching this
+      // through its ASSETS binding (`makeAssetsShellHtmlLoader`), and the
+      // self-host image reads it from the SPA dist on disk — neither can know
+      // the content hash the client build minted. See `./shell-asset-path`.
+      this.emitFile({
+        type: "asset",
+        fileName: MCP_APPS_SHELL_STABLE_ASSET_PATH.replace(/^\//, ""),
+        source: html,
+      });
     },
     async closeBundle() {
       cached = undefined;

@@ -8,14 +8,16 @@ import { createExecutorMcpServer } from "@executor-js/host-mcp/tool-server";
 import { MCP_APPS_SHELL_RESOURCE_URI } from "@executor-js/host-mcp/create-artifact";
 import type { ExecutionEngine } from "@executor-js/execution";
 
-import { loadMcpAppsShellHtml, MCP_APPS_SHELL_NOT_BUILT_HTML } from "./shell-html";
+import { loadMcpAppsShellHtml } from "./shell-html";
+import { MCP_APPS_SHELL_DOCUMENT_MARKER } from "./shell-asset-path";
 
 // The shipped binary serves the shell from a file on disk (`build:shell` output,
 // copied next to the executable by `apps/cli/src/build.ts`). If that file is
-// missing the loader silently degrades to a placeholder and every generated UI
-// renders blank — so assert an MCP client reading the resource gets the REAL
-// built shell, not the placeholder. This replaces a build-time subprocess probe
-// that hard-slept 7 seconds inside every binary build.
+// missing the loader rejects the resource read — it used to degrade to a
+// placeholder document, which hung every MCP-Apps client silently — so assert
+// an MCP client reading the resource gets the REAL built shell. This replaces
+// a build-time subprocess probe that hard-slept 7 seconds inside every binary
+// build.
 
 const stubEngine: ExecutionEngine<never> = {
   execute: () => Effect.succeed({ result: "ok" }),
@@ -34,7 +36,7 @@ const APPS_CAPS = {
 } as unknown as ClientCapabilities;
 
 describe("MCP-Apps shell resource", () => {
-  it("serves the built shell to an MCP client, not the 'Shell not built' placeholder", async () => {
+  it("serves the built shell to an MCP client", async () => {
     const mcpServer = await Effect.runPromise(
       // Artifacts are opt-in per connection; the shell resource only exists on
       // a session that asked for them.
@@ -58,9 +60,12 @@ describe("MCP-Apps shell resource", () => {
     // The shell is served as text, never as a blob.
     expect("text" in content).toBe(true);
     const html = "text" in content ? content.text : "";
-    expect(html).not.toBe(MCP_APPS_SHELL_NOT_BUILT_HTML);
-    expect(html).not.toContain("Shell not built");
     expect(html).toContain('id="root"');
+    // The identity marker the Workers loader authenticates the document by
+    // (an ASSETS-binding miss under SPA not-found handling answers with
+    // index.html and a 200). Asserted here so the marker leaving the template
+    // fails this suite too, not just the app builds.
+    expect(html).toContain(MCP_APPS_SHELL_DOCUMENT_MARKER);
     // `vite-plugin-singlefile` inlines every asset: a shell that still points at
     // a sibling bundle would 404 inside the host's sandboxed iframe.
     //
