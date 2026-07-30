@@ -211,6 +211,25 @@ type SharedMcpServerConfig = {
    * result. Hosts recording product analytics supply it; core stays agnostic.
    */
   readonly onArtifactUsage?: (action: "created" | "viewed" | "updated") => Effect.Effect<void>;
+  /**
+   * Whether the client this session belongs to can render MCP Apps, as
+   * negotiated at a previous `initialize`.
+   *
+   * Capabilities normally arrive from the client at `initialize` and live only
+   * in the server instance. A session whose host evicted and cold-restored it
+   * (deploy, idle) is rebuilt mid-conversation with no `initialize` to replay,
+   * so without this the rebuilt server assumes no apps support and silently
+   * downgrades every artifact to a deep link. Hosts that persist the
+   * negotiated value pass it back here; the next `initialize`, if one comes,
+   * overwrites it.
+   */
+  readonly restoredAppsEnabled?: boolean;
+  /**
+   * Called when `initialize` negotiates the client's MCP-Apps support, so the
+   * host can persist it for {@link restoredAppsEnabled} on a later cold
+   * restore. Best-effort: failures are swallowed and never affect the session.
+   */
+  readonly onAppsEnabledChange?: (appsEnabled: boolean) => Effect.Effect<void>;
 };
 
 /**
@@ -1505,8 +1524,11 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
     const artifacts = config.artifacts;
 
     // Set from the client's advertised capabilities at `initialize`. Read by
-    // the render handlers to choose inline widget vs. deep link.
-    let appsEnabled = false;
+    // the render handlers to choose inline widget vs. deep link. Seeded from
+    // the host's persisted value so a cold-restored session — rebuilt with no
+    // `initialize` to replay — keeps rendering inline for a client that had
+    // already negotiated apps support.
+    let appsEnabled = config.restoredAppsEnabled ?? false;
     let executeActionTool: { enable: () => void; disable: () => void } | undefined;
     let executeActionResumeTool: { enable: () => void; disable: () => void } | undefined;
 
@@ -1921,7 +1943,28 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
           | (ClientCapabilities & { extensions?: Record<string, unknown> })
           | null,
       );
-      appsEnabled = Boolean(uiCapability?.mimeTypes?.includes(RESOURCE_MIME_TYPE));
+      // Absent capabilities (the SDK returns `undefined`) mean `initialize`
+      // hasn't happened on THIS server instance — the construction-time call
+      // below, or a cold restore that resumed mid-conversation. Neither is
+      // evidence the client lost apps support, so the restored value stands
+      // until a real `initialize` replaces it. Reading `false` off an absent
+      // value here is exactly what made a cold-restored session fall back to
+      // deep links.
+      const negotiated = clientCapabilities
+        ? Boolean(uiCapability?.mimeTypes?.includes(RESOURCE_MIME_TYPE))
+        : appsEnabled;
+      const changed = negotiated !== appsEnabled;
+      appsEnabled = negotiated;
+
+      // Persist only a real negotiation that moved the value, so the next cold
+      // restore seeds itself. Best-effort: the session must not fail on it.
+      const onAppsEnabledChange = config.onAppsEnabledChange;
+      if (clientCapabilities && changed && onAppsEnabledChange) {
+        // oxlint-disable-next-line executor/no-effect-escape-hatch -- boundary: `oninitialized` is a sync SDK hook; persistence is fire-and-forget and its failure must not fail the session
+        void Effect.runPromiseWith(context)(
+          onAppsEnabledChange(negotiated).pipe(Effect.ignoreCause({ log: false })),
+        );
+      }
 
       // `execute-action` is only callable from inside a rendered app, so a
       // client that can't render one should never see it. `create-artifact`,

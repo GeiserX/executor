@@ -280,6 +280,10 @@ export class McpSessionDOSqlite extends McpAgentSessionDOBase<Env, CloudSessionD
         // flag existed carry no value; absent now means off, same as a fresh
         // connection that did not ask for `?artifacts=true`.
         artifactsEnabled: sessionMeta.artifactsEnabled ?? false,
+        // Cold restores rebuild this server with no `initialize` to replay, so
+        // the negotiated apps support comes back from storage instead.
+        restoredAppsEnabled: sessionMeta.appsEnabled ?? false,
+        onAppsEnabledChange: (appsEnabled) => self.persistAppsEnabled(appsEnabled),
         loadAppShellHtml,
         smokeRenderArtifact,
         artifactUrl: artifactUrlFor(

@@ -109,6 +109,17 @@ export interface SessionMeta {
    *  `buildMcpServer` scopes the tool catalog to it. */
   readonly resource: McpResource;
   readonly webOrigin?: string;
+  /**
+   * Whether this session's client advertised MCP-Apps support at `initialize`.
+   *
+   * Capabilities are negotiated once, into the server instance's memory. When
+   * the DO is evicted (deploy, idle) and a later request cold-restores it, the
+   * rebuilt server never sees an `initialize` — so without persisting this, an
+   * apps-capable client silently drops to artifact deep links mid-conversation.
+   * Absent — including for sessions persisted before this field existed — means
+   * unknown, which behaves as disabled until the next `initialize`.
+   */
+  readonly appsEnabled?: boolean;
 }
 
 export interface BuiltMcpServer {
@@ -355,6 +366,28 @@ export abstract class McpAgentSessionDOBase<
     await this.ctx.storage.put(SESSION_META_KEY, sessionMeta);
   }
 
+  /**
+   * Persist the MCP-Apps support negotiated at `initialize`, so a later cold
+   * restore can rebuild the server with it. Subclasses hand this to
+   * `createExecutorMcpServer` as `onAppsEnabledChange`.
+   *
+   * A no-op before meta exists: `initialize` always follows `init`, so there is
+   * nothing to merge into and nothing worth failing the session over.
+   */
+  protected persistAppsEnabled(appsEnabled: boolean): Effect.Effect<void> {
+    const self = this;
+    return Effect.gen(function* () {
+      const stored = yield* self.loadSessionMeta();
+      if (!stored || stored.appsEnabled === appsEnabled) return;
+      yield* Effect.promise(() => self.saveSessionMeta({ ...stored, appsEnabled }));
+    }).pipe(
+      Effect.withSpan("mcp.session.persist_apps_enabled", {
+        attributes: { "mcp.artifact.apps_enabled": appsEnabled },
+      }),
+      Effect.ignoreCause({ log: false }),
+    );
+  }
+
   private async markActivity(now = Date.now()): Promise<void> {
     this.lastActivityMs = now;
     await Promise.all([
@@ -466,9 +499,15 @@ export abstract class McpAgentSessionDOBase<
     const self = this;
     return Effect.gen(function* () {
       const resolved = yield* self.resolveSessionMeta(token);
+      // `init` runs again on every cold restore, and `resolveSessionMeta`
+      // rebuilds meta from the bearer token — which carries no negotiated
+      // capabilities. Carry the stored value forward, or restoring the session
+      // would erase the very bit that survives the restore.
+      const stored = yield* self.loadSessionMeta();
       const sessionMeta: SessionMeta = {
         ...resolved,
         ...(token.webOrigin ? { webOrigin: token.webOrigin } : {}),
+        ...(stored?.appsEnabled === undefined ? {} : { appsEnabled: stored.appsEnabled }),
       };
       yield* Effect.promise(() => self.saveSessionMeta(sessionMeta)).pipe(
         Effect.withSpan("mcp.session.save_meta"),
