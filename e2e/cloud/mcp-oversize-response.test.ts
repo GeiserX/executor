@@ -117,7 +117,7 @@ scenario(
     const messages = yield* Effect.promise(() => readSseMessages(read)).pipe(
       Effect.timeoutOrElse({
         duration: "60 seconds",
-        orElse: () => Effect.dieMessage("shell read hung: the response frame never arrived"),
+        orElse: () => Effect.die(new Error("shell read hung: the response frame never arrived")),
       }),
     );
 
