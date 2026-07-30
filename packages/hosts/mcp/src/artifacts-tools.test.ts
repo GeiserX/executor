@@ -292,6 +292,81 @@ describe("MCP host — artifact tool visibility", () => {
     await serverTransport.close();
   });
 
+  // The restore path the `agents` runtime actually takes, and the one that
+  // reached production. On cold restore it replays the PERSISTED `initialize`
+  // REQUEST (`reinitializeServer`), which does re-establish the server's client
+  // capabilities — but it never replays the `notifications/initialized`
+  // NOTIFICATION, and `oninitialized` (the only hook that re-runs
+  // `syncToolAvailability`) fires solely on that notification. So the rebuilt
+  // server holds full apps capabilities while nothing re-reads them, and the
+  // replay is dispatched un-awaited, so a tool call can also land ahead of it.
+  //
+  // Both orderings are covered here: capabilities present but no hook, and a
+  // tool call dispatched before the replay arrives at all.
+  it("renders inline on a restore that replays initialize without the initialized notification", async () => {
+    const store = makeArtifactStore();
+    const mcpServer = await Effect.runPromise(
+      createExecutorMcpServer({
+        engine: makeStubEngine({}),
+        artifacts: store.port,
+        artifactsEnabled: true,
+        loadAppShellHtml: () => Promise.resolve(SHELL_HTML),
+        // Nothing persisted: the capability must come from the replay alone, so
+        // a passing assertion cannot be coming from the seed.
+        restoredAppsEnabled: false,
+        artifactUrl: artifactUrlFor("https://executor.test"),
+      }),
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await mcpServer.connect(serverTransport);
+
+    const responses = new Map<string | number, Record<string, unknown>>();
+    clientTransport.onmessage = (message) => {
+      const envelope = message as { id?: string | number; result?: Record<string, unknown> };
+      if (envelope.id !== undefined && envelope.result) responses.set(envelope.id, envelope.result);
+    };
+    await clientTransport.start();
+
+    // Exactly what `agents/mcp` replays: the initialize request under its
+    // restore sentinel id, and no `notifications/initialized` after it.
+    await clientTransport.send({
+      jsonrpc: "2.0",
+      id: "__worker_transport_restore__",
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: APPS_CAPS,
+        clientInfo: { name: "ClaudeAI", version: "1.0.0" },
+      },
+    } as never);
+    await vi.waitFor(() =>
+      expect(mcpServer.server.getClientCapabilities()).toMatchObject(APPS_CAPS),
+    );
+
+    const call = async (id: number, method: string, params: Record<string, unknown>) => {
+      await clientTransport.send({ jsonrpc: "2.0", id, method, params });
+      await vi.waitFor(() => expect(responses.has(id)).toBe(true));
+      return responses.get(id) ?? {};
+    };
+
+    const created = (await call(1, "tools/call", {
+      name: "create-artifact",
+      arguments: { code: COUNTER_CODE, title: "Active users dashboard" },
+    })) as { structuredContent?: Record<string, unknown> };
+    expect(created.structuredContent).toEqual({ code: COUNTER_CODE, artifactId: "art_1" });
+    expect(created.structuredContent).not.toHaveProperty("status", "fallback_url");
+
+    // The widget is useless if it cannot call back in, so visibility has to
+    // reconcile on the same restore.
+    const listed = (await call(2, "tools/list", {})) as { tools: Array<{ name: string }> };
+    const names = listed.tools.map((tool) => tool.name);
+    expect(names).toContain("execute-action");
+    expect(names).toContain("execute-action-resume");
+
+    await clientTransport.close();
+    await serverTransport.close();
+  });
+
   it("still falls back to a deep link when the restored session had no apps support", async () => {
     const store = makeArtifactStore();
     await withClient(

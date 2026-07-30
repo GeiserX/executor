@@ -1525,12 +1525,34 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
 
     // Set from the client's advertised capabilities at `initialize`. Read by
     // the render handlers to choose inline widget vs. deep link. Seeded from
-    // the host's persisted value so a cold-restored session — rebuilt with no
-    // `initialize` to replay — keeps rendering inline for a client that had
-    // already negotiated apps support.
+    // the host's persisted value so a cold-restored session keeps rendering
+    // inline for a client that had already negotiated apps support.
+    //
+    // This is a cache, not the source of truth: `appsSupported()` below reads
+    // the live server on every render, because a cold restore re-establishes
+    // capabilities without ever running the hook that maintains this variable.
     let appsEnabled = config.restoredAppsEnabled ?? false;
     let executeActionTool: { enable: () => void; disable: () => void } | undefined;
     let executeActionResumeTool: { enable: () => void; disable: () => void } | undefined;
+
+    /**
+     * Move the cached flag and the app-only tools together.
+     *
+     * `execute-action` is only callable from inside a rendered app, so a client
+     * that can't render one should never see it. `create-artifact`,
+     * `list-artifacts` and `show-artifact` stay visible regardless: they still
+     * persist, and still return something useful (a deep link).
+     */
+    const applyAppsEnabled = (next: boolean): void => {
+      appsEnabled = next;
+      if (next) {
+        executeActionTool?.enable();
+        executeActionResumeTool?.enable();
+      } else {
+        executeActionTool?.disable();
+        executeActionResumeTool?.disable();
+      }
+    };
 
     // Best-effort usage observation; a failing observer never affects the tool.
     const notifyArtifactUsage = (action: "created" | "viewed" | "updated"): Effect.Effect<void> =>
@@ -1558,19 +1580,56 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
           preview: input.preview ?? null,
         });
         yield* notifyArtifactUsage(input.existingId === undefined ? "created" : "updated");
+        // Resolve once and report the value actually used, so the span can
+        // never disagree with what the client received.
+        const delivered = deliverArtifact({
+          code: saved.code,
+          artifactId: saved.id,
+          title: saved.title,
+        });
         yield* Effect.annotateCurrentSpan({
           "mcp.artifact.id": saved.id,
           "mcp.artifact.apps_enabled": appsEnabled,
         });
-        return deliverArtifact({ code: saved.code, artifactId: saved.id, title: saved.title });
+        return delivered;
       });
+
+    /**
+     * Whether the client can render an app, resolved at render time.
+     *
+     * `appsEnabled` alone is not enough. On a cold restore the host replays the
+     * persisted `initialize` *request* — which does set the server's client
+     * capabilities — but never the `notifications/initialized` notification,
+     * and `oninitialized` (the only hook that re-runs `syncToolAvailability`)
+     * fires solely on that notification. So a restored session can hold full
+     * apps capabilities while `appsEnabled` still reads its seeded value, and
+     * the replay is dispatched un-awaited, so a tool call can land before it.
+     *
+     * Reading the live server here makes both orderings produce the same
+     * answer, and keeps the seeded value as the fallback for the window before
+     * any capabilities exist.
+     */
+    const appsSupported = (): boolean => {
+      const live = server.server.getClientCapabilities();
+      if (!live) return appsEnabled;
+      const uiCapability = getUiCapability(
+        live as ClientCapabilities & { extensions?: Record<string, unknown> },
+      );
+      const supported = Boolean(uiCapability?.mimeTypes?.includes(RESOURCE_MIME_TYPE));
+      // Reconcile the tools too: a restore that re-established capabilities
+      // without firing `oninitialized` would otherwise render inline while
+      // `execute-action` — the tool that rendered app calls back into — stayed
+      // hidden, leaving the widget unable to do anything.
+      if (supported !== appsEnabled) applyAppsEnabled(supported);
+      return supported;
+    };
 
     const deliverArtifact = (input: {
       readonly code: string;
       readonly artifactId: string;
       readonly title: string;
     }): McpToolResult => {
-      if (appsEnabled) return renderedInAppResult(input);
+      if (appsSupported()) return renderedInAppResult(input);
       const url = config.artifactUrl?.(input.artifactId);
       return url
         ? renderedAsLinkResult({ url, artifactId: input.artifactId, title: input.title })
@@ -1936,6 +1995,11 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
     // answered from whatever is registered at that moment — so app-only tool
     // visibility has to be re-synced from the `oninitialized` hook rather than
     // decided at construction.
+    //
+    // This hook covers live clients only. It does NOT run on a cold restore:
+    // the host replays the persisted `initialize` request, but `oninitialized`
+    // fires on the `notifications/initialized` notification, which is never
+    // persisted. `appsSupported()` is what makes the restored case correct.
     const syncToolAvailability = () => {
       const clientCapabilities = server.server.getClientCapabilities();
       const uiCapability = getUiCapability(
@@ -1954,28 +2018,19 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
         ? Boolean(uiCapability?.mimeTypes?.includes(RESOURCE_MIME_TYPE))
         : appsEnabled;
       const changed = negotiated !== appsEnabled;
-      appsEnabled = negotiated;
+      applyAppsEnabled(negotiated);
 
       // Persist only a real negotiation that moved the value, so the next cold
       // restore seeds itself. Best-effort: the session must not fail on it.
+      // The `clientCapabilities` guard matters beyond skipping a no-op write:
+      // persisting an absent-capability reading would make a downgrade durable
+      // for every future restore of the session.
       const onAppsEnabledChange = config.onAppsEnabledChange;
       if (clientCapabilities && changed && onAppsEnabledChange) {
         // oxlint-disable-next-line executor/no-effect-escape-hatch -- boundary: `oninitialized` is a sync SDK hook; persistence is fire-and-forget and its failure must not fail the session
         void Effect.runPromiseWith(context)(
           onAppsEnabledChange(negotiated).pipe(Effect.ignoreCause({ log: false })),
         );
-      }
-
-      // `execute-action` is only callable from inside a rendered app, so a
-      // client that can't render one should never see it. `create-artifact`,
-      // `list-artifacts` and `show-artifact` stay visible regardless: they
-      // still persist, and still return something useful (a deep link).
-      if (appsEnabled) {
-        executeActionTool?.enable();
-        executeActionResumeTool?.enable();
-      } else {
-        executeActionTool?.disable();
-        executeActionResumeTool?.disable();
       }
 
       console.error(
