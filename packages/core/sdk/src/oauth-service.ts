@@ -1392,7 +1392,13 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
       return connection;
     }).pipe(
       Effect.withSpan("executor.oauth.complete", {
-        attributes: { "executor.oauth.grant": "authorization_code" },
+        attributes: {
+          "executor.oauth.grant": "authorization_code",
+          // Same per-customer dimensions as executor.oauth.refresh, so a
+          // connect and its later refresh failures group under one tenant.
+          "executor.tenant": deps.tenant,
+          ...(deps.subject != null ? { "executor.subject": deps.subject } : {}),
+        },
       }),
     );
 

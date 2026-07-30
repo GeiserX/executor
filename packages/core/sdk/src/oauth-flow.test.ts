@@ -962,6 +962,116 @@ describe("oauth token refresh in resolveConnectionValue", () => {
     ),
   );
 
+  it.effect("a definitively rejected grant is not re-sent to the AS on later refreshes", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const server = yield* serveOAuthTestServer({
+          scopes: ["read"],
+          supportRefresh: false,
+          tokenExpiresInSeconds: 0,
+          invalidRefreshTokenDescription: "Grant revoked",
+        });
+        const harness = yield* makeTestWorkspaceHarness({ plugins });
+        const { executor, config } = harness;
+        yield* executor.acme.seed();
+
+        yield* executor.oauth.createClient({
+          owner: "org",
+          slug: CLIENT,
+          authorizationUrl: server.authorizationEndpoint,
+          tokenUrl: server.tokenEndpoint,
+          grant: "authorization_code",
+          clientId: "test-client",
+          clientSecret: "test-secret",
+          resource: server.mcpResourceUrl,
+        });
+
+        const started = yield* executor.oauth.start({
+          owner: "org",
+          client: CLIENT,
+          clientOwner: "org",
+          name: ConnectionName.make("main"),
+          integration: INTEG,
+          template: TEMPLATE,
+        });
+        expect(started.status).toBe("redirect");
+        if (started.status !== "redirect") return;
+        const callback = yield* server.completeAuthorizationCodeFlow({
+          authorizationUrl: started.authorizationUrl,
+        });
+        yield* executor.oauth.complete({ state: started.state, code: callback.code });
+
+        yield* Effect.promise(() =>
+          config.db.updateMany("connection", {
+            where: (b) => b("name", "=", "main"),
+            set: { expires_at: Date.now() - 60_000 },
+          }),
+        );
+        yield* server.clearRequests;
+
+        // First resolve: the refresh grant reaches the AS and is rejected
+        // with invalid_grant — the AS's definitive verdict.
+        const first = yield* Effect.flip(
+          executor.execute(ToolAddress.make("tools.acme.org.main.whoami"), {}),
+        );
+        expect(JSON.stringify(first)).toContain("invalid_grant");
+
+        // The verdict is persisted: the dead-grant marker plus an expired
+        // health record, without waiting for a probe.
+        const row = yield* Effect.promise(() =>
+          config.db.findFirst("connection", { where: (b) => b("name", "=", "main") }),
+        );
+        expect(
+          (row?.provider_state as { oauthReauthRequiredAt?: number } | null)?.oauthReauthRequiredAt,
+        ).toEqual(expect.any(Number));
+        expect(row?.last_health).toMatchObject({ status: "expired" });
+
+        const grantRequests = () =>
+          server.requests.pipe(
+            Effect.map(
+              (all) =>
+                all.filter((r) => r.path === "/token" && r.body.includes("refresh_token")).length,
+            ),
+          );
+        const sentBefore = yield* grantRequests();
+        expect(sentBefore).toBe(1);
+
+        // Later resolves still fail reauth-required, but WITHOUT re-sending
+        // the dead grant: the token endpoint sees no further traffic.
+        const second = yield* Effect.flip(
+          executor.execute(ToolAddress.make("tools.acme.org.main.whoami"), {}),
+        );
+        expect(JSON.stringify(second)).toContain("Reconnect");
+        expect(yield* grantRequests()).toBe(sentBefore);
+
+        // Reconnecting mints a fresh grant and re-arms refresh: the marker is
+        // gone and resolution works again.
+        const restarted = yield* executor.oauth.start({
+          owner: "org",
+          client: CLIENT,
+          clientOwner: "org",
+          name: ConnectionName.make("main"),
+          integration: INTEG,
+          template: TEMPLATE,
+        });
+        expect(restarted.status).toBe("redirect");
+        if (restarted.status !== "redirect") return;
+        const reCallback = yield* server.completeAuthorizationCodeFlow({
+          authorizationUrl: restarted.authorizationUrl,
+        });
+        yield* executor.oauth.complete({ state: restarted.state, code: reCallback.code });
+
+        const cleared = yield* Effect.promise(() =>
+          config.db.findFirst("connection", { where: (b) => b("name", "=", "main") }),
+        );
+        expect(
+          (cleared?.provider_state as { oauthReauthRequiredAt?: number } | null)
+            ?.oauthReauthRequiredAt,
+        ).toBeUndefined();
+      }),
+    ),
+  );
+
   it.effect(
     "checkHealth reports healthy from OAuth credential resolution when no probe is configured",
     () =>

@@ -730,6 +730,19 @@ const missingOAuthScopesFromProviderState = (value: unknown): readonly string[] 
     : [];
 };
 
+/** Epoch ms of the definitive refresh rejection recorded on `provider_state`,
+ *  or null. Set when the AS rejects the grant itself (RFC 6749 invalid_grant —
+ *  retrying cannot change the verdict); cleared by the reconnect mint, which
+ *  rewrites `provider_state` wholesale. While set, refresh attempts are
+ *  skipped: the pre-fix behavior re-sent a known-dead grant to the AS every
+ *  proactive cycle, forever, and surfaced nothing to the user. */
+const oauthReauthRequiredAtFromProviderState = (value: unknown): number | null => {
+  const decoded = decodeJsonColumn(value);
+  if (decoded == null || typeof decoded !== "object" || Array.isArray(decoded)) return null;
+  const at = (decoded as Record<string, unknown>).oauthReauthRequiredAt;
+  return typeof at === "number" ? at : null;
+};
+
 const rowToConnection = (row: ConnectionRow): Connection => {
   const owner = row.owner as Owner;
   const integration = IntegrationSlug.make(row.integration);
@@ -1691,6 +1704,44 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
      *  upstream 401 on a token we believed was still valid (`reactive`). */
     type RefreshTrigger = "proactive" | "reactive";
 
+    /** Record the AS's invalid_grant verdict on the row so later refreshes
+     *  skip the doomed token request, and stamp `last_health` expired so the
+     *  accounts list shows the dead connection at a glance instead of only
+     *  after a manual probe. Merges into `provider_state` (preserving
+     *  `missingOAuthScopes`); the reconnect mint rewrites the column wholesale,
+     *  which is what re-arms refresh. Best-effort: a bookkeeping write failure
+     *  must not mask the refresh failure being reported. */
+    const markRefreshGrantDead = (
+      row: ConnectionRow,
+      detail: string,
+    ): Effect.Effect<void, never> => {
+      const existingState = decodeJsonColumn(row.provider_state);
+      const mergedState =
+        existingState != null && typeof existingState === "object" && !Array.isArray(existingState)
+          ? (existingState as Record<string, unknown>)
+          : {};
+      const health: HealthCheckResult = {
+        status: "expired",
+        checkedAt: Date.now(),
+        detail,
+      };
+      return core
+        .updateMany("connection", {
+          where: (b: AnyCb) =>
+            b.and(
+              byOwner(row.owner as Owner)(b),
+              b("integration", "=", String(row.integration)),
+              b("name", "=", String(row.name)),
+            ),
+          set: {
+            provider_state: { ...mergedState, oauthReauthRequiredAt: Date.now() },
+            last_health: health,
+            updated_at: new Date(),
+          },
+        })
+        .pipe(Effect.ignore);
+    };
+
     // Perform the actual refresh-token grant and persist the rotated material.
     const performTokenRefresh = (
       row: ConnectionRow,
@@ -1707,6 +1758,20 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
             message,
             reauthRequired: true,
           });
+
+        // A recorded invalid_grant is the AS's standing verdict on this grant:
+        // re-sending it cannot succeed, so don't. Fail as reauth-required
+        // without a token request — the reconnect mint rewrites
+        // `provider_state` and thereby re-arms refresh. Without this gate a
+        // dead connection re-sent its dead grant on every proactive cycle,
+        // indefinitely (owner.com's Datadog connections: 100+ identical
+        // rejections over two days, surfacing nothing).
+        if (oauthReauthRequiredAtFromProviderState(row.provider_state) !== null) {
+          yield* Effect.annotateCurrentSpan({ "executor.oauth.refresh.skipped_known_dead": true });
+          return yield* reauth(
+            "The authorization server rejected this connection's refresh token (invalid_grant). Reconnect to continue.",
+          );
+        }
 
         // Load the backing app by the owner STORED on the connection (a Personal
         // connection may be backed by a shared Workspace app) — no derivation.
@@ -1813,6 +1878,16 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
                       cause,
                     });
                   }),
+                  // Persist the definitive verdict so the NEXT refresh skips
+                  // the doomed grant (see the known-dead gate above) and the
+                  // connection shows `expired` without waiting for a probe.
+                  Effect.tapError((error) =>
+                    Predicate.isTagged(error, "CredentialResolutionError") &&
+                    error.reauthRequired === true
+                      ? // oxlint-disable-next-line executor/no-unknown-error-message -- boundary: CredentialResolutionError carries a typed `message` field
+                        markRefreshGrantDead(row, error.message)
+                      : Effect.void,
+                  ),
                 );
               });
 
@@ -1879,6 +1954,12 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         ),
         Effect.withSpan("executor.oauth.refresh", {
           attributes: {
+            // Tenant + subject make refresh outcomes answerable PER CUSTOMER
+            // ("is org X's Datadog refresh healthy?") — without them the only
+            // grouping dimensions were integration-wide. Opaque ids, never
+            // emails or org names.
+            "executor.tenant": tenant,
+            ...(subject != null ? { "executor.subject": subject } : {}),
             "executor.integration": String(row.integration),
             "executor.connection": String(row.name),
             // Which path drove this refresh: the expiry check ahead of a call,
@@ -3199,6 +3280,8 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
       }).pipe(
         Effect.withSpan("executor.connection.health.check", {
           attributes: {
+            "executor.tenant": tenant,
+            ...(subject != null ? { "executor.subject": subject } : {}),
             "executor.integration": String(ref.integration),
             "executor.connection": String(ref.name),
           },
@@ -3254,7 +3337,11 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         return result;
       }).pipe(
         Effect.withSpan("executor.connection.validate", {
-          attributes: { "executor.integration": String(input.integration) },
+          attributes: {
+            "executor.tenant": tenant,
+            ...(subject != null ? { "executor.subject": subject } : {}),
+            "executor.integration": String(input.integration),
+          },
         }),
       );
 
