@@ -905,14 +905,27 @@ const renderedInAppResult = (input: {
   readonly code: string;
   readonly artifactId: string;
   readonly title: string;
+  readonly url?: string | undefined;
 }): McpToolResult => ({
   content: [
     {
       type: "text",
-      text: `Rendered "${input.title}" as an interactive UI component. Saved as artifact ${input.artifactId}.`,
+      text: [
+        `Rendered "${input.title}" as an interactive UI component. Saved as artifact ${input.artifactId}.`,
+        // The link rides along even though the widget rendered: clients lose
+        // rendered widgets in ways the server never sees (a transcript
+        // reopened without re-reading the ui:// resource shows raw JSON), and
+        // when that happens this URL in the conversation is the only path
+        // back to the artifact the model can offer.
+        ...(input.url ? [`It also stays available at ${input.url}`] : []),
+      ].join("\n"),
     },
   ],
-  structuredContent: { code: input.code, artifactId: input.artifactId },
+  structuredContent: {
+    code: input.code,
+    artifactId: input.artifactId,
+    ...(input.url ? { url: input.url } : {}),
+  },
 });
 
 const renderedAsLinkResult = (input: {
@@ -1629,8 +1642,8 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
       readonly artifactId: string;
       readonly title: string;
     }): McpToolResult => {
-      if (appsSupported()) return renderedInAppResult(input);
       const url = config.artifactUrl?.(input.artifactId);
+      if (appsSupported()) return renderedInAppResult({ ...input, url });
       return url
         ? renderedAsLinkResult({ url, artifactId: input.artifactId, title: input.title })
         : renderedWithoutSurfaceResult({ artifactId: input.artifactId, title: input.title });

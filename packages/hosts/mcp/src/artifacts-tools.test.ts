@@ -353,7 +353,11 @@ describe("MCP host — artifact tool visibility", () => {
       name: "create-artifact",
       arguments: { code: COUNTER_CODE, title: "Active users dashboard" },
     })) as { structuredContent?: Record<string, unknown> };
-    expect(created.structuredContent).toEqual({ code: COUNTER_CODE, artifactId: "art_1" });
+    expect(created.structuredContent).toEqual({
+      code: COUNTER_CODE,
+      artifactId: "art_1",
+      url: "https://executor.test/artifacts/art_1",
+    });
     expect(created.structuredContent).not.toHaveProperty("status", "fallback_url");
 
     // The widget is useless if it cannot call back in, so visibility has to
@@ -613,6 +617,7 @@ describe("MCP host — create-artifact", () => {
         expect(structuredOf(result)).toEqual({
           code: COUNTER_CODE,
           artifactId: "art_1",
+          url: "https://executor.test/artifacts/art_1",
         });
         expect(result.isError).toBeFalsy();
         expect(store.calls).toEqual([
@@ -624,6 +629,35 @@ describe("MCP host — create-artifact", () => {
             bindings: {},
           },
         ]);
+      },
+      {
+        artifacts: store.port,
+        artifactUrl: artifactUrlFor("https://executor.test"),
+      },
+    );
+  });
+
+  it("includes the deep link beside the inline widget payload when the host knows its URL", async () => {
+    // The widget is not the only consumer of an inline result: clients lose
+    // rendered widgets in ways the server never sees (a reopened transcript
+    // that skips the ui:// re-read shows raw JSON), and then the URL in the
+    // result is the model's only way to point the user back at the artifact.
+    const store = makeArtifactStore();
+    await withClient(
+      makeStubEngine({}),
+      APPS_CAPS,
+      async (client) => {
+        const result = await client.callTool({
+          name: "create-artifact",
+          arguments: { code: COUNTER_CODE, title: "Active users dashboard" },
+        });
+        expect(result.isError).toBeFalsy();
+        expect(structuredOf(result)).toEqual({
+          code: COUNTER_CODE,
+          artifactId: "art_1",
+          url: "https://executor.test/artifacts/art_1",
+        });
+        expect(textOf(result)).toContain("https://executor.test/artifacts/art_1");
       },
       {
         artifacts: store.port,
