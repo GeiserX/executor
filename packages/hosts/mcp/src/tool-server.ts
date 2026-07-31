@@ -574,6 +574,11 @@ const toMcpOutputResult = (
   const extraText: string[] = [];
   if (result.error) {
     extraText.push(formatted.text);
+  } else if (result.result != null) {
+    // A script may both emit() and return: keep the returned value in the
+    // content channel too, or clients that ignore structuredContent drop it.
+    // formatted.text already renders the return value plus any logs.
+    extraText.push(formatted.text);
   } else if (result.logs && result.logs.length > 0) {
     extraText.push(`Logs:\n${result.logs.join("\n")}`);
   }
