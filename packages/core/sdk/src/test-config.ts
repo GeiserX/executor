@@ -122,6 +122,7 @@ export type TestConfigOptions<TPlugins extends readonly AnyPlugin[] = readonly [
    *  no OAuth callback (exercises the fail-loud redirect path). */
   readonly redirectUri?: string | null;
   readonly oauthCallbackStateOrgSlug?: string;
+  readonly firstPartyOAuthClients?: ExecutorConfig<TPlugins>["firstPartyOAuthClients"];
 };
 
 export const makeTestConfig = <const TPlugins extends readonly AnyPlugin[] = readonly []>(
@@ -161,6 +162,7 @@ export const makeTestConfig = <const TPlugins extends readonly AnyPlugin[] = rea
     onElicitation: "accept-all",
     ...(redirectUri != null ? { redirectUri } : {}),
     oauthCallbackStateOrgSlug: options?.oauthCallbackStateOrgSlug,
+    firstPartyOAuthClients: options?.firstPartyOAuthClients,
   };
 };
 
