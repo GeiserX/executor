@@ -138,9 +138,10 @@ Source (and the place to start if something breaks): https://github.com/UsefulSo
             <p
               class="rise-2 mx-auto mb-12 max-w-[50ch] text-[clamp(1.05rem,2.4vw,1.3rem)] leading-[1.5] text-ink-2"
             >
-              Executor is an MCP gateway. Anything that speaks MCP, like Claude
-              Code, Cursor, or Codex, points at one endpoint and reaches every
-              tool you connect.
+              Every agent you run wants its own connections to your email,
+              calendar, and tools. Connect them once in Executor; anything that
+              speaks MCP, like Claude Code, Cursor, or Codex, points at one
+              endpoint and has them all.
             </p>
             <div class="rise-3 max-w-[760px] mx-auto mb-12">
               <div class="surface-card p-6 sm:p-7">
@@ -220,12 +221,85 @@ Source (and the place to start if something breaks): https://github.com/UsefulSo
           <p
             class="text-[clamp(1.5rem,3.4vw,2.2rem)] font-medium tracking-[-0.02em] leading-[1.28] text-ink text-balance"
           >
-            Wiring tools to agents is fiddly, per-client, and easy to get wrong.
-            Executor makes every tool, from any protocol, look the
-            <span class="serif-italic">same</span>: one name, one input
-            schema, one output schema, so any agent can call any of them
-            the same way.
+            You don't have one agent anymore. You have Claude Code, Cursor, a
+            ChatGPT account, something running in a closet. Each one wants its
+            own OAuth into everything, and each one is missing
+            <span class="serif-italic">something</span> when you need it.
           </p>
+          <p
+            class="mt-6 text-[clamp(1.1rem,2.2vw,1.4rem)] font-normal leading-[1.45] text-ink-2 text-balance"
+          >
+            Executor ends the re-wiring. Connect a service once and every agent
+            reaches it through one endpoint, with every tool in the same shape:
+            one name, one input schema, one output schema.
+          </p>
+        </div>
+      </section>
+
+      {/* ─── MULTI-ACCOUNT ─── */}
+      <section class="py-20 sm:py-28 border-t border-rule">
+        <div class="reveal max-w-[1100px] mx-auto px-6 sm:px-10">
+          <div class="grid md:grid-cols-2 gap-12 md:gap-16 items-center">
+            <div>
+              <div class="eyebrow mb-4">Every account</div>
+              <h2 class="section-title mb-5">
+                All your accounts. Not just <span class="serif-italic">one</span>.
+              </h2>
+              <div class="space-y-4 text-[15.5px] leading-[1.6] text-ink-2 text-pretty">
+                <p>
+                  Most agent connectors stop at one account per service: one
+                  Google login, so your agent sees your work calendar or your
+                  personal one, never both. Your flights land in one inbox and
+                  your meetings in the other, and no agent can reason over your
+                  actual day.
+                </p>
+                <p>
+                  Executor treats accounts as connections: add as many as you
+                  have, per service, side by side. Work and personal Gmail, two
+                  calendars, a staging and a production Stripe. Every agent you
+                  point at Executor sees all of them at once.
+                </p>
+              </div>
+            </div>
+            <div class="surface-card p-6 sm:p-7">
+              <div class="font-mono text-[11px] uppercase tracking-[0.18em] text-ink-3 mb-4">
+                Connections · google-calendar
+              </div>
+              <div class="divide-y divide-rule">
+                {[
+                  { account: "you@company.com", note: "work" },
+                  { account: "you@gmail.com", note: "personal" },
+                ].map(({ account, note }) => (
+                  <div class="flex items-center justify-between py-3">
+                    <span class="font-mono text-[13px] text-ink">{account}</span>
+                    <span class="font-mono text-[11px] uppercase tracking-[0.12em] text-ink-3"
+                      >{note}</span
+                    >
+                  </div>
+                ))}
+              </div>
+              <div class="font-mono text-[11px] uppercase tracking-[0.18em] text-ink-3 mt-6 mb-4">
+                Connections · gmail
+              </div>
+              <div class="divide-y divide-rule">
+                {[
+                  { account: "you@company.com", note: "work" },
+                  { account: "you@gmail.com", note: "personal" },
+                ].map(({ account, note }) => (
+                  <div class="flex items-center justify-between py-3">
+                    <span class="font-mono text-[13px] text-ink">{account}</span>
+                    <span class="font-mono text-[11px] uppercase tracking-[0.12em] text-ink-3"
+                      >{note}</span
+                    >
+                  </div>
+                ))}
+              </div>
+              <p class="mt-5 text-[13px] leading-[1.5] text-ink-3">
+                One question — "what does my day look like?" — answered across
+                every account you have.
+              </p>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -524,6 +598,26 @@ Source (and the place to start if something breaks): https://github.com/UsefulSo
                 name; Executor attaches the credential to the real request
                 outside the sandbox, so a token is never present in anything the
                 model can read.
+              </div>
+            </details>
+
+            <details class="faq-item">
+              <summary>
+                Can I replace my agents' built-in connectors with Executor?
+                <span class="faq-mark"
+                  ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    stroke-width="2" stroke-linecap="round"
+                    ><path d="M12 5v14M5 12h14"></path></svg
+                  ></span
+                >
+              </summary>
+              <div class="faq-body">
+                Yes, and that is the intended setup: connect your accounts in
+                Executor, point each agent at it, and disconnect the per-agent
+                integrations so everything flows through one place. You keep the
+                same tools and gain what first-party connectors don't offer:
+                multiple accounts per service, per-tool policies, and one place
+                to see and revoke access.
               </div>
             </details>
 
