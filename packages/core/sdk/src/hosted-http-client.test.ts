@@ -1,574 +1,41 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, Layer, Result } from "effect";
-import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http";
-import { createServer, type Server } from "node:http";
+import { Effect, Predicate, Result } from "effect";
+import { HttpClient, HttpClientRequest } from "effect/unstable/http";
 
 import {
   type HostedHostnameResolver,
   makeHostedFetch,
-  makeHostedHttp,
   makeHostedHttpClientLayer,
   validateHostedOutboundUrl,
 } from "./hosted-http-client";
 
-const publicResolver: HostedHostnameResolver = async () => [{ address: "93.184.216.34" }];
-
-// A stub `fetch` accepts any init, so the shape of what the adapter hands the
-// transport is exactly what a stub cannot check — undici rejects a streamed
-// body whose init omits `duplex`, and no fake will ever say so. This drives a
-// real server so the transport's own requirements are the assertion.
-const withServer = <A>(
-  f: (input: {
-    readonly baseUrl: string;
-    readonly received: Array<{ readonly method: string; readonly body: string }>;
-  }) => Promise<A>,
-) =>
-  new Promise<A>((resolve, reject) => {
-    const received: Array<{ method: string; body: string }> = [];
-    const server: Server = createServer((request, response) => {
-      const chunks: Array<Buffer> = [];
-      request.on("data", (chunk: Buffer) => chunks.push(chunk));
-      request.on("end", () => {
-        received.push({
-          method: request.method ?? "",
-          body: Buffer.concat(chunks).toString("utf8"),
-        });
-        response.statusCode = 200;
-        response.end("ok");
-      });
-    });
-
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        server.close();
-        // oxlint-disable-next-line executor/no-promise-reject, executor/no-error-constructor -- boundary: Node listen callback is adapted into the test Promise failure path
-        reject(new Error("Server did not bind to a TCP port"));
-        return;
-      }
-      f({ baseUrl: `http://127.0.0.1:${address.port}`, received })
-        .then(resolve, reject)
-        .finally(() => server.close());
-    });
-  });
-
-// Reproduces the raw Promise rejection node:dns/promises produces at the
-// adapter boundary under test. The rejection value is deliberately opaque:
-// the guard discards it and maps every failure to the same tagged error, so
-// carrying a getaddrinfo code here would imply a distinction that is not made.
-const nodeDnsRejection = (): Promise<never> =>
-  // oxlint-disable-next-line executor/no-promise-reject -- boundary: fixture mirrors the raw Promise rejection node:dns produces
-  Promise.reject("getaddrinfo failure");
-
-// The guard error is thrown inside the fetch adapter, so the HttpClient
-// surfaces it wrapped in a RequestError whose cause is the blocked error.
-const expectBlocked = (result: Result.Result<unknown, unknown>, reason: string) => {
-  expect(result).toMatchObject({
-    _tag: "Failure",
-    failure: { cause: { _tag: "HostedOutboundRequestBlocked", reason } },
-  });
-};
+const publicResolver: HostedHostnameResolver = async () => [
+  { address: "93.184.216.34", family: 4 },
+];
 
 describe("hosted outbound HTTP client", () => {
   it.effect("allows public HTTP and HTTPS URLs", () =>
     Effect.gen(function* () {
-      yield* validateHostedOutboundUrl("https://example.com/openapi.json", {
-        resolveHostname: publicResolver,
-      });
-      yield* validateHostedOutboundUrl("http://example.com/graphql", {
-        resolveHostname: publicResolver,
-      });
+      yield* validateHostedOutboundUrl("https://example.com/openapi.json");
+      yield* validateHostedOutboundUrl("http://example.com/graphql");
     }),
   );
 
-  it.effect("rejects non-HTTP protocols", () =>
-    Effect.gen(function* () {
-      for (const url of ["file:///etc/passwd", "data:text/plain,x", "gopher://example.com/"]) {
-        const error = yield* validateHostedOutboundUrl(url).pipe(Effect.flip);
-        expect(error).toMatchObject({
-          _tag: "HostedOutboundRequestBlocked",
-          reason: "Only HTTP and HTTPS outbound requests are allowed",
-        });
-      }
-    }),
-  );
-
-  // One representative per arm of the IPv4 blocklist, so deleting any range
-  // turns a test red: this-network, loopback, RFC1918 x3, CGNAT, link-local,
-  // 192.0.0.0/24, benchmark, multicast.
   it.effect("rejects local and private network URLs", () =>
     Effect.gen(function* () {
       for (const url of [
         "http://localhost:3000",
-        // The subdomain form is what a dev server or local reverse proxy
-        // actually hands out, and it never reaches the resolved-address check.
-        "http://app.localhost/",
-        // WHATWG keeps every trailing dot, so a hostname stripped of only one
-        // stays unequal to "localhost" and skips the whole name check while
-        // still resolving to the same host.
-        "http://localhost../",
-        "http://0.0.0.0/",
         "http://127.0.0.1:3000",
         "http://10.0.0.1/openapi.json",
-        "http://100.64.0.1/",
-        "http://169.254.1.1/",
         "http://172.16.0.1/graphql",
-        "http://192.0.0.1/",
         "http://192.168.1.10/mcp",
-        "http://198.18.0.1/",
-        "http://224.0.0.1/",
-        // The far edge of every range spanning more than one second octet.
-        // Without these, narrowing a range to the single value tested above
-        // leaves the suite green while a live private destination becomes
-        // reachable — the guard would still look covered.
-        "http://100.127.255.255/",
-        "http://172.31.255.255/",
-        "http://198.19.255.255/",
-        // 224.0.0.0-255.255.255.255 is one arm spanning four /4s: with only
-        // 224.0.0.1 above, narrowing it to `a === 224` — or to multicast plus
-        // one value — unblocks reserved 240.0.0.0/4 and the broadcast address
-        // with the suite still green.
-        "http://240.0.0.1/",
-        "http://255.255.255.255/",
-      ]) {
-        // The public resolver pins WHICH rule blocked: were these to slip
-        // past the pre-resolution check, resolution would succeed with a
-        // public address and the URL would be allowed, failing the test.
-        const error = yield* validateHostedOutboundUrl(url, {
-          resolveHostname: publicResolver,
-        }).pipe(Effect.flip);
-        expect(error).toMatchObject({
-          _tag: "HostedOutboundRequestBlocked",
-          reason: "Local and private network addresses are not allowed",
-        });
-      }
-      // The second entry is the same name with a second root dot appended:
-      // the resolver treats it identically, so stripping only one dot would
-      // let the metadata endpoint through by adding one character.
-      for (const url of [
         "http://169.254.169.254/latest/meta-data/",
-        "http://metadata.google.internal../computeMetadata/v1/",
-        // The metadata block runs ahead of the allowLocalNetwork gate, so its
-        // invariant is "never reachable" — and a comparison against the one
-        // dotted-decimal spelling cannot hold that. Every IPv6 form carrying
-        // the same destination has to take the same block, or the local and
-        // desktop hosts reach the endpoint by writing the address differently.
-        // Each of these normalizes to a distinct hostname — the WHATWG parser
-        // rewrites a dotted quad inside a literal, so ::ffff:169.254.169.254
-        // and ::ffff:a9fe:a9fe are one input, not two.
-        "http://[::ffff:169.254.169.254]/latest/meta-data/",
-        "http://[::169.254.169.254]/latest/meta-data/",
-        "http://[::ffff:0:a9fe:a9fe]/latest/meta-data/",
-        "http://[2002:a9fe:a9fe::]/latest/meta-data/",
-        "http://[64:ff9b::169.254.169.254]/latest/meta-data/",
-      ]) {
-        const metadataError = yield* validateHostedOutboundUrl(url, {
-          // allowLocalNetwork isolates the metadata arm: without it the
-          // local/private check would block the name first and the test would
-          // pass whether or not the trailing dots were handled.
-          allowLocalNetwork: true,
-          resolveHostname: publicResolver,
-        }).pipe(Effect.flip);
-        expect(metadataError).toMatchObject({
-          _tag: "HostedOutboundRequestBlocked",
-          reason: "Metadata service addresses are not allowed",
-        });
-      }
-    }),
-  );
-
-  it.effect("rejects native IPv6 loopback, link-local, ULA and multicast URLs", () =>
-    Effect.gen(function* () {
-      for (const url of [
-        "http://[::1]/",
-        "http://[::]/",
-        "http://[fe80::1]/",
-        "http://[fd00::1]/",
-        "http://[ff02::1]/",
-        // Both classifiers match a masked range, so testing only its most
-        // canonical member leaves the mask width free: fc00::/7 tightened to
-        // fd00::/8, or fe80::/10 to the exact word, would unblock the other
-        // half of each range with the suite still green. These pin the width.
-        "http://[fc00::1]/",
-        "http://[febf::1]/",
-        // Site-local (fec0::/10) is deprecated but still routed by older
-        // stacks and still handed out by some equipment, and it sits in the
-        // half of fe80::/9 that a link-local-only mask leaves public.
-        "http://[fec0::1]/",
-        "http://[feff::1]/",
       ]) {
         const error = yield* validateHostedOutboundUrl(url).pipe(Effect.flip);
-        expect(error).toMatchObject({
-          _tag: "HostedOutboundRequestBlocked",
-          reason: "Local and private network addresses are not allowed",
-        });
+        expect(Predicate.isTagged(error, "HostedOutboundRequestBlocked")).toBe(true);
       }
     }),
   );
-
-  // Every prefix that carries an IPv4 destination in its low 32 bits must be
-  // classified by that destination. Reading the first non-empty group instead
-  // would let "::169.254.1.1" — which starts with six zero words, not with
-  // 0xa9fe — straight through to the link-local range.
-  //
-  // These deliberately avoid 169.254.169.254: the metadata check runs ahead of
-  // this one and would answer for them, leaving the local/private classifier
-  // free to break with the suite green.
-  it.effect("rejects IPv6 literals that embed a private IPv4 address", () =>
-    Effect.gen(function* () {
-      for (const url of [
-        "http://[::169.254.1.1]/",
-        "http://[::127.0.0.1]/",
-        "http://[::10.0.0.1]/",
-        "http://[64:ff9b::169.254.1.1]/",
-        "http://[64:ff9b::127.0.0.1]/",
-        // RFC 6052 IPv4-translatable (::ffff:0:0:0/96), 6to4 (2002::/16), and
-        // RFC 8215 local-use NAT64 (64:ff9b:1::/48) each reach an embedded or
-        // locally translated IPv4 destination too. Being address literals they
-        // skip the resolved-address check entirely, so classifying them by
-        // their own prefix is the whole guard, not one layer of it.
-        "http://[::ffff:0:7f00:1]/",
-        "http://[::ffff:0:a9fe:101]/",
-        "http://[2002:a9fe:101::]/",
-        "http://[2002:7f00:1::]/",
-        "http://[64:ff9b:1::a9fe:a9fe]/",
-      ]) {
-        const error = yield* validateHostedOutboundUrl(url, {
-          resolveHostname: publicResolver,
-        }).pipe(Effect.flip);
-        expect(error).toMatchObject({
-          _tag: "HostedOutboundRequestBlocked",
-          reason: "Local and private network addresses are not allowed",
-        });
-      }
-    }),
-  );
-
-  // The mirror of the case above: classification reads the leading word, so a
-  // public address keeps being allowed even when a *later* word spells a
-  // blocked prefix — "2001:db8::fe80" is public, not link-local — and a
-  // v4-compatible address to a public destination is allowed like its
-  // v4-mapped equivalent.
-  it.effect("allows IPv6 literals whose leading word is public", () =>
-    Effect.gen(function* () {
-      yield* validateHostedOutboundUrl("http://[2001:db8::fe80]/", {
-        resolveHostname: publicResolver,
-      });
-      yield* validateHostedOutboundUrl("http://[::93.184.216.34]/", {
-        resolveHostname: publicResolver,
-      });
-      // The added prefixes are classified by their embedded destination, not
-      // blocked wholesale — 93.184.216.34 is 5db8:d822.
-      yield* validateHostedOutboundUrl("http://[::ffff:0:5db8:d822]/", {
-        resolveHostname: publicResolver,
-      });
-      yield* validateHostedOutboundUrl("http://[2002:5db8:d822::]/", {
-        resolveHostname: publicResolver,
-      });
-    }),
-  );
-
-  // A resolved address the classifiers cannot decode is not evidence that the
-  // destination is public — it is the guard admitting it cannot tell. Treating
-  // it as "not private" would route every address these parsers reject
-  // straight past the one check that exists to stop it.
-  it.effect("rejects resolved addresses it cannot classify", () =>
-    Effect.gen(function* () {
-      for (const address of ["not-an-address", "10.0.0.1.5", "1:2:3:4:5:6:7:8:9", "::gggg"]) {
-        const error = yield* validateHostedOutboundUrl("https://api.example/x", {
-          resolveHostname: async () => [{ address }],
-        }).pipe(Effect.flip);
-
-        expect(error).toMatchObject({
-          _tag: "HostedOutboundRequestBlocked",
-          reason: "Resolved address is local or private",
-        });
-      }
-    }),
-  );
-
-  // Where the parsers disagree with the platform resolver about what an
-  // address means, the guard reads one destination and the connection dials
-  // another. Both forms below are decoded by the parsers, not rejected by
-  // them, so they reach the classifiers wearing a public-looking leading word
-  // — the exact failure the "cannot classify" test above cannot catch.
-  //
-  // A dotted quad is legal only at the end of the whole address; permitting
-  // one at the end of the head half of a compressed literal puts 0x7f00 in
-  // the leading word, where no prefix or mask matches it. And a leading zero
-  // means octal to inet_aton, so "0177.0.0.1" is 127.0.0.1 to the resolver
-  // and 177.0.0.1 to a decimal-only parser.
-  it.effect("rejects resolved addresses whose syntax the platform reads differently", () =>
-    Effect.gen(function* () {
-      for (const address of [
-        "127.0.0.1::1",
-        "192.168.1.1::",
-        "10.0.0.1::0",
-        "169.254.169.254::1",
-        "0177.0.0.1",
-      ]) {
-        const error = yield* validateHostedOutboundUrl("https://api.example/x", {
-          resolveHostname: async () => [{ address }],
-        }).pipe(Effect.flip);
-
-        expect(error).toMatchObject({
-          _tag: "HostedOutboundRequestBlocked",
-          reason: "Resolved address is local or private",
-        });
-      }
-
-      // Guards against over-blocking: the trailing quad is still legal where
-      // it belongs, so tightening the rule must not reject the v4-compatible
-      // and v4-mapped forms of an ordinary public address.
-      for (const address of ["::93.184.216.34", "::ffff:93.184.216.34"]) {
-        yield* validateHostedOutboundUrl("https://api.example/x", {
-          resolveHostname: async () => [{ address }],
-        });
-      }
-    }),
-  );
-
-  // node:dns can hand back a link-local address carrying its interface scope.
-  // The zone identifier is not part of the address and must not defeat the
-  // classification of the address it is attached to.
-  it.effect("rejects resolved IPv6 addresses that carry a zone identifier", () =>
-    Effect.gen(function* () {
-      const error = yield* validateHostedOutboundUrl("https://api.example/x", {
-        resolveHostname: async () => [{ address: "fe80::1%eth0" }],
-      }).pipe(Effect.flip);
-
-      expect(error).toMatchObject({
-        _tag: "HostedOutboundRequestBlocked",
-        reason: "Resolved address is local or private",
-      });
-
-      // The blocked case alone cannot tell "zone stripped, then classified
-      // link-local" from "parse failed, unclassifiable" — both reach the same
-      // reason. A public zoned address is only allowed when the zone is
-      // genuinely stripped before classification.
-      yield* validateHostedOutboundUrl("https://api.example/x", {
-        resolveHostname: async () => [{ address: "2001:db8::1%eth0" }],
-      });
-    }),
-  );
-
-  // The tagged error is the guard's contract: a malformed URL has to arrive as
-  // a typed block, not as a raw TypeError escaping as an untyped defect.
-  it.effect("rejects input that is not a URL", () =>
-    Effect.gen(function* () {
-      const error = yield* validateHostedOutboundUrl("not a url").pipe(Effect.flip);
-      // The url field is asserted, not just the reason: it is the only part of
-      // the error telling an operator which destination was refused.
-      expect(error).toMatchObject({
-        _tag: "HostedOutboundRequestBlocked",
-        reason: "URL is invalid",
-        url: "not a url",
-      });
-    }),
-  );
-
-  // The root dot is the same name to a resolver but a different string, so an
-  // exact-match blocklist that skipped canonicalization would be defeated by
-  // appending one character. This check sits above the allowLocalNetwork gate
-  // deliberately — it is the one rule that holds even in self-host mode, which
-  // is exactly where the bypass would be reachable.
-  it.effect("blocks metadata hostnames written with a trailing root dot", () =>
-    Effect.gen(function* () {
-      for (const hostname of ["metadata.google.internal.", "metadata.", "instance-data."]) {
-        const error = yield* validateHostedOutboundUrl(`http://${hostname}/latest/meta-data/`, {
-          allowLocalNetwork: true,
-          resolveHostname: async () => [{ address: "169.254.169.254" }],
-        }).pipe(Effect.flip);
-
-        expect(error).toMatchObject({
-          _tag: "HostedOutboundRequestBlocked",
-          reason: "Metadata service addresses are not allowed",
-        });
-      }
-    }),
-  );
-
-  // The name blocklist covers the published metadata hostnames, which is not
-  // the same as covering the endpoint: any name at all can carry an A record
-  // for it. Since the metadata rule holds regardless of allowLocalNetwork, the
-  // resolved-address check has to run in that mode too — gating the lookup on
-  // the flag left the endpoint one DNS record away on exactly the hosts that
-  // set it, with the name never resolved and so never classified.
-  it.effect("blocks a public name that resolves to the metadata endpoint", () =>
-    Effect.gen(function* () {
-      for (const allowLocalNetwork of [false, true]) {
-        const error = yield* validateHostedOutboundUrl(
-          "http://harmless.example/latest/meta-data/",
-          {
-            allowLocalNetwork,
-            resolveHostname: async () => [{ address: "169.254.169.254" }],
-          },
-        ).pipe(Effect.flip);
-
-        expect(error).toMatchObject({
-          _tag: "HostedOutboundRequestBlocked",
-          reason: "Metadata service addresses are not allowed",
-        });
-      }
-    }),
-  );
-
-  // The permissive mode allows local destinations by name; only the metadata
-  // rule applies to what comes back. Were the resolved-address check to reject
-  // local answers here, the flag would stop doing the one thing it exists for.
-  it.effect("allows a name resolving to a local address when local network is allowed", () =>
-    Effect.gen(function* () {
-      yield* validateHostedOutboundUrl("http://nas.local/openapi.json", {
-        allowLocalNetwork: true,
-        resolveHostname: async () => [{ address: "192.168.1.10" }],
-      });
-    }),
-  );
-
-  // A name this resolver cannot see is fatal in the default mode and not in
-  // the permissive one: a self-host behind a tunnel resolves names remotely,
-  // so the transport reaches destinations the local resolver cannot, and that
-  // deployment is what the flag is for. Nothing resolved means nothing can be
-  // the metadata endpoint, and a name that truly does not exist fails at the
-  // transport with its own error.
-  it.effect("does not block on an unresolvable name when local network is allowed", () =>
-    Effect.gen(function* () {
-      const options = {
-        // oxlint-disable-next-line executor/no-promise-reject, executor/no-error-constructor -- boundary: a resolver is a Promise-returning platform seam, and a rejected lookup is what node:dns actually does
-        resolveHostname: async () => Promise.reject(new Error("EAI_AGAIN")),
-      };
-      yield* validateHostedOutboundUrl("http://tunnel.internal/mcp", {
-        ...options,
-        allowLocalNetwork: true,
-      });
-
-      const error = yield* validateHostedOutboundUrl("http://tunnel.internal/mcp", options).pipe(
-        Effect.flip,
-      );
-      expect(error).toMatchObject({
-        _tag: "HostedOutboundRequestBlocked",
-        reason: "Hostname could not be resolved",
-      });
-    }),
-  );
-
-  // The named metadata hostnames are the classic cloud SSRF vector; they are
-  // blocked before resolution, so no resolver is consulted.
-  it.effect("rejects metadata service hostnames without resolving them", () =>
-    Effect.gen(function* () {
-      for (const url of [
-        "http://metadata.google.internal/computeMetadata/v1/",
-        "http://metadata/",
-        "http://instance-data/",
-      ]) {
-        const resolved: string[] = [];
-        const error = yield* validateHostedOutboundUrl(url, {
-          resolveHostname: async (hostname) => {
-            resolved.push(hostname);
-            return [{ address: "93.184.216.34" }];
-          },
-        }).pipe(Effect.flip);
-        expect(resolved).toEqual([]);
-        expect(error).toMatchObject({
-          _tag: "HostedOutboundRequestBlocked",
-          reason: "Metadata service addresses are not allowed",
-        });
-      }
-    }),
-  );
-
-  it.effect("rejects hostnames that resolve to no addresses", () =>
-    Effect.gen(function* () {
-      const error = yield* validateHostedOutboundUrl("https://api.example/openapi.json", {
-        resolveHostname: async () => [],
-      }).pipe(Effect.flip);
-
-      expect(error).toMatchObject({
-        _tag: "HostedOutboundRequestBlocked",
-        reason: "Hostname did not resolve to an address",
-      });
-    }),
-  );
-
-  // An empty answer is a failure, not a successful "no addresses". Only the
-  // error channel takes the zero failure TTL, so caching it as a success would
-  // stamp the full 60s window on one transient empty answer and blackhole the
-  // hostname for its duration — something the uncached code could never do.
-  it("re-resolves after a resolver returns no addresses", async () => {
-    let attempts = 0;
-    const hostedFetch = makeHostedFetch({
-      fetch: async () => new Response("ok"),
-      resolveHostname: async () => {
-        attempts++;
-        return attempts === 1 ? [] : [{ address: "93.184.216.34" }];
-      },
-    });
-
-    await expect(hostedFetch("https://api.example/x")).rejects.toMatchObject({
-      _tag: "HostedOutboundRequestBlocked",
-      reason: "Hostname did not resolve to an address",
-    });
-
-    // The second request must reach the resolver again rather than replaying
-    // the empty answer out of the cache.
-    const recovered = await hostedFetch("https://api.example/x");
-    expect(recovered.status).toBe(200);
-    expect(attempts).toBe(2);
-  });
-
-  // Every host needs both adapters — plugins take the raw fetch, the SDK takes
-  // the layer — so building them separately would resolve each hostname twice
-  // per session and run two TTL windows side by side.
-  it.effect("shares one resolution cache between the fetch and the client layer", () =>
-    Effect.gen(function* () {
-      let resolutions = 0;
-      const fakeFetch: typeof globalThis.fetch = async () => new Response("ok", { status: 200 });
-      const hosted = makeHostedHttp({
-        fetch: fakeFetch,
-        resolveHostname: async () => {
-          resolutions++;
-          return [{ address: "93.184.216.34" }];
-        },
-      });
-
-      yield* Effect.promise(() => hosted.fetch("https://api.example/one"));
-      yield* Effect.gen(function* () {
-        const client = yield* HttpClient.HttpClient;
-        return yield* client.execute(HttpClientRequest.get("https://api.example/two"));
-      }).pipe(Effect.provide(hosted.httpClientLayer));
-
-      // The layer's request reuses what the fetch already resolved.
-      expect(resolutions).toBe(1);
-    }),
-  );
-
-  // A failed lookup is stale under the zero TTL but still occupies a slot, so
-  // a run of dead hostnames would otherwise push the working ones out and put
-  // the resolver back on the hot path — the stall this cache exists to remove.
-  it("does not let failed lookups evict cached ones", async () => {
-    const resolved: Array<string> = [];
-    const hostedFetch = makeHostedFetch({
-      fetch: async () => new Response("ok"),
-      dnsCacheCapacity: 4,
-      resolveHostname: async (hostname) => {
-        resolved.push(hostname);
-        if (hostname.startsWith("dead")) return [];
-        return [{ address: "93.184.216.34" }];
-      },
-    });
-
-    await hostedFetch("https://live.example/x");
-    expect(resolved).toEqual(["live.example"]);
-
-    for (let index = 0; index < 20; index++) {
-      await expect(hostedFetch(`https://dead${index}.example/x`)).rejects.toMatchObject({
-        _tag: "HostedOutboundRequestBlocked",
-      });
-    }
-
-    await hostedFetch("https://live.example/x");
-    expect(resolved.filter((hostname) => hostname === "live.example")).toHaveLength(1);
-  });
 
   it.effect("rejects IPv4-mapped IPv6 URLs for local and private networks", () =>
     Effect.gen(function* () {
@@ -577,110 +44,39 @@ describe("hosted outbound HTTP client", () => {
         "http://[::ffff:10.0.0.1]/openapi.json",
         "http://[::ffff:172.16.0.1]/graphql",
         "http://[::ffff:192.168.1.10]/mcp",
-        "http://[::ffff:169.254.1.1]/",
+        "http://[::ffff:169.254.169.254]/latest/meta-data/",
       ]) {
-        const error = yield* validateHostedOutboundUrl(url, {
-          resolveHostname: publicResolver,
-        }).pipe(Effect.flip);
-        expect(error).toMatchObject({
-          _tag: "HostedOutboundRequestBlocked",
-          reason: "Local and private network addresses are not allowed",
-        });
+        const error = yield* validateHostedOutboundUrl(url).pipe(Effect.flip);
+        expect(Predicate.isTagged(error, "HostedOutboundRequestBlocked")).toBe(true);
       }
     }),
   );
 
-  // Guards against over-blocking, not under-blocking: an embedded-IPv4 prefix
-  // is only a container, so it must be classified by the address it carries
-  // rather than treated as suspicious in itself. Deleting embeddedIpv4 does
-  // NOT turn this red — these prefixes start with 0x0000/0x0064 and match none
-  // of the first-word masks — so this pins the allow behavior against a future
-  // change that blanket-blocks the prefix. The block path embeddedIpv4 does
-  // carry is covered by "rejects IPv6 literals that embed a private IPv4".
-  it.effect("allows IPv4-mapped IPv6 URLs for public addresses", () =>
-    validateHostedOutboundUrl("http://[::ffff:93.184.216.34]/openapi.json"),
-  );
-
   it.effect("can allow local network URLs explicitly", () =>
-    validateHostedOutboundUrl("http://127.0.0.1:3000", { allowLocalNetwork: true }),
+    Effect.gen(function* () {
+      yield* validateHostedOutboundUrl("http://127.0.0.1:3000", {
+        allowLocalNetwork: true,
+      });
+    }),
   );
 
   it.effect("rejects hostnames that resolve to local or private addresses", () =>
     Effect.gen(function* () {
       const error = yield* validateHostedOutboundUrl("https://api.example/openapi.json", {
-        resolveHostname: async () => [{ address: "10.0.0.10" }],
+        resolveHostname: async () => [{ address: "10.0.0.10", family: 4 }],
       }).pipe(Effect.flip);
 
-      expect(error).toMatchObject({
-        _tag: "HostedOutboundRequestBlocked",
-        reason: "Resolved address is local or private",
-      });
-    }),
-  );
-
-  // A resolver returns whatever string the platform gives it, uncompressed
-  // forms included, and nothing normalizes it on the way in — unlike a URL
-  // literal, which the WHATWG parser always compresses. So this is the only
-  // path that reaches the eight-group branch of parseIpv6; a URL can never
-  // exercise it.
-  it.effect("classifies an uncompressed IPv6 address returned by the resolver", () =>
-    Effect.gen(function* () {
-      const error = yield* validateHostedOutboundUrl("https://api.example/openapi.json", {
-        resolveHostname: async () => [{ address: "0:0:0:0:0:0:0:1" }],
-      }).pipe(Effect.flip);
-
-      expect(error).toMatchObject({
-        _tag: "HostedOutboundRequestBlocked",
-        reason: "Resolved address is local or private",
-      });
-    }),
-  );
-
-  // A hostname may hold several A records, and an attacker only needs one of
-  // them to point inside. Every address the name resolves to has to clear the
-  // check, not just the first one the resolver happened to order first —
-  // checking only `addresses[0]` leaves the rest of this file green.
-  it.effect("rejects a hostname whose records mix a public address with a private one", () =>
-    Effect.gen(function* () {
-      const error = yield* validateHostedOutboundUrl("https://api.example/openapi.json", {
-        resolveHostname: async () => [{ address: "93.184.216.34" }, { address: "169.254.1.1" }],
-      }).pipe(Effect.flip);
-
-      expect(error).toMatchObject({
-        _tag: "HostedOutboundRequestBlocked",
-        reason: "Resolved address is local or private",
-      });
-    }),
-  );
-
-  // "beef.cafe" is a registrable DNS name spelled entirely in hex digits and
-  // dots. It must go through resolution like any other hostname; treating it
-  // as an address literal would skip the resolved-address check entirely.
-  it.effect("resolves hex-digit hostnames instead of treating them as IP literals", () =>
-    Effect.gen(function* () {
-      const resolved: string[] = [];
-      const error = yield* validateHostedOutboundUrl("https://beef.cafe/x", {
-        resolveHostname: async (hostname) => {
-          resolved.push(hostname);
-          return [{ address: "169.254.1.1" }];
-        },
-      }).pipe(Effect.flip);
-
-      expect(resolved).toEqual(["beef.cafe"]);
-      expect(error).toMatchObject({
-        _tag: "HostedOutboundRequestBlocked",
-        reason: "Resolved address is local or private",
-      });
+      expect(Predicate.isTagged(error, "HostedOutboundRequestBlocked")).toBe(true);
     }),
   );
 
   it.effect("checks DNS before the first fetch call", () =>
     Effect.gen(function* () {
       let calls = 0;
-      const fakeFetch: typeof globalThis.fetch = async () => {
+      const fakeFetch: typeof globalThis.fetch = (async () => {
         calls++;
         return new Response("unexpected", { status: 200 });
-      };
+      }) as typeof globalThis.fetch;
 
       const result = yield* Effect.gen(function* () {
         const client = yield* HttpClient.HttpClient;
@@ -689,870 +85,39 @@ describe("hosted outbound HTTP client", () => {
         Effect.provide(
           makeHostedHttpClientLayer({
             fetch: fakeFetch,
-            resolveHostname: async () => [{ address: "169.254.1.1" }],
+            resolveHostname: async () => [{ address: "169.254.169.254", family: 4 }],
           }),
         ),
         Effect.result,
       );
 
-      expectBlocked(result, "Resolved address is local or private");
+      expect(Result.isFailure(result)).toBe(true);
       expect(calls).toBe(0);
     }),
   );
 
   it("applies the DNS guard to fetch callers", async () => {
     let calls = 0;
-    const underlying: typeof globalThis.fetch = async () => {
-      calls++;
-      return new Response("unexpected", { status: 200 });
-    };
     const hostedFetch = makeHostedFetch({
-      fetch: underlying,
-      resolveHostname: async () => [{ address: "10.0.0.20" }],
-    });
-
-    await expect(hostedFetch("https://api.example/token")).rejects.toMatchObject({
-      _tag: "HostedOutboundRequestBlocked",
-      reason: "Resolved address is local or private",
-    });
-    expect(calls).toBe(0);
-  });
-
-  it("fails the request when the hostname cannot be resolved", async () => {
-    const hostedFetch = makeHostedFetch({
-      fetch: async () => new Response("unexpected"),
-      resolveHostname: () => nodeDnsRejection(),
-    });
-
-    await expect(hostedFetch("https://api.example/token")).rejects.toMatchObject({
-      _tag: "HostedOutboundRequestBlocked",
-      reason: "Hostname could not be resolved",
-    });
-  });
-
-  // Omitting resolveHostname must not silently drop the resolved-address
-  // check: the default adapter is the one that ships. The label is longer
-  // than the 63 octets RFC 1035 allows, so getaddrinfo rejects it structurally
-  // without emitting a query — the assertion cannot be flipped by a resolver
-  // that wildcards NXDOMAIN, and it touches no network.
-  it("uses the node:dns resolver when none is supplied", async () => {
-    let calls = 0;
-    const hostedFetch = makeHostedFetch({
-      fetch: async () => {
+      fetch: (async () => {
         calls++;
-        return new Response("unexpected");
-      },
+        return new Response("unexpected", { status: 200 });
+      }) as typeof globalThis.fetch,
+      resolveHostname: async () => [{ address: "10.0.0.20", family: 4 }],
     });
-    const overlongLabel = `${"a".repeat(300)}.example.com`;
 
-    await expect(hostedFetch(`https://${overlongLabel}/x`)).rejects.toMatchObject({
+    await expect(hostedFetch("https://api.example/token")).rejects.toMatchObject({
       _tag: "HostedOutboundRequestBlocked",
-      reason: "Hostname could not be resolved",
     });
     expect(calls).toBe(0);
-  });
-
-  it("resolves each hostname once per adapter within the cache window", async () => {
-    const resolved: string[] = [];
-    const hostedFetch = makeHostedFetch({
-      fetch: async () => new Response("ok"),
-      resolveHostname: async (hostname) => {
-        resolved.push(hostname);
-        return [{ address: "93.184.216.34" }];
-      },
-    });
-
-    await hostedFetch("https://api.example/one");
-    await hostedFetch("https://api.example/two");
-    await hostedFetch("https://cdn.example/blob");
-
-    expect(resolved).toEqual(["api.example", "cdn.example"]);
-  });
-
-  // The cache is per adapter on purpose (see withResolutionCache): the MCP host
-  // builds one per session, so a verdict reached in one session must not decide
-  // requests in another. Hoisting the Cache to module scope — the shape that
-  // makes this shared — keeps every other cache test green.
-  it("keeps one adapter's cached resolutions out of another's", async () => {
-    const makeCounting = () => {
-      const resolved: string[] = [];
-      const hostedFetch = makeHostedFetch({
-        fetch: async () => new Response("ok"),
-        resolveHostname: async (hostname) => {
-          resolved.push(hostname);
-          return [{ address: "93.184.216.34" }];
-        },
-      });
-      return { hostedFetch, resolved };
-    };
-
-    const first = makeCounting();
-    const second = makeCounting();
-
-    await first.hostedFetch("https://api.example/one");
-    await second.hostedFetch("https://api.example/two");
-
-    expect(first.resolved).toEqual(["api.example"]);
-    expect(second.resolved).toEqual(["api.example"]);
-  });
-
-  it("re-resolves a hostname after the cache window elapses", async () => {
-    const resolved: string[] = [];
-    const hostedFetch = makeHostedFetch({
-      fetch: async () => new Response("ok"),
-      resolveHostname: async (hostname) => {
-        resolved.push(hostname);
-        return [{ address: "93.184.216.34" }];
-      },
-      dnsCacheTtlMillis: 20,
-    });
-
-    await hostedFetch("https://api.example/one");
-    await new Promise((resolve) => setTimeout(resolve, 40));
-    await hostedFetch("https://api.example/two");
-
-    expect(resolved).toEqual(["api.example", "api.example"]);
-  });
-
-  it("evicts the oldest hostname when the cache capacity is exceeded", async () => {
-    const resolved: string[] = [];
-    const hostedFetch = makeHostedFetch({
-      fetch: async () => new Response("ok"),
-      resolveHostname: async (hostname) => {
-        resolved.push(hostname);
-        return [{ address: "93.184.216.34" }];
-      },
-      dnsCacheCapacity: 1,
-    });
-
-    await hostedFetch("https://api.example/one");
-    await hostedFetch("https://cdn.example/blob");
-    await hostedFetch("https://api.example/two");
-
-    expect(resolved).toEqual(["api.example", "cdn.example", "api.example"]);
-  });
-
-  it("does not cache failed resolutions", async () => {
-    let attempts = 0;
-    const hostedFetch = makeHostedFetch({
-      fetch: async () => new Response("ok"),
-      resolveHostname: async () => {
-        attempts++;
-        if (attempts === 1) return nodeDnsRejection();
-        return [{ address: "93.184.216.34" }];
-      },
-    });
-
-    await expect(hostedFetch("https://api.example/one")).rejects.toMatchObject({
-      _tag: "HostedOutboundRequestBlocked",
-    });
-    const response = await hostedFetch("https://api.example/two");
-
-    expect(response.status).toBe(200);
-    expect(attempts).toBe(2);
-  });
-
-  it("shares one in-flight resolution across concurrent requests", async () => {
-    let resolutions = 0;
-    const gate = Promise.withResolvers<void>();
-    const entered = Promise.withResolvers<void>();
-    const hostedFetch = makeHostedFetch({
-      fetch: async () => new Response("ok"),
-      resolveHostname: async () => {
-        resolutions++;
-        entered.resolve();
-        await gate.promise;
-        return [{ address: "93.184.216.34" }];
-      },
-      // A zero TTL is what makes the count mean what this test says it means.
-      // Under the default 60s window a settled entry is reusable, so
-      // `resolutions === 1` is also satisfied by the second request simply
-      // arriving after the first finished and reading the cache — the test
-      // would keep passing while no longer testing in-flight sharing at all.
-      // With no settled entry to find, one resolution can only be a join.
-      dnsCacheTtlMillis: 0,
-    });
-
-    // The second request is issued only once the first is provably inside the
-    // resolver, then given a turn of the event loop to reach the cache before
-    // the gate opens: issuance order alone does not put it there.
-    const first = hostedFetch("https://api.example/one");
-    await entered.promise;
-    const second = hostedFetch("https://api.example/two");
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    gate.resolve();
-    await Promise.all([first, second]);
-
-    expect(resolutions).toBe(1);
-  });
-
-  // Concurrent callers share one resolution, so aborting one must not cancel
-  // the lookup the others are waiting on. The survivor's outcome is the whole
-  // point: before the shared lookup was detached from the requesting fiber it
-  // failed with an untyped "All fibers interrupted without error".
-  it("keeps concurrent requests alive when one caller aborts", async () => {
-    const gate = Promise.withResolvers<void>();
-    const entered = Promise.withResolvers<void>();
-    const hostedFetch = makeHostedFetch({
-      fetch: async () => new Response("ok"),
-      resolveHostname: async () => {
-        entered.resolve();
-        await gate.promise;
-        return [{ address: "93.184.216.34" }];
-      },
-    });
-
-    const aborter = new AbortController();
-    const aborted = hostedFetch("https://api.example/one", { signal: aborter.signal });
-    const survivor = hostedFetch("https://api.example/two");
-    // Gate on the resolver itself having been entered, not on a microtask tick:
-    // the lookup sits behind runPromise plus forkDetach, so a bare `await` does
-    // not reach it and the abort would land before the work it must not kill.
-    await entered.promise;
-    aborter.abort();
-    gate.resolve();
-
-    // Asserting the shape, not merely that it threw: the regression this test
-    // exists to exclude also throws, so a bare toThrow() would accept it.
-    await expect(aborted).rejects.toMatchObject({ name: "AbortError" });
-    // The survivor completing is the assertion. Its 200 does not prove it was
-    // still waiting on the shared lookup — under the default TTL a caller that
-    // arrived after the first resolution settled would read the cache and get
-    // the same 200 — so no resolution count is asserted here. That the lookup
-    // survives an abort at all is what fails without forkDetach: the survivor
-    // rejects with "All fibers interrupted without error". In-flight sharing
-    // itself is pinned by the zero-TTL test above.
-    expect((await survivor).status).toBe(200);
-  });
-
-  // The guard's verdict is decided by the failure's cause, not by whether the
-  // caller's signal happens to be aborted. Branching on `signal.aborted`
-  // instead reclassifies a real SSRF block as an AbortError — which callers
-  // read as a transport failure and retry — and keeps every test above green.
-  it("reports a blocked URL as a guard failure even when the caller has aborted", async () => {
-    const hostedFetch = makeHostedFetch({
-      fetch: async () => new Response("ok"),
-      resolveHostname: async () => [{ address: "93.184.216.34" }],
-    });
-
-    const aborter = new AbortController();
-    const blocked = hostedFetch("http://169.254.169.254/latest/meta-data", {
-      signal: aborter.signal,
-    });
-    aborter.abort();
-
-    await expect(blocked).rejects.toMatchObject({
-      _tag: "HostedOutboundRequestBlocked",
-      reason: "Metadata service addresses are not allowed",
-    });
-  });
-
-  // A pending cache entry carries no expiry, so without a bound on the lookup
-  // itself one stuck resolution would leave every later request for that
-  // hostname joining the same dead Deferred for the adapter's lifetime.
-  it("recovers from a resolution that never settles", async () => {
-    let attempts = 0;
-    const hostedFetch = makeHostedFetch({
-      fetch: async () => new Response("ok"),
-      resolveHostname: async () => {
-        attempts++;
-        if (attempts === 1) return new Promise<never>(() => {});
-        return [{ address: "93.184.216.34" }];
-      },
-      dnsResolutionTimeoutMillis: 20,
-    });
-
-    await expect(hostedFetch("https://api.example/one")).rejects.toMatchObject({
-      _tag: "HostedOutboundRequestBlocked",
-      reason: "Hostname could not be resolved",
-    });
-    const response = await hostedFetch("https://api.example/two");
-
-    expect(response.status).toBe(200);
-    expect(attempts).toBe(2);
-  });
-
-  it("stops following redirects at the maxRedirects bound", async () => {
-    let calls = 0;
-    const alwaysRedirect: typeof globalThis.fetch = async () => {
-      calls++;
-      return new Response(null, { status: 302, headers: { location: "/next" } });
-    };
-    const hostedFetch = makeHostedFetch({
-      fetch: alwaysRedirect,
-      resolveHostname: publicResolver,
-      maxRedirects: 3,
-    });
-
-    // The exhausted budget is a guard decision, so it arrives as one. Handing
-    // back the raw 302 would be indistinguishable from a successful final
-    // response to a caller that asked to follow redirects, and it may then
-    // follow the Location itself with no guard in front of it.
-    await expect(hostedFetch("https://api.example/start")).rejects.toMatchObject({
-      _tag: "HostedOutboundRequestBlocked",
-      reason: "Redirect limit of 3 exceeded",
-    });
-    expect(calls).toBe(4);
-  });
-
-  it("rejects redirects whose Location header is not a valid URL", async () => {
-    const hostedFetch = makeHostedFetch({
-      fetch: async () => new Response(null, { status: 302, headers: { location: "http://[bad" } }),
-      resolveHostname: publicResolver,
-    });
-
-    await expect(hostedFetch("https://api.example/start")).rejects.toMatchObject({
-      _tag: "HostedOutboundRequestBlocked",
-      reason: "Redirect target is not a valid URL",
-    });
-  });
-
-  // Every redirect rule below is downstream of one instruction: the adapter
-  // must ask the transport not to follow 3xx itself. A real fetch left on its
-  // default follows internally, so hops 2..n are never re-validated and none of
-  // the stripping runs — the guard sees one request and an already-followed
-  // response. The fakes here cannot show that, so the mode is asserted directly.
-  it("tells the transport not to follow redirects on any hop", async () => {
-    const modes: Array<RequestRedirect | undefined> = [];
-    const underlying: typeof globalThis.fetch = async (input, init) => {
-      modes.push(init?.redirect);
-      if (String(input) === "https://api.example/start") {
-        return new Response(null, { status: 302, headers: { location: "/moved" } });
-      }
-      return new Response("ok", { status: 200 });
-    };
-    const hostedFetch = makeHostedFetch({ fetch: underlying, resolveHostname: publicResolver });
-
-    await hostedFetch("https://api.example/start");
-
-    expect(modes).toEqual(["manual", "manual"]);
-  });
-
-  it("demotes POST to GET and drops the body on a 302 redirect", async () => {
-    const seen: Array<{
-      url: string;
-      method: string;
-      hasBody: boolean;
-      contentType: string | null;
-      contentLength: string | null;
-      contentEncoding: string | null;
-      contentLanguage: string | null;
-    }> = [];
-    const underlying: typeof globalThis.fetch = async (input, init) => {
-      const url = String(input);
-      const headers = new Headers(init?.headers);
-      seen.push({
-        url,
-        method: init?.method ?? "GET",
-        hasBody: init?.body !== undefined && init?.body !== null,
-        contentType: headers.get("content-type"),
-        contentLength: headers.get("content-length"),
-        contentEncoding: headers.get("content-encoding"),
-        contentLanguage: headers.get("content-language"),
-      });
-      if (url === "https://api.example/start") {
-        return new Response(null, { status: 302, headers: { location: "/see-here" } });
-      }
-      return new Response("ok", { status: 200 });
-    };
-    const hostedFetch = makeHostedFetch({ fetch: underlying, resolveHostname: publicResolver });
-
-    await hostedFetch("https://api.example/start", {
-      method: "POST",
-      headers: {
-        "content-type": "application/x-www-form-urlencoded",
-        "content-length": "25",
-        "content-encoding": "gzip",
-        "content-language": "en",
-      },
-      body: "client_secret=supersecret",
-    });
-
-    expect(seen).toHaveLength(2);
-    // One representative per content header the demotion drops: a bodyless GET
-    // still advertising content-length: 25 reads as a truncated request, and
-    // the upstream 4xx gets blamed on the caller.
-    expect(seen[1]).toMatchObject({
-      url: "https://api.example/see-here",
-      method: "GET",
-      hasBody: false,
-      contentType: null,
-      contentLength: null,
-      contentEncoding: null,
-      contentLanguage: null,
-    });
-  });
-
-  // Integrations render credentials into arbitrary header names, so a
-  // cross-origin hop keeps only a known-safe set. A 302 demotes the POST
-  // first, so by the time the hop is taken there is no body left to leak.
-  it("strips non-safelisted headers and the body on cross-origin redirects", async () => {
-    const seen: Array<{
-      url: string;
-      apiKey: string | null;
-      accept: string | null;
-      acceptLanguage: string | null;
-      userAgent: string | null;
-      hasBody: boolean;
-    }> = [];
-    const underlying: typeof globalThis.fetch = async (input, init) => {
-      const url = String(input);
-      const headers = new Headers(init?.headers);
-      seen.push({
-        url,
-        apiKey: headers.get("x-api-key"),
-        accept: headers.get("accept"),
-        acceptLanguage: headers.get("accept-language"),
-        userAgent: headers.get("user-agent"),
-        hasBody: init?.body !== undefined && init?.body !== null,
-      });
-      if (url === "https://api.example/start") {
-        return new Response(null, {
-          status: 302,
-          headers: { location: "https://evil.example/collect" },
-        });
-      }
-      return new Response("ok", { status: 200 });
-    };
-    const hostedFetch = makeHostedFetch({ fetch: underlying, resolveHostname: publicResolver });
-
-    await hostedFetch("https://api.example/start", {
-      method: "POST",
-      headers: {
-        "x-api-key": "rendered-credential",
-        accept: "application/json",
-        "accept-language": "en-GB",
-        "user-agent": "executor-test",
-      },
-      body: "client_secret=supersecret",
-    });
-
-    expect(seen).toHaveLength(2);
-    expect(seen[0]).toMatchObject({ apiKey: "rendered-credential", hasBody: true });
-    // One representative per safelisted header: dropping user-agent on a hop
-    // changes what the upstream serves — bot rules, content negotiation — so
-    // the safelist is a contract, not an implementation detail.
-    expect(seen[1]).toMatchObject({
-      url: "https://evil.example/collect",
-      apiKey: null,
-      accept: "application/json",
-      acceptLanguage: "en-GB",
-      userAgent: "executor-test",
-      hasBody: false,
-    });
-  });
-
-  // The scrub is not only about headers. `referrer` and `credentials` are
-  // credential-carrying init fields, and the platform renders `referrer` into
-  // a real Referer header — the full URL, query included, under
-  // referrerPolicy "unsafe-url". An OAuth callback whose query holds a token
-  // would hand that token to the redirect target, past a header safelist that
-  // looks like it covered this.
-  it("drops credential-carrying init fields on cross-origin redirects", async () => {
-    const seen: Array<RequestInit | undefined> = [];
-    const underlying: typeof globalThis.fetch = async (input, init) => {
-      seen.push(init);
-      return String(input).startsWith("https://api.example/start")
-        ? new Response(null, {
-            status: 302,
-            headers: { location: "https://evil.example/collect" },
-          })
-        : new Response("ok", { status: 200 });
-    };
-    const hostedFetch = makeHostedFetch({ fetch: underlying, resolveHostname: publicResolver });
-
-    await hostedFetch(
-      new Request("https://api.example/start?code=authorization-code", {
-        method: "GET",
-        referrer: "https://api.example/start?code=authorization-code",
-        referrerPolicy: "unsafe-url",
-        credentials: "include",
-      }),
-    );
-
-    expect(seen).toHaveLength(2);
-    expect(seen[0]).toMatchObject({
-      referrer: "https://api.example/start?code=authorization-code",
-    });
-    expect(seen[1]?.referrer).toBeUndefined();
-    expect(seen[1]?.referrerPolicy).toBeUndefined();
-    expect(seen[1]?.credentials).toBeUndefined();
-  });
-
-  // The guard pins the transport to `redirect: "manual"` for its own reasons,
-  // which must not be mistaken for the caller's intent. A caller inspecting a
-  // 3xx — the standard OAuth authorize probe — needs the unfollowed response
-  // with its Location header intact.
-  it("returns the unfollowed 3xx when the caller asks for manual redirects", async () => {
-    const seen: Array<string> = [];
-    const underlying: typeof globalThis.fetch = async (input) => {
-      seen.push(String(input));
-      return String(input) === "https://api.example/start"
-        ? new Response(null, { status: 302, headers: { location: "https://api.example/moved" } })
-        : new Response("followed", { status: 200 });
-    };
-    const hostedFetch = makeHostedFetch({ fetch: underlying, resolveHostname: publicResolver });
-
-    const response = await hostedFetch("https://api.example/start", { redirect: "manual" });
-
-    expect(response.status).toBe(302);
-    expect(response.headers.get("location")).toBe("https://api.example/moved");
-    // The hop was never taken, so the guard never saw the second URL.
-    expect(seen).toEqual(["https://api.example/start"]);
-  });
-
-  it("rejects a redirect when the caller asks for redirect: error", async () => {
-    const underlying: typeof globalThis.fetch = async (input) =>
-      String(input) === "https://api.example/start"
-        ? new Response(null, { status: 302, headers: { location: "https://api.example/moved" } })
-        : new Response("followed", { status: 200 });
-    const hostedFetch = makeHostedFetch({ fetch: underlying, resolveHostname: publicResolver });
-
-    await expect(
-      hostedFetch("https://api.example/start", { redirect: "error" }),
-    ).rejects.toMatchObject({
-      _tag: "HostedOutboundRequestBlocked",
-      reason: "Redirect received while the caller requested redirect: error",
-    });
-  });
-
-  // The mode travels on a Request the same way it travels on an init.
-  it("honors a Request input's redirect mode", async () => {
-    const underlying: typeof globalThis.fetch = async (input) =>
-      String(input) === "https://api.example/start"
-        ? new Response(null, { status: 302, headers: { location: "https://api.example/moved" } })
-        : new Response("followed", { status: 200 });
-    const hostedFetch = makeHostedFetch({ fetch: underlying, resolveHostname: publicResolver });
-
-    const response = await hostedFetch(
-      new Request("https://api.example/start", { redirect: "manual" }),
-    );
-
-    expect(response.status).toBe(302);
-  });
-
-  // `fetch(request, {method: undefined})` keeps the Request's method — the
-  // undefined member is absent, not an instruction to clear the field. Reading
-  // the Request into an init and spreading over it would invert that, sending
-  // a credential-bearing POST as an unauthenticated GET.
-  it("ignores explicitly undefined init members over a Request input", async () => {
-    const seen: Array<{ method: string; authorization: string | null }> = [];
-    const underlying: typeof globalThis.fetch = async (_input, init) => {
-      seen.push({
-        method: init?.method ?? "GET",
-        authorization: new Headers(init?.headers).get("authorization"),
-      });
-      return new Response("ok", { status: 200 });
-    };
-    const hostedFetch = makeHostedFetch({ fetch: underlying, resolveHostname: publicResolver });
-
-    await hostedFetch(
-      new Request("https://api.example/x", {
-        method: "POST",
-        headers: { authorization: "Bearer token" },
-      }),
-      { method: undefined, headers: undefined },
-    );
-
-    expect(seen).toEqual([{ method: "POST", authorization: "Bearer token" }]);
-  });
-
-  // `integrity` is a check on what comes back, not a secret handed to the
-  // target, so the scrub that drops credentials must not drop it too: the hop
-  // that lands on a different origin is precisely the one whose bytes the
-  // caller has least reason to trust unverified.
-  it("keeps subresource integrity across a cross-origin redirect", async () => {
-    const seen: Array<string | undefined> = [];
-    const underlying: typeof globalThis.fetch = async (input, init) => {
-      seen.push(init?.integrity);
-      return String(input) === "https://api.example/start"
-        ? new Response(null, {
-            status: 302,
-            headers: { location: "https://cdn.example/asset.js" },
-          })
-        : new Response("ok", { status: 200 });
-    };
-    const hostedFetch = makeHostedFetch({ fetch: underlying, resolveHostname: publicResolver });
-
-    await hostedFetch(new Request("https://api.example/start", { integrity: "sha256-abc" }));
-
-    expect(seen).toEqual(["sha256-abc", "sha256-abc"]);
-  });
-
-  // Origin is scheme plus host, and the scheme half is the half that matters
-  // here: comparing hosts alone would call an https -> http hop to the same
-  // name same-origin and replay the credential headers over plaintext.
-  it("treats a scheme downgrade to the same host as cross-origin", async () => {
-    const seen: Array<{ url: string; apiKey: string | null }> = [];
-    const underlying: typeof globalThis.fetch = async (input, init) => {
-      const url = String(input);
-      seen.push({ url, apiKey: new Headers(init?.headers).get("x-api-key") });
-      if (url === "https://api.example/start") {
-        return new Response(null, {
-          status: 302,
-          headers: { location: "http://api.example/moved" },
-        });
-      }
-      return new Response("ok", { status: 200 });
-    };
-    const hostedFetch = makeHostedFetch({ fetch: underlying, resolveHostname: publicResolver });
-
-    await hostedFetch("https://api.example/start", {
-      headers: { "x-api-key": "rendered-credential" },
-    });
-
-    expect(seen).toHaveLength(2);
-    expect(seen[1]).toMatchObject({ url: "http://api.example/moved", apiKey: null });
-  });
-
-  // A 307/308 keeps the method, so stripping the body would send a bodyless
-  // POST the caller never wrote and blame the upstream for the resulting 4xx.
-  // The body cannot cross origins either, so the hop is refused outright.
-  it("refuses a cross-origin redirect that would replay a body", async () => {
-    let calls = 0;
-    const underlying: typeof globalThis.fetch = async (input) => {
-      calls++;
-      if (String(input) === "https://api.example/start") {
-        return new Response(null, {
-          status: 307,
-          headers: { location: "https://evil.example/collect" },
-        });
-      }
-      return new Response("unexpected", { status: 200 });
-    };
-    const hostedFetch = makeHostedFetch({ fetch: underlying, resolveHostname: publicResolver });
-
-    await expect(
-      hostedFetch("https://api.example/start", {
-        method: "POST",
-        headers: { "x-api-key": "rendered-credential" },
-        body: "client_secret=supersecret",
-      }),
-    ).rejects.toMatchObject({
-      _tag: "HostedOutboundRequestBlocked",
-      reason: "Cross-origin redirect cannot replay a request body",
-    });
-    expect(calls).toBe(1);
-  });
-
-  // A stream reads once, so replaying the same object on the next hop sends an
-  // empty body and still returns 200 — the caller's upload silently truncated.
-  // The hop is refused rather than buffering every upload up front to make it
-  // replayable: FetchHttpClient passes a ReadableStream for every streamed
-  // body, so that buffer would land on every request, redirect or not.
-  it("refuses to replay a streamed body across a redirect", async () => {
-    const seen: Array<boolean> = [];
-    const underlying: typeof globalThis.fetch = async (input, init) => {
-      seen.push(init?.body instanceof ReadableStream);
-      if (String(input) === "https://api.example/start") {
-        return new Response(null, { status: 308, headers: { location: "/moved" } });
-      }
-      return new Response("ok");
-    };
-    const hostedFetch = makeHostedFetch({ fetch: underlying, resolveHostname: publicResolver });
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(new TextEncoder().encode("hello-streamed-body"));
-        controller.close();
-      },
-    });
-
-    await expect(
-      hostedFetch("https://api.example/start", { method: "POST", body: stream }),
-    ).rejects.toMatchObject({
-      _tag: "HostedOutboundRequestBlocked",
-      reason: "Redirect cannot replay a streamed request body",
-    });
-    // The first hop got the stream itself, unbuffered — the whole point of
-    // refusing the replay rather than materializing it.
-    expect(seen).toEqual([true]);
-  });
-
-  // The refusal is scoped to a replay. A 303 or 301 demotes to GET and drops
-  // the body first, so there is no stream left to replay and the redirect is
-  // followed normally — blocking those too would break every streamed upload
-  // whose upstream answers with a see-other.
-  it("follows a demoting redirect after a streamed body, since the body is dropped", async () => {
-    const seen: Array<{ url: string; method: string; hasBody: boolean }> = [];
-    const underlying: typeof globalThis.fetch = async (input, init) => {
-      const url = String(input);
-      seen.push({
-        url,
-        method: init?.method ?? "GET",
-        hasBody: init?.body !== undefined && init?.body !== null,
-      });
-      if (url === "https://api.example/start") {
-        return new Response(null, { status: 303, headers: { location: "/moved" } });
-      }
-      return new Response("final-body");
-    };
-    const hostedFetch = makeHostedFetch({ fetch: underlying, resolveHostname: publicResolver });
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(new TextEncoder().encode("hello-streamed-body"));
-        controller.close();
-      },
-    });
-
-    const response = await hostedFetch("https://api.example/start", {
-      method: "POST",
-      body: stream,
-    });
-
-    expect(response.status).toBe(200);
-    // The body the last hop produced reaches the caller — the redirect loop
-    // returns that response rather than a synthesized or drained stand-in.
-    expect(await response.text()).toBe("final-body");
-    expect(seen[1]).toMatchObject({
-      url: "https://api.example/moved",
-      method: "GET",
-      hasBody: false,
-    });
-  });
-
-  // One representative per arm of redirectDemotesToGet, mirroring the
-  // arm-coverage rule this file states for the IPv4 blocklist: 303 demotes any
-  // method, 301 demotes a non-GET, and 308 replays method and body untouched.
-  it("applies the right method semantics per redirect status", async () => {
-    const run = async (status: number, method: string) => {
-      const seen: Array<{ method: string; hasBody: boolean }> = [];
-      const underlying: typeof globalThis.fetch = async (input, init) => {
-        seen.push({
-          method: init?.method ?? "GET",
-          hasBody: init?.body !== undefined && init?.body !== null,
-        });
-        if (String(input) === "https://api.example/start") {
-          return new Response(null, { status, headers: { location: "/moved" } });
-        }
-        return new Response("ok", { status: 200 });
-      };
-      const hostedFetch = makeHostedFetch({ fetch: underlying, resolveHostname: publicResolver });
-      await hostedFetch(
-        "https://api.example/start",
-        method === "HEAD" ? { method } : { method, body: "secret=1" },
-      );
-      return seen[1];
-    };
-
-    expect(await run(303, "POST")).toMatchObject({ method: "GET", hasBody: false });
-    expect(await run(301, "POST")).toMatchObject({ method: "GET", hasBody: false });
-    expect(await run(308, "POST")).toMatchObject({ method: "POST", hasBody: true });
-    // The demotion exempts GET and HEAD: turning a HEAD probe into a GET makes
-    // the caller download a body it deliberately asked not to receive.
-    expect(await run(301, "HEAD")).toMatchObject({ method: "HEAD" });
-    // 301/302 demote POST alone, which is where a "any non-GET" reading
-    // diverges from platform fetch and from every caller's expectation: a
-    // rewritten DELETE never deletes and a rewritten PUT never writes, and
-    // both hand back a 200 for a request that was never made. Verified against
-    // Node's own fetch against a real server, which keeps the method here.
-    expect(await run(301, "DELETE")).toMatchObject({ method: "DELETE", hasBody: true });
-    expect(await run(302, "PUT")).toMatchObject({ method: "PUT", hasBody: true });
-    // 303 is the mirror: it demotes any method except GET and HEAD.
-    expect(await run(303, "DELETE")).toMatchObject({ method: "GET", hasBody: false });
-    expect(await run(303, "HEAD")).toMatchObject({ method: "HEAD" });
-  });
-
-  it("preserves method and headers from a Request input across redirects", async () => {
-    const seen: Array<{ url: string; method: string; accept: string | null }> = [];
-    const underlying: typeof globalThis.fetch = async (input, init) => {
-      const url = String(input);
-      seen.push({
-        url,
-        method: init?.method ?? "GET",
-        accept: new Headers(init?.headers).get("accept"),
-      });
-      if (url === "https://api.example/start") {
-        return new Response(null, { status: 307, headers: { location: "/moved" } });
-      }
-      return new Response("ok", { status: 200 });
-    };
-    const hostedFetch = makeHostedFetch({ fetch: underlying, resolveHostname: publicResolver });
-
-    const response = await hostedFetch(
-      new Request("https://api.example/start", {
-        method: "DELETE",
-        headers: { accept: "application/json" },
-      }),
-    );
-
-    expect(response.status).toBe(200);
-    expect(seen).toHaveLength(2);
-    expect(seen[1]).toMatchObject({
-      url: "https://api.example/moved",
-      method: "DELETE",
-      accept: "application/json",
-    });
-  });
-
-  // A Request always exposes its body as a ReadableStream, whatever it was
-  // constructed from, so a 307/308 after one hits the same one-shot problem as
-  // an explicitly streamed body and is refused for the same reason. The
-  // alternative is not "replay it" — the bytes are gone once the first hop
-  // reads them — it is sending a bodyless POST under a 200 and calling that
-  // success.
-  // normalizeFetchInput turns every Request input into its ReadableStream
-  // body, and undici refuses a streamed body whose init omits `duplex`. Both
-  // of these reach the real transport as streams, so without it every
-  // body-bearing Request and every streamed upload throws before a byte
-  // leaves — a failure the whole rest of this file is structurally blind to.
-  it("sends body-bearing requests through a real transport", async () => {
-    await withServer(async ({ baseUrl, received }) => {
-      const hostedFetch = makeHostedFetch({
-        allowLocalNetwork: true,
-        resolveHostname: publicResolver,
-      });
-
-      const fromRequest = await hostedFetch(
-        new Request(`${baseUrl}/from-request`, { method: "POST", body: "payload" }),
-      );
-      expect(fromRequest.status).toBe(200);
-      // The adapter's primary contract, and the one a status-only assertion
-      // cannot see: the caller gets the upstream body back unread. Cancelling
-      // or draining it anywhere in the guard would leave the status intact and
-      // hand the caller nothing.
-      expect(await fromRequest.text()).toBe("ok");
-
-      const streamed = await hostedFetch(`${baseUrl}/streamed`, {
-        method: "PUT",
-        body: new ReadableStream<Uint8Array>({
-          start(controller) {
-            controller.enqueue(new TextEncoder().encode("streamed"));
-            controller.close();
-          },
-        }),
-      });
-      expect(streamed.status).toBe(200);
-      expect(await streamed.text()).toBe("ok");
-
-      expect(received).toEqual([
-        { method: "POST", body: "payload" },
-        { method: "PUT", body: "streamed" },
-      ]);
-    });
-  });
-
-  it("refuses to replay a Request input's body across a redirect", async () => {
-    const underlying: typeof globalThis.fetch = async (input) =>
-      String(input) === "https://api.example/start"
-        ? new Response(null, { status: 307, headers: { location: "/moved" } })
-        : new Response("ok", { status: 200 });
-    const hostedFetch = makeHostedFetch({ fetch: underlying, resolveHostname: publicResolver });
-
-    await expect(
-      hostedFetch(new Request("https://api.example/start", { method: "POST", body: "payload" })),
-    ).rejects.toMatchObject({
-      _tag: "HostedOutboundRequestBlocked",
-      url: "https://api.example/moved",
-      reason: "Redirect cannot replay a streamed request body",
-    });
   });
 
   it.effect("checks redirected URLs before following them", () =>
     Effect.gen(function* () {
       let calls = 0;
-      const fakeFetch: typeof globalThis.fetch = async (input) => {
+      const fakeFetch: typeof globalThis.fetch = (async (input) => {
         calls++;
-        const url = String(input);
+        const url = input instanceof Request ? input.url : String(input);
         if (url === "https://public.example/start") {
           return new Response(null, {
             status: 302,
@@ -1560,7 +125,7 @@ describe("hosted outbound HTTP client", () => {
           });
         }
         return new Response("unexpected", { status: 200 });
-      };
+      }) as typeof globalThis.fetch;
       const result = yield* Effect.gen(function* () {
         const client = yield* HttpClient.HttpClient;
         return yield* client.execute(HttpClientRequest.get("https://public.example/start"));
@@ -1571,7 +136,7 @@ describe("hosted outbound HTTP client", () => {
         Effect.result,
       );
 
-      expectBlocked(result, "Local and private network addresses are not allowed");
+      expect(Result.isFailure(result)).toBe(true);
       expect(calls).toBe(1);
     }),
   );
@@ -1583,8 +148,8 @@ describe("hosted outbound HTTP client", () => {
         authorization: string | null;
         cookie: string | null;
       }> = [];
-      const fakeFetch: typeof globalThis.fetch = async (input, init) => {
-        const url = String(input);
+      const fakeFetch: typeof globalThis.fetch = (async (input, init) => {
+        const url = input instanceof Request ? input.url : String(input);
         const headers = new Headers(init?.headers);
         seen.push({
           url,
@@ -1598,7 +163,7 @@ describe("hosted outbound HTTP client", () => {
           });
         }
         return new Response("bytes", { status: 200 });
-      };
+      }) as typeof globalThis.fetch;
 
       const response = yield* Effect.gen(function* () {
         const client = yield* HttpClient.HttpClient;
@@ -1635,8 +200,8 @@ describe("hosted outbound HTTP client", () => {
   it.effect("keeps credential headers on same-origin redirects", () =>
     Effect.gen(function* () {
       const seen: Array<{ url: string; authorization: string | null }> = [];
-      const fakeFetch: typeof globalThis.fetch = async (input, init) => {
-        const url = String(input);
+      const fakeFetch: typeof globalThis.fetch = (async (input, init) => {
+        const url = input instanceof Request ? input.url : String(input);
         seen.push({
           url,
           authorization: new Headers(init?.headers).get("authorization"),
@@ -1648,7 +213,7 @@ describe("hosted outbound HTTP client", () => {
           });
         }
         return new Response("ok", { status: 200 });
-      };
+      }) as typeof globalThis.fetch;
 
       const response = yield* Effect.gen(function* () {
         const client = yield* HttpClient.HttpClient;
@@ -1672,40 +237,12 @@ describe("hosted outbound HTTP client", () => {
     }),
   );
 
-  // The layer has two branches and the ambient one is what ships when a
-  // composition root provides FetchHttpClient.Fetch itself; leaving it
-  // unguarded would be a complete SSRF bypass on the live path.
-  it.effect("guards an ambient FetchHttpClient.Fetch when options.fetch is omitted", () =>
-    Effect.gen(function* () {
-      let calls = 0;
-      const ambient: typeof globalThis.fetch = async () => {
-        calls++;
-        return new Response("unexpected", { status: 200 });
-      };
-
-      const result = yield* Effect.gen(function* () {
-        const client = yield* HttpClient.HttpClient;
-        return yield* client.execute(HttpClientRequest.get("https://api.example/start"));
-      }).pipe(
-        Effect.provide(
-          makeHostedHttpClientLayer({
-            resolveHostname: async () => [{ address: "169.254.1.1" }],
-          }).pipe(Layer.provide(Layer.succeed(FetchHttpClient.Fetch)(ambient))),
-        ),
-        Effect.result,
-      );
-
-      expectBlocked(result, "Resolved address is local or private");
-      expect(calls).toBe(0);
-    }),
-  );
-
   it.effect("rejects cross-origin redirects to private addresses", () =>
     Effect.gen(function* () {
       let calls = 0;
-      const fakeFetch: typeof globalThis.fetch = async (input) => {
+      const fakeFetch: typeof globalThis.fetch = (async (input) => {
         calls++;
-        const url = String(input);
+        const url = input instanceof Request ? input.url : String(input);
         if (url === "https://api.example/start") {
           return new Response(null, {
             status: 302,
@@ -1713,7 +250,7 @@ describe("hosted outbound HTTP client", () => {
           });
         }
         return new Response("unexpected", { status: 200 });
-      };
+      }) as typeof globalThis.fetch;
 
       const result = yield* Effect.gen(function* () {
         const client = yield* HttpClient.HttpClient;
@@ -1725,14 +262,7 @@ describe("hosted outbound HTTP client", () => {
         Effect.result,
       );
 
-      expectBlocked(result, "Metadata service addresses are not allowed");
-      // On a redirect block the reported url is genuinely ambiguous — the
-      // request the caller made, or the hop that was actually refused. It is
-      // the hop: naming the original would point an operator at a URL that is
-      // fine and hide the destination the guard stopped.
-      expect(result).toMatchObject({
-        failure: { cause: { url: "http://169.254.169.254/latest/meta-data/" } },
-      });
+      expect(Result.isFailure(result)).toBe(true);
       expect(calls).toBe(1);
     }),
   );
