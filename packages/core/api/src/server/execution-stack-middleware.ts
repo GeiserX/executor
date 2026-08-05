@@ -36,8 +36,10 @@
 
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 import { Context, Effect, Layer } from "effect";
+import type * as Cause from "effect/Cause";
 
 import type { AnyPlugin } from "@executor-js/sdk";
+import type { ExecutionEngine } from "@executor-js/execution";
 
 import type { DbProvider } from "./executor-fuma-db";
 import {
@@ -49,13 +51,17 @@ import {
 import { ExecutionEngineService, ExecutorService } from "../services";
 import { providePluginExtensions, type PluginExtensionServices } from "../plugin-routes";
 import {
+  authContextFromPlatform,
   authContextFromPrincipal,
   AuthContext,
+  isPlatformPrincipal,
+  ReadOnlyCredential,
   type IdentityFailure,
-  type Principal,
+  type ResolvedPrincipal,
 } from "./identity";
 import {
   makeExecutionStack,
+  makePlatformExecutionStack,
   type CodeExecutorProvider,
   type EngineDecorator,
 } from "./execution-stack";
@@ -68,9 +74,9 @@ import {
  * residual requirement the strategy adds (always `never` in practice).
  */
 export interface FailureRenderingStrategy<E, RR = never> {
-  readonly renderFailure: <R>(
-    effect: Effect.Effect<Principal, E, R>,
-  ) => Effect.Effect<Principal | HttpServerResponse.HttpServerResponse, E, R | RR>;
+  readonly renderFailure: <A extends ResolvedPrincipal, R>(
+    effect: Effect.Effect<A, E, R>,
+  ) => Effect.Effect<A | HttpServerResponse.HttpServerResponse, E, R | RR>;
 }
 
 /**
@@ -98,6 +104,15 @@ export const textFailureStrategy: FailureRenderingStrategy<IdentityFailure> = {
               status: 503,
             }),
           ),
+        // Self-host/local identity never resolves a platform credential, but the
+        // method gate raises this tag on the SHARED channel, so total coverage
+        // requires rendering it (and keeps the strategy honest if that changes).
+        ReadOnlyCredential: () =>
+          Effect.succeed(
+            HttpServerResponse.text("Organization API keys are read-only", {
+              status: 403,
+            }),
+          ),
       }),
     ),
 };
@@ -112,12 +127,14 @@ export interface MakeExecutionStackMiddlewareOptions<
   /** The host's plugin tuple — drives the typed extension Services and binding. */
   readonly plugins: TPlugins;
   /**
-   * Resolve the inbound web `Request` to a neutral `Principal`. Adapter-specific
-   * credential precedence stays inside this function.
+   * Resolve the inbound web `Request` to a neutral `Principal` — or, for an
+   * org-level credential (cloud's org-scoped API key), a `PlatformPrincipal`
+   * that the middleware routes to the read-only platform branch.
+   * Adapter-specific credential precedence stays inside this function.
    */
-  readonly authenticate: (request: Request) => Effect.Effect<Principal, E, RLong>;
+  readonly authenticate: (request: Request) => Effect.Effect<ResolvedPrincipal, E, RLong>;
   /** Render `authenticate` failures (passthrough for cloud, text for self-host). */
-  readonly strategy: FailureRenderingStrategy<E, RStrategy>;
+  readonly strategy: FailureRenderingStrategy<E | ReadOnlyCredential, RStrategy>;
   /** The host's `makeExecutionStack` seam Layer. */
   readonly stackLayer: Layer.Layer<
     DbProvider | PluginsProvider | HostConfig | CodeExecutorProvider | EngineDecorator,
@@ -166,9 +183,52 @@ export const makeExecutionStackMiddleware = <
         Effect.gen(function* () {
           const request = yield* HttpServerRequest.HttpServerRequest;
           const webRequest = yield* HttpServerRequest.toWeb(request);
-          const resolved = yield* options.strategy.renderFailure(options.authenticate(webRequest));
+          const resolved = yield* options.strategy.renderFailure(
+            options.authenticate(webRequest).pipe(
+              // The PLATFORM branch's method gate lives here, before any
+              // handler: an org credential is read-only by construction, so a
+              // non-GET request is refused as a typed 403 rather than reaching
+              // a handler that would bind it to a subject or attempt a write
+              // (the storage policy would refuse the write anyway — this makes
+              // the refusal a clear response instead of a 500).
+              Effect.filterOrFail(
+                (principal): principal is ResolvedPrincipal =>
+                  !isPlatformPrincipal(principal) || webRequest.method === "GET",
+                () =>
+                  new ReadOnlyCredential({
+                    code: "read_only_credential",
+                    message: "Organization API keys are read-only",
+                  }),
+              ),
+            ),
+          );
           // The strategy recovered the failure into a Response — return it.
           if (!isPrincipal(resolved)) return resolved;
+
+          if (isPlatformPrincipal(resolved)) {
+            // Org credential: the subject-less, write-refusing platform stack.
+            // No `touchSubject` runs, so the credential never mints a phantom
+            // user row in the very lists the admin plane serves.
+            const { executor } = yield* makePlatformExecutionStack<TPlugins>(
+              resolved.organizationId,
+            ).pipe(
+              Effect.provide(options.stackLayer),
+              Effect.provideService(RequestWebOrigin, {
+                origin: requestWebOriginFromRequest(webRequest),
+              }),
+              Effect.withSpan("executor.stack.http.resolve_platform"),
+            );
+            return yield* httpEffect.pipe(
+              Effect.provideService(AuthContext, AuthContext.of(authContextFromPlatform(resolved))),
+              Effect.provideService(ExecutorService, executor),
+              // The engine runs code as an acting member; the platform view has
+              // none, and owns no executions. GET readers get the honest empty
+              // answers; the execute/resume paths sit behind the method gate
+              // above and are unreachable.
+              Effect.provideService(ExecutionEngineService, readOnlyExecutionEngine),
+              provideExecutorExtensions(executor),
+            );
+          }
           const auth = AuthContext.of(authContextFromPrincipal(resolved));
           // The public origin the caller actually hit, so a host with no static
           // web base URL (a Worker) derives one zero-config. An explicit
@@ -206,13 +266,33 @@ export const makeExecutionStackMiddleware = <
   );
 };
 
-// `renderFailure` yields either the resolved `Principal` (proceed) or an
-// already-built `HttpServerResponse` (the strategy recovered the failure). A
-// `Principal` is a plain object with `accountId`; a response is tagged. Discern
-// by the marker the response framework brands its values with.
+// `renderFailure` yields either the resolved principal (proceed) or an
+// already-built `HttpServerResponse` (the strategy recovered the failure).
+// Discern by the marker the response framework brands its values with.
 const isPrincipal = (
-  value: Principal | HttpServerResponse.HttpServerResponse,
-): value is Principal => !HttpServerResponse.isHttpServerResponse(value);
+  value: ResolvedPrincipal | HttpServerResponse.HttpServerResponse,
+): value is ResolvedPrincipal => !HttpServerResponse.isHttpServerResponse(value);
+
+/**
+ * The engine the platform branch provides: every read answers "nothing here",
+ * honestly — the platform view owns no executions and pauses none. The
+ * execute/resume members exist only to satisfy the service shape; they sit
+ * behind the middleware's GET-only gate, so reaching one is a wiring bug and
+ * dies as a defect rather than failing with a typed error a client could
+ * mistake for a product answer.
+ */
+const readOnlyExecutionEngine: ExecutionEngine<Cause.YieldableError> = {
+  // oxlint-disable-next-line executor/no-effect-escape-hatch -- boundary: unreachable behind the middleware's GET-only gate; reaching it is a wiring bug, not a typed product outcome
+  execute: () => Effect.die("platform credential: execution engine unavailable"),
+  // oxlint-disable-next-line executor/no-effect-escape-hatch -- boundary: unreachable behind the middleware's GET-only gate; reaching it is a wiring bug, not a typed product outcome
+  executeWithPause: () => Effect.die("platform credential: execution engine unavailable"),
+  // oxlint-disable-next-line executor/no-effect-escape-hatch -- boundary: unreachable behind the middleware's GET-only gate; reaching it is a wiring bug, not a typed product outcome
+  resume: () => Effect.die("platform credential: execution engine unavailable"),
+  getPausedExecution: () => Effect.succeed(null),
+  pausedExecutionCount: () => Effect.succeed(0),
+  hasPausedExecutions: () => Effect.succeed(false),
+  getDescription: Effect.succeed(""),
+};
 
 const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 

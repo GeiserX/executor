@@ -46,14 +46,49 @@ export interface Principal {
 }
 
 /**
+ * An ORG-level credential (cloud's org-scoped API key), resolved. Deliberately
+ * NOT a `Principal`: a `Principal` names an acting member, and this credential
+ * has none — mirroring the resolution layer's own split (`ApiKeyOwner` keeps
+ * `accountId: string | null` for the same reason). Keeping it a separate shape
+ * means no code path can accidentally bind an org credential to a subject; the
+ * middleware routes it to the subject-less platform executor instead, and
+ * refuses every non-read method before a handler ever runs.
+ *
+ * Self-host and local never produce this: their credentials always name a
+ * member. It exists on the NEUTRAL seam so the shared middleware owns the
+ * platform branch once, instead of each host reinventing it.
+ */
+export interface PlatformPrincipal {
+  readonly kind: "platform";
+  readonly organizationId: string;
+  readonly organizationName: string;
+  /** See {@link Principal.organizationSlug}. */
+  readonly organizationSlug?: string;
+  /** The credential's own id, for audit trails — never an acting member. */
+  readonly keyId: string;
+}
+
+/** What `authenticate` resolves: an acting member, or the org-level platform
+ *  credential. */
+export type ResolvedPrincipal = Principal | PlatformPrincipal;
+
+export const isPlatformPrincipal = (value: ResolvedPrincipal): value is PlatformPrincipal =>
+  "kind" in value && value.kind === "platform";
+
+/**
  * The single `AuthContext` every executor-API handler reads. The roles-bearing
  * tag from self-host is the model; cloud now provides `roles: []` on it, which
  * is forward-compatible (cloud handlers never read roles today).
+ *
+ * `accountId` is `null` for an org-level platform credential — there is no
+ * acting member behind it. Nullable rather than a sentinel so any handler that
+ * needs a member has to say so (and refuse), instead of silently acting as a
+ * user that does not exist.
  */
 export class AuthContext extends Context.Service<
   AuthContext,
   {
-    readonly accountId: string;
+    readonly accountId: string | null;
     readonly organizationId: string;
     readonly email: string;
     readonly name: string | null;
@@ -70,6 +105,16 @@ export const authContextFromPrincipal = (principal: Principal): AuthContext["Ser
   name: principal.name,
   avatarUrl: principal.avatarUrl,
   roles: principal.roles,
+});
+
+/** The platform credential's `AuthContext`: org identity, no member fields. */
+export const authContextFromPlatform = (principal: PlatformPrincipal): AuthContext["Service"] => ({
+  accountId: null,
+  organizationId: principal.organizationId,
+  email: "",
+  name: null,
+  avatarUrl: null,
+  roles: [],
 });
 
 // Optional per-failure render hints. Self-host produces the bare error (these
@@ -111,6 +156,21 @@ export class Unavailable extends Schema.TaggedErrorClass<Unavailable>()(
 ) {}
 
 /**
+ * A valid PLATFORM credential (org-scoped API key) attempted something only an
+ * acting member can do: a write on the product plane, or any request on a host
+ * that serves no platform view (local's fixed executor). Renders 403.
+ *
+ * Its own tag rather than a reuse of `NoOrganization`: the caller DID present a
+ * valid credential of a known org — telling them "no organization" would send
+ * them debugging the wrong thing. The message names the actual constraint.
+ */
+export class ReadOnlyCredential extends Schema.TaggedErrorClass<ReadOnlyCredential>()(
+  "ReadOnlyCredential",
+  renderHints,
+  { httpApiStatus: 403 },
+) {}
+
+/**
  * The swap seam. Resolves an incoming request to a `Principal`. WorkOS (cloud)
  * and Better Auth (self-host) are interchangeable implementations; nothing
  * downstream knows which is wired.
@@ -126,10 +186,10 @@ export class Unavailable extends Schema.TaggedErrorClass<Unavailable>()(
  * Adapter infra defects (cloud's WorkOS / user-store failures) are `Effect.die`d
  * INSIDE the impl so they surface as 500 defects, never as this error channel.
  */
-export type IdentityFailure = Unauthorized | NoOrganization | Unavailable;
+export type IdentityFailure = Unauthorized | NoOrganization | Unavailable | ReadOnlyCredential;
 
 export interface IdentityProviderShape {
-  readonly authenticate: (request: Request) => Effect.Effect<Principal, IdentityFailure>;
+  readonly authenticate: (request: Request) => Effect.Effect<ResolvedPrincipal, IdentityFailure>;
 }
 
 export class IdentityProvider extends Context.Service<IdentityProvider, IdentityProviderShape>()(

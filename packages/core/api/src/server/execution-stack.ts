@@ -35,7 +35,12 @@ import {
 } from "@executor-js/execution";
 
 import { DbProvider } from "./executor-fuma-db";
-import { HostConfig, PluginsProvider, makeScopedExecutor } from "./scoped-executor";
+import {
+  HostConfig,
+  PluginsProvider,
+  makePlatformExecutor,
+  makeScopedExecutor,
+} from "./scoped-executor";
 
 // ---------------------------------------------------------------------------
 // CodeExecutorProvider seam — the host's code-execution substrate. Typed to the
@@ -139,3 +144,29 @@ export const makeExecutionStack = <
     ).pipe(Effect.withSpan("executor.stack.engine.init"));
     return { executor, engine };
   }).pipe(Effect.withSpan("executor.stack.build"));
+
+// ---------------------------------------------------------------------------
+// makePlatformExecutionStack — the org-credential sibling: a subject-less,
+// write-refusing executor (`makePlatformExecutor`) and NO engine. An org key is
+// an observer; the execution engine exists to run code as an acting member, so
+// rather than building one that would fail on use, the middleware refuses
+// non-GET requests up front and never provides `ExecutionEngineService` on this
+// branch. Read-only handlers never read the engine, so the platform branch
+// serves them unchanged.
+// ---------------------------------------------------------------------------
+
+export const makePlatformExecutionStack = <
+  const TPlugins extends readonly AnyPlugin[] = readonly AnyPlugin[],
+>(
+  organizationId: string,
+): Effect.Effect<
+  { readonly executor: Executor<TPlugins> },
+  StorageFailure,
+  DbProvider | PluginsProvider | HostConfig
+> =>
+  makePlatformExecutor(organizationId).pipe(
+    // The platform executor is built against the erased plugin set; re-narrow
+    // via the same phantom cast `makeScopedExecutor` performs for the scoped one.
+    Effect.map((executor) => ({ executor: executor as Executor<TPlugins> })),
+    Effect.withSpan("executor.stack.platform.build"),
+  );
