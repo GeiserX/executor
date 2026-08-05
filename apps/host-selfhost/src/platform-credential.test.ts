@@ -127,9 +127,8 @@ test("connection reads answer org-owned rows and never a member's personal ones"
     new Request("http://localhost/api/connections", { headers: platformHeaders }),
   );
   expect(res.status).toBe(200);
-  const raw = await res.text();
-  // oxlint-disable-next-line executor/no-json-parse -- boundary: test asserts on the raw wire body (for the token sweep) and its parsed form together
-  const body = JSON.parse(raw) as ReadonlyArray<{ readonly name: string }>;
+  const body = (await res.json()) as ReadonlyArray<{ readonly name: string }>;
+  const raw = JSON.stringify(body);
   expect(
     body.map((connection) => connection.name),
     "the org-owned connection is visible",
@@ -139,6 +138,21 @@ test("connection reads answer org-owned rows and never a member's personal ones"
     "a member's personal connection is not — the platform view binds no subject",
   ).not.toContain("personal");
   expect(raw, "no credential material either way").not.toContain("token");
+});
+
+test("the OAuth callback is refused despite being a GET", async () => {
+  // The one core GET with side effects: completing it would burn an org-owned
+  // in-flight authorization code in an outbound token exchange before the
+  // storage policy could refuse the final write. The safe-request gate excludes
+  // it by name; a platform credential landing here is a clear 403, not a
+  // half-executed flow.
+  const res = await handler(
+    new Request("http://localhost/api/oauth/callback?code=x&state=y", {
+      headers: platformHeaders,
+    }),
+  );
+  expect(res.status, "the callback is not a safe read").toBe(403);
+  expect(await res.text()).toContain("read-only");
 });
 
 test("every non-GET is refused before a handler runs", async () => {

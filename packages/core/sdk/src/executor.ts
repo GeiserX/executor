@@ -3585,6 +3585,13 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
     // Best-effort: a failed rebuild leaves the stale-but-working catalog in
     // place and retries on the next read.
     const syncStaleConnectionTools = Effect.gen(function* () {
+      // The platform view can never persist a rebuilt catalog (writes are
+      // denied at the storage boundary), so attempting the sync would only
+      // fire upstream `resolveTools` calls whose results are thrown away —
+      // network side effects on a read-only credential. Skip it entirely:
+      // read-only-ness of the platform read path is a stated invariant here,
+      // not an accident of the best-effort catch below.
+      if (config.platformView === true) return;
       const integrations = yield* core.findMany("integration", {});
       if (integrations.length === 0) return;
       const integrationBySlug = new Map(integrations.map((row) => [row.slug, row] as const));

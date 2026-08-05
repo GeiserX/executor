@@ -147,12 +147,13 @@ export const makeExecutionStack = <
 
 // ---------------------------------------------------------------------------
 // makePlatformExecutionStack — the org-credential sibling: a subject-less,
-// write-refusing executor (`makePlatformExecutor`) and NO engine. An org key is
-// an observer; the execution engine exists to run code as an acting member, so
-// rather than building one that would fail on use, the middleware refuses
-// non-GET requests up front and never provides `ExecutionEngineService` on this
-// branch. Read-only handlers never read the engine, so the platform branch
-// serves them unchanged.
+// write-refusing executor (`makePlatformExecutor`) and no REAL engine. An org
+// key is an observer; the execution engine exists to run code as an acting
+// member, so no engine is built here. The middleware still provides
+// `ExecutionEngineService` (handlers' service requirements demand one) — as a
+// stub whose reachable reads answer "nothing here" and whose execute/resume
+// members sit behind the middleware's safe-request gate (see
+// `readOnlyExecutionEngine` in ./execution-stack-middleware.ts).
 // ---------------------------------------------------------------------------
 
 export const makePlatformExecutionStack = <

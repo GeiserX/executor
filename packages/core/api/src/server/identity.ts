@@ -29,6 +29,11 @@ import { Context, Effect, Schema } from "effect";
  * resolver already yielded it) AND `roles` (cloud supplies `[]`).
  */
 export interface Principal {
+  /** Discriminant of {@link ResolvedPrincipal}: an acting member, as opposed
+   *  to the org-level `"platform"` credential. Required so every construction
+   *  site declares which arm it is, and the union matches on a literal tag
+   *  instead of probing for a property's presence. */
+  readonly kind: "member";
   readonly accountId: string;
   readonly organizationId: string;
   readonly organizationName: string;
@@ -73,24 +78,26 @@ export interface PlatformPrincipal {
 export type ResolvedPrincipal = Principal | PlatformPrincipal;
 
 export const isPlatformPrincipal = (value: ResolvedPrincipal): value is PlatformPrincipal =>
-  "kind" in value && value.kind === "platform";
+  value.kind === "platform";
 
 /**
  * The single `AuthContext` every executor-API handler reads. The roles-bearing
  * tag from self-host is the model; cloud now provides `roles: []` on it, which
  * is forward-compatible (cloud handlers never read roles today).
  *
- * `accountId` is `null` for an org-level platform credential — there is no
- * acting member behind it. Nullable rather than a sentinel so any handler that
- * needs a member has to say so (and refuse), instead of silently acting as a
- * user that does not exist.
+ * `accountId` and `email` are `null` for an org-level platform credential —
+ * there is no acting member behind it. Nullable rather than sentinel-valued so
+ * any handler that needs a member has to say so (and refuse), instead of
+ * silently acting as a user that does not exist. (`email: ""` on the member
+ * api-key path is the pre-existing "member with no resolved email" value and
+ * unrelated to this.)
  */
 export class AuthContext extends Context.Service<
   AuthContext,
   {
     readonly accountId: string | null;
     readonly organizationId: string;
-    readonly email: string;
+    readonly email: string | null;
     readonly name: string | null;
     readonly avatarUrl: string | null;
     readonly roles: readonly string[];
@@ -111,7 +118,7 @@ export const authContextFromPrincipal = (principal: Principal): AuthContext["Ser
 export const authContextFromPlatform = (principal: PlatformPrincipal): AuthContext["Service"] => ({
   accountId: null,
   organizationId: principal.organizationId,
-  email: "",
+  email: null,
   name: null,
   avatarUrl: null,
   roles: [],
