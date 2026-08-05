@@ -1,8 +1,9 @@
 import { useState, type ReactNode } from "react";
-import { Exit } from "effect";
+import { Cause, Exit, Option, Predicate } from "effect";
 import * as AsyncResult from "effect/unstable/reactivity/AsyncResult";
 import { useAtomRefresh, useAtomSet, useAtomValue } from "@effect/atom-react";
 import { toast } from "sonner";
+import type { ApiKeySummary as ApiKeySummarySchema } from "@executor-js/api";
 import { apiKeyWriteKeys, orgApiKeyWriteKeys } from "../api/reactivity-keys";
 import { trackEvent } from "../api/analytics";
 import {
@@ -38,18 +39,14 @@ import { isAsyncResultLoading } from "../lib/async-result";
 // Auth). API keys are how a user authenticates the Executor API + MCP endpoint
 // from scripts/agents (Authorization: Bearer <key>).
 //
-// `orgKeysSection` is a host slot (the OrgPage pattern): cloud passes
-// `<OrgApiKeysSection />` below; self-host passes nothing because its provider
-// refuses org keys (`/admin/*` there is gated on an owner/admin session).
+// `orgKeysSection` is a host slot: the section component lives in this file
+// (its contract is the shared account API), but only hosts that mint org keys
+// mount it — cloud passes `<OrgApiKeysSection />`, self-host passes nothing
+// because its provider refuses org keys (`/admin/*` there is gated on an
+// owner/admin session instead).
 // ---------------------------------------------------------------------------
 
-type ApiKeySummary = {
-  readonly id: string;
-  readonly name: string;
-  readonly obfuscatedValue: string;
-  readonly createdAt: string;
-  readonly lastUsedAt: string | null;
-};
+type ApiKeySummary = typeof ApiKeySummarySchema.Type;
 
 type CreatedKey = ApiKeySummary & { readonly value: string };
 
@@ -65,8 +62,8 @@ const formatDate = (value: string | null): string => {
       }).format(date);
 };
 
-const defaultApiKeyName = (): string =>
-  `API key ${new Intl.DateTimeFormat(undefined, {
+const defaultKeyName = (kind: string): string =>
+  `${kind} ${new Intl.DateTimeFormat(undefined, {
     month: "short",
     day: "numeric",
     year: "numeric",
@@ -153,32 +150,99 @@ function CreatedKeyReveal(props: {
   );
 }
 
-export function ApiKeysPage(props: { readonly orgKeysSection?: ReactNode } = {}) {
+/**
+ * The create dialog's state-bearing body, shared by both key kinds. Remounted
+ * per open via a key bump (self-contained modal): form and in-flight state are
+ * destroyed on close instead of hand-reset, while the Dialog shell stays
+ * mounted so Radix's exit animation keeps its last frame. A create resolving
+ * after close therefore lands on an unmounted component instead of wedging the
+ * next open on the previous key's reveal.
+ */
+function CreateKeyDialogBody(props: {
+  readonly title: string;
+  readonly description: string;
+  readonly defaultName: string;
+  readonly placeholder: string;
+  readonly onCreate: (name: string) => Promise<CreatedKey | null>;
+  readonly onCopy: (kind: "value" | "bearer_header") => void;
+}) {
+  const [name, setName] = useState(props.defaultName);
+  const [createdKey, setCreatedKey] = useState<CreatedKey | null>(null);
+  const [creating, setCreating] = useState(false);
+
+  const handleCreate = async () => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setCreating(true);
+    const created = await props.onCreate(trimmed);
+    setCreating(false);
+    if (created) setCreatedKey(created);
+  };
+
+  return (
+    <>
+      <DialogHeader>
+        <DialogTitle className="font-display text-xl">{props.title}</DialogTitle>
+        <DialogDescription className="text-sm leading-relaxed">
+          {props.description}
+        </DialogDescription>
+      </DialogHeader>
+
+      {createdKey ? (
+        <CreatedKeyReveal value={createdKey.value} onCopy={props.onCopy} />
+      ) : (
+        <div className="grid gap-4 py-3">
+          <div className="grid gap-1.5">
+            <Label htmlFor="create-key-name" className="text-sm font-medium text-foreground">
+              Name
+            </Label>
+            <Input
+              id="create-key-name"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder={props.placeholder}
+              maxLength={80}
+              autoFocus
+            />
+          </div>
+        </div>
+      )}
+
+      <DialogFooter>
+        <DialogClose asChild>
+          <Button variant="ghost">Close</Button>
+        </DialogClose>
+        {!createdKey && (
+          <Button onClick={handleCreate} disabled={creating || !name.trim()}>
+            {creating ? "Creating..." : "Create key"}
+          </Button>
+        )}
+      </DialogFooter>
+    </>
+  );
+}
+
+export function ApiKeysPage(props: { readonly orgKeysSection?: ReactNode }) {
   useExecutorDocumentTitle("API keys");
   const result = useAtomValue(apiKeysAtom);
   const refreshApiKeys = useAtomRefresh(apiKeysAtom);
   const doCreate = useAtomSet(createApiKey, { mode: "promiseExit" });
   const doRevoke = useAtomSet(revokeApiKey, { mode: "promiseExit" });
   const [createOpen, setCreateOpen] = useState(false);
-  const [name, setName] = useState("");
-  const [createdKey, setCreatedKey] = useState<CreatedKey | null>(null);
-  const [creating, setCreating] = useState(false);
+  // Bumped per open so the dialog body remounts with fresh state; the shell
+  // stays mounted for Radix's exit animation (see CreateKeyDialogBody).
+  const [openCount, setOpenCount] = useState(0);
   const [revokingId, setRevokingId] = useState<string | null>(null);
 
-  const handleCreate = async () => {
-    const trimmed = name.trim();
-    if (!trimmed) return;
-    setCreating(true);
-    const exit = await doCreate({ payload: { name: trimmed }, reactivityKeys: apiKeyWriteKeys });
-    setCreating(false);
+  const handleCreate = async (name: string): Promise<CreatedKey | null> => {
+    const exit = await doCreate({ payload: { name }, reactivityKeys: apiKeyWriteKeys });
     trackEvent("api_key_created", { success: Exit.isSuccess(exit) });
     if (Exit.isSuccess(exit)) {
-      setCreatedKey(exit.value);
-      setName("");
       toast.success("API key created");
-      return;
+      return exit.value;
     }
     toast.error("Failed to create API key");
+    return null;
   };
 
   const handleRevoke = async (key: ApiKeySummary) => {
@@ -193,24 +257,15 @@ export function ApiKeysPage(props: { readonly orgKeysSection?: ReactNode } = {})
     toast.error("Failed to revoke API key");
   };
 
-  const closeCreate = (open: boolean) => {
-    setCreateOpen(open);
-    if (!open) {
-      setName("");
-      setCreatedKey(null);
-      setCreating(false);
-    }
-  };
-
   return (
     <PageContainer>
       <PageHeader
         title="API keys"
-        description="User keys for accessing the Executor API and MCP endpoint from scripts and tools."
+        description="Keys for accessing the Executor API and MCP endpoint from scripts and tools."
         actions={
           <Button
             onClick={() => {
-              setName(defaultApiKeyName());
+              setOpenCount((count) => count + 1);
               setCreateOpen(true);
             }}
           >
@@ -225,84 +280,57 @@ export function ApiKeysPage(props: { readonly orgKeysSection?: ReactNode } = {})
           </code>
           <CopyButton value="Authorization: Bearer <api-key>" />
         </div>
-        <p className="mt-2 max-w-2xl text-xs leading-5 text-muted-foreground">
-          API keys work like personal access tokens: they act as you, in this organization, with
-          full access to your own account.
-        </p>
       </PageHeader>
 
-      {isAsyncResultLoading(result) ? (
-        <div className="rounded-md border border-border bg-card p-6 text-sm text-muted-foreground">
-          Loading API keys...
-        </div>
-      ) : (
-        AsyncResult.match(result, {
-          onInitial: () => (
-            <div className="rounded-md border border-border bg-card p-6 text-sm text-muted-foreground">
-              Loading API keys...
-            </div>
-          ),
-          onFailure: () => (
-            <ErrorState message="Failed to load API keys" onRetry={refreshApiKeys} />
-          ),
-          onSuccess: ({ value }) =>
-            value.apiKeys.length === 0 ? (
-              <div className="rounded-md border border-dashed border-border bg-card p-8">
-                <h2 className="text-base font-semibold text-foreground">No API keys</h2>
-                <p className="mt-2 max-w-xl text-sm leading-6 text-muted-foreground">
-                  Create a key and send it in the Authorization Bearer header.
-                </p>
+      <section>
+        <h2 className="text-sm font-medium text-foreground">Personal keys</h2>
+        <p className="mb-4 mt-0.5 max-w-2xl text-sm text-muted-foreground">
+          Personal keys work like personal access tokens: they act as you, in this organization,
+          with full access to your own account.
+        </p>
+
+        {isAsyncResultLoading(result) ? (
+          <div className="rounded-md border border-border bg-card p-6 text-sm text-muted-foreground">
+            Loading API keys...
+          </div>
+        ) : (
+          AsyncResult.match(result, {
+            onInitial: () => (
+              <div className="rounded-md border border-border bg-card p-6 text-sm text-muted-foreground">
+                Loading API keys...
               </div>
-            ) : (
-              <KeyTable keys={value.apiKeys} revokingId={revokingId} onRevoke={handleRevoke} />
             ),
-        })
-      )}
+            onFailure: () => (
+              <ErrorState message="Failed to load API keys" onRetry={refreshApiKeys} />
+            ),
+            onSuccess: ({ value }) =>
+              value.apiKeys.length === 0 ? (
+                <div className="rounded-md border border-dashed border-border bg-card p-8">
+                  <h3 className="text-base font-semibold text-foreground">No API keys</h3>
+                  <p className="mt-2 max-w-xl text-sm leading-6 text-muted-foreground">
+                    Create a key and send it in the Authorization Bearer header.
+                  </p>
+                </div>
+              ) : (
+                <KeyTable keys={value.apiKeys} revokingId={revokingId} onRevoke={handleRevoke} />
+              ),
+          })
+        )}
+      </section>
 
       {props.orgKeysSection}
 
-      <Dialog open={createOpen} onOpenChange={closeCreate}>
+      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent className="sm:max-w-[480px]">
-          <DialogHeader>
-            <DialogTitle className="font-display text-xl">Create API key</DialogTitle>
-            <DialogDescription className="text-sm leading-relaxed">
-              The key will act as your user in the current organization.
-            </DialogDescription>
-          </DialogHeader>
-
-          {createdKey ? (
-            <CreatedKeyReveal
-              value={createdKey.value}
-              onCopy={(kind) => trackEvent("api_key_copied", { kind })}
-            />
-          ) : (
-            <div className="grid gap-4 py-3">
-              <div className="grid gap-1.5">
-                <Label htmlFor="api-key-name" className="text-sm font-medium text-foreground">
-                  Name
-                </Label>
-                <Input
-                  id="api-key-name"
-                  value={name}
-                  onChange={(event) => setName(event.target.value)}
-                  placeholder="Local CLI"
-                  maxLength={80}
-                  autoFocus
-                />
-              </div>
-            </div>
-          )}
-
-          <DialogFooter>
-            <DialogClose asChild>
-              <Button variant="ghost">Close</Button>
-            </DialogClose>
-            {!createdKey && (
-              <Button onClick={handleCreate} disabled={creating || !name.trim()}>
-                {creating ? "Creating..." : "Create key"}
-              </Button>
-            )}
-          </DialogFooter>
+          <CreateKeyDialogBody
+            key={openCount}
+            title="Create API key"
+            description="The key will act as your user in the current organization."
+            defaultName={defaultKeyName("API key")}
+            placeholder="Local CLI"
+            onCreate={handleCreate}
+            onCopy={(kind) => trackEvent("api_key_copied", { kind })}
+          />
         </DialogContent>
       </Dialog>
     </PageContainer>
@@ -316,11 +344,23 @@ export function ApiKeysPage(props: { readonly orgKeysSection?: ReactNode } = {})
 // acts AS the member who minted it on the product plane; an org key has no
 // member behind it and reads the whole tenant.
 //
-// Rendered via the page's `orgKeysSection` slot by hosts that mint org keys
-// (cloud). The admin gate here only HIDES the section — the server enforces
-// the real one (403 for a plain member) and the section renders that refusal
-// as an error state if it arrives anyway.
+// The admin gate here only HIDES the section — the server enforces the real
+// one (403 for a plain member), and that refusal renders as an explicit
+// denial below, never as a retryable failure.
 // ---------------------------------------------------------------------------
+
+/** 403 (or no-org) from the org-key surface: the caller is not an active admin
+ *  of this org. A denial, not a transient failure — the client-side role gate
+ *  can disagree with the server (role change inside the member list's TTL;
+ *  `owner` accepted client-side where cloud requires `admin`), and offering
+ *  Retry on a refusal would only re-fail forever. */
+const isOrgKeysAccessDenied = (cause: Cause.Cause<unknown>): boolean =>
+  Option.match(Cause.findErrorOption(cause), {
+    onNone: () => false,
+    onSome: (error) =>
+      Predicate.isTagged(error, "AccountForbidden") ||
+      Predicate.isTagged(error, "AccountNoOrganization"),
+  });
 
 export function OrgApiKeysSection() {
   // Gate BEFORE mounting the body: `orgApiKeysAtom` starts its fetch when the
@@ -334,15 +374,27 @@ export function OrgApiKeysSection() {
 function OrgApiKeysSectionBody() {
   const result = useAtomValue(orgApiKeysAtom);
   const refresh = useAtomRefresh(orgApiKeysAtom);
+  const doCreate = useAtomSet(createOrgApiKey, { mode: "promiseExit" });
   const doRevoke = useAtomSet(revokeOrgApiKey, { mode: "promiseExit" });
   const [createOpen, setCreateOpen] = useState(false);
-  // Remount the dialog body per open (self-contained modal): its form and
-  // created-key state are destroyed on close instead of hand-reset, while the
-  // Dialog shell stays mounted for the exit animation.
+  // Same remount-per-open discipline as the personal dialog above.
   const [openCount, setOpenCount] = useState(0);
+  const [confirmRevoke, setConfirmRevoke] = useState<ApiKeySummary | null>(null);
   const [revokingId, setRevokingId] = useState<string | null>(null);
 
+  const handleCreate = async (name: string): Promise<CreatedKey | null> => {
+    const exit = await doCreate({ payload: { name }, reactivityKeys: orgApiKeyWriteKeys });
+    trackEvent("org_api_key_created", { success: Exit.isSuccess(exit) });
+    if (Exit.isSuccess(exit)) {
+      toast.success("Organization key created");
+      return exit.value;
+    }
+    toast.error("Failed to create organization key");
+    return null;
+  };
+
   const handleRevoke = async (key: ApiKeySummary) => {
+    setConfirmRevoke(null);
     setRevokingId(key.id);
     const exit = await doRevoke({
       params: { apiKeyId: key.id },
@@ -359,7 +411,7 @@ function OrgApiKeysSectionBody() {
 
   return (
     <section className="mt-10">
-      <div className="mb-4 flex items-center justify-between gap-4">
+      <div className="mb-4 flex items-start justify-between gap-4">
         <div>
           <h2 className="text-sm font-medium text-foreground">Organization keys</h2>
           <p className="mt-0.5 max-w-2xl text-sm text-muted-foreground">
@@ -391,9 +443,23 @@ function OrgApiKeysSectionBody() {
               Loading organization keys...
             </div>
           ),
-          onFailure: () => (
-            <ErrorState message="Failed to load organization keys" onRetry={refresh} />
-          ),
+          onFailure: ({ cause }) =>
+            isOrgKeysAccessDenied(cause) ? (
+              <div className="rounded-md border border-border bg-card p-8">
+                <p className="font-mono text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+                  Admin only
+                </p>
+                <h3 className="mt-2 text-base font-semibold text-foreground">
+                  You don&apos;t have access to this organization&apos;s keys
+                </h3>
+                <p className="mt-2 max-w-xl text-sm leading-6 text-muted-foreground">
+                  Managing organization keys requires an active admin role. Ask an admin of this
+                  organization if you need one.
+                </p>
+              </div>
+            ) : (
+              <ErrorState message="Failed to load organization keys" onRetry={refresh} />
+            ),
           onSuccess: ({ value }) =>
             value.apiKeys.length === 0 ? (
               <div className="rounded-md border border-dashed border-border bg-card p-8">
@@ -403,87 +469,61 @@ function OrgApiKeysSectionBody() {
                 </p>
               </div>
             ) : (
-              <KeyTable keys={value.apiKeys} revokingId={revokingId} onRevoke={handleRevoke} />
+              <KeyTable
+                keys={value.apiKeys}
+                revokingId={revokingId}
+                onRevoke={(key) => setConfirmRevoke(key)}
+              />
             ),
         })
       )}
 
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent className="sm:max-w-[480px]">
-          {createOpen ? <CreateOrgKeyDialogBody key={openCount} /> : null}
+          <CreateKeyDialogBody
+            key={openCount}
+            title="Create organization key"
+            description="The key will belong to the organization itself, not to you. It grants read-only access to the admin API across the whole organization."
+            defaultName={defaultKeyName("Organization key")}
+            placeholder="Backend admin reader"
+            onCreate={handleCreate}
+            onCopy={(kind) => trackEvent("org_api_key_copied", { kind })}
+          />
+        </DialogContent>
+      </Dialog>
+
+      {/* Revoking an org key breaks every backend using it, so it is the one
+          revoke on this page that asks first. */}
+      <Dialog
+        open={confirmRevoke !== null}
+        onOpenChange={(open) => {
+          if (!open) setConfirmRevoke(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-[480px]">
+          <DialogHeader>
+            <DialogTitle className="font-display text-xl">Revoke organization key</DialogTitle>
+            <DialogDescription className="text-sm leading-relaxed">
+              {confirmRevoke
+                ? `Revoke ${confirmRevoke.name}? Anything authenticating with it loses admin API access immediately. This cannot be undone.`
+                : ""}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button variant="ghost">Cancel</Button>
+            </DialogClose>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                if (confirmRevoke) void handleRevoke(confirmRevoke);
+              }}
+            >
+              Revoke key
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </section>
-  );
-}
-
-function CreateOrgKeyDialogBody() {
-  const doCreate = useAtomSet(createOrgApiKey, { mode: "promiseExit" });
-  const [name, setName] = useState(defaultApiKeyName());
-  const [createdKey, setCreatedKey] = useState<CreatedKey | null>(null);
-  const [creating, setCreating] = useState(false);
-
-  const handleCreate = async () => {
-    const trimmed = name.trim();
-    if (!trimmed) return;
-    setCreating(true);
-    const exit = await doCreate({
-      payload: { name: trimmed },
-      reactivityKeys: orgApiKeyWriteKeys,
-    });
-    setCreating(false);
-    trackEvent("org_api_key_created", { success: Exit.isSuccess(exit) });
-    if (Exit.isSuccess(exit)) {
-      setCreatedKey(exit.value);
-      toast.success("Organization key created");
-      return;
-    }
-    toast.error("Failed to create organization key");
-  };
-
-  return (
-    <>
-      <DialogHeader>
-        <DialogTitle className="font-display text-xl">Create organization key</DialogTitle>
-        <DialogDescription className="text-sm leading-relaxed">
-          The key will belong to the organization itself — not to you — with read-only access to the
-          admin API across the whole organization.
-        </DialogDescription>
-      </DialogHeader>
-
-      {createdKey ? (
-        <CreatedKeyReveal
-          value={createdKey.value}
-          onCopy={(kind) => trackEvent("org_api_key_copied", { kind })}
-        />
-      ) : (
-        <div className="grid gap-4 py-3">
-          <div className="grid gap-1.5">
-            <Label htmlFor="org-api-key-name" className="text-sm font-medium text-foreground">
-              Name
-            </Label>
-            <Input
-              id="org-api-key-name"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="Backend admin reader"
-              maxLength={80}
-              autoFocus
-            />
-          </div>
-        </div>
-      )}
-
-      <DialogFooter>
-        <DialogClose asChild>
-          <Button variant="ghost">Close</Button>
-        </DialogClose>
-        {!createdKey && (
-          <Button onClick={handleCreate} disabled={creating || !name.trim()}>
-            {creating ? "Creating..." : "Create key"}
-          </Button>
-        )}
-      </DialogFooter>
-    </>
   );
 }
