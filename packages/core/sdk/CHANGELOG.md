@@ -1,5 +1,7 @@
 # @executor-js/sdk
 
+## 1.5.41
+
 ## 1.5.40
 
 ### Patch Changes

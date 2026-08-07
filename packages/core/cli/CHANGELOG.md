@@ -1,5 +1,12 @@
 # @executor-js/cli
 
+## 0.2.48
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @executor-js/sdk@1.5.41
+
 ## 0.2.47
 
 ### Patch Changes

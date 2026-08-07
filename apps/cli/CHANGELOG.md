@@ -1,5 +1,19 @@
 # executor
 
+## 1.5.41
+
+### Patch Changes
+
+- [#1556](https://github.com/UsefulSoftwareCo/executor/pull/1556) [`f674fb8`](https://github.com/UsefulSoftwareCo/executor/commit/f674fb80eebd597f922edd5ec21b8035ab195a78) Thanks [@RhysSullivan](https://github.com/RhysSullivan)! - **Fix: native MCP elicitation now reaches clients on the local HTTP endpoint instead of timing out**
+
+  The local daemon's Streamable HTTP transport ran with `enableJsonResponse: true`, which buffers a `tools/call` into a single JSON body and leaves no open stream for the server to write on. A server-to-client `elicitation/create` raised during that call was therefore never delivered, and approval-gated tools failed with a `-32001` request timeout even though the session had negotiated `elicitation_mode=native` and the client's `elicitation.form` capability. The transport now uses the spec-default SSE streaming, so the reverse request rides the originating tool call's stream — matching the Cloudflare host's behaviour.
+
+- Updated dependencies []:
+  - @executor-js/sdk@1.5.41
+  - @executor-js/runtime-quickjs@1.5.41
+  - @executor-js/local@1.5.41
+  - @executor-js/api@1.4.61
+
 ## 1.5.40
 
 ### Patch Changes
