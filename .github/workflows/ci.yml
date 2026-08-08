@@ -268,9 +268,11 @@ jobs:
           retention-days: 7
 
   e2e-local:
-    name: E2E (stdio MCP)
-    # Skipped on pull_request: the local scenario boots a real `executor web`
-    # plus a browser and is currently flaky on PRs. Still runs on push to main.
+    name: E2E (local MCP)
+    # Skipped on pull_request: these scenarios boot a real `executor web` and
+    # are currently flaky on PRs. Still runs on push to main — which is where
+    # the toolkit-MCP 500 and the `Bun is not defined` spawn failure would have
+    # been caught, had the step covered more than stdio-mcp.
     if: github.event_name != 'pull_request'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
