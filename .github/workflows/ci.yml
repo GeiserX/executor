@@ -315,14 +315,22 @@ jobs:
         working-directory: e2e
 
       # The `local` project is excluded from the default `test` chain (each
-      # scenario boots its own `executor web`). Run just the stdio MCP scenario
-      # here: it is the auto-connect / env-as-secret regression guard, and
-      # running it alone avoids the boot-resource accumulation and the
-      # pre-existing browser flakiness of the rest of the local suite. Expanding
-      # to the full `local` project (bun run test:local) is a follow-up once
-      # those are stabilized.
-      - name: Run the stdio MCP scenario
-        run: bunx vitest run --project local local/stdio-mcp.test.ts
+      # scenario boots its own `executor web`). Run the MCP-surface scenarios
+      # here rather than the whole project: these are the regression guards
+      # (stdio auto-connect / env-as-secret, toolkit-scoped sessions, the
+      # daemon-attach bridge, and native elicitation) and they need no browser,
+      # so they avoid the pre-existing browser flakiness of the rest of the
+      # local suite. Keeping them OUT of CI is how they rotted unnoticed:
+      # toolkit MCP 500'd from the day the data-dir lock landed, and the
+      # attach-stress file threw `Bun is not defined` on every run, because
+      # only stdio-mcp was ever exercised here.
+      - name: Run the local MCP scenarios
+        run: |
+          bunx vitest run --project local \
+            local/stdio-mcp.test.ts \
+            local/toolkits-mcp.test.ts \
+            local/mcp-native-elicitation.test.ts \
+            local/cli-mcp-daemon-attach-stress.test.ts
         working-directory: e2e
 
   desktop-smoke:
