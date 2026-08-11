@@ -1867,6 +1867,62 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
           ? String(row.oauth_token_url)
           : String(clientRow.token_url);
 
+        // OAuth is always single-input: the access token lives in the `token`
+        // item. Fall back to a deterministic id if the map is somehow empty.
+        const tokenItemId = ProviderItemId.make(
+          connectionItemIds(row)[PRIMARY_INPUT_VARIABLE] ??
+            `connection:${row.owner}:${row.integration}:${row.name}:${PRIMARY_INPUT_VARIABLE}`,
+        );
+
+        // Shared by both grant paths so their bookkeeping cannot drift apart.
+        // `scope` is written only when the authorization server reported one —
+        // an unreported scope must leave the recorded scope alone rather than
+        // clearing it.
+        const recordRefreshOutcome = (expiresAt: number | null, scope: string | undefined) =>
+          Effect.gen(function* () {
+            const set: Record<string, unknown> = { expires_at: expiresAt, updated_at: new Date() };
+            if (scope !== undefined) set.oauth_scope = scope;
+            yield* core.updateMany("connection", {
+              where: (b: AnyCb) =>
+                b.and(
+                  byOwner(owner)(b),
+                  b("integration", "=", String(row.integration)),
+                  b("name", "=", String(row.name)),
+                ),
+              set,
+            });
+          });
+
+        // A provider that can perform the grant itself owns the whole exchange:
+        // it spends the refresh token, seals the newly minted tokens under the
+        // same item ids, and tells us only when they expire and what scope was
+        // granted. We then read the access token back through `get`, which is
+        // the same hop every other credential already takes — so the refresh
+        // path stops being the one place that hands a plaintext token upward.
+        //
+        // client_credentials is excluded deliberately: it has no refresh token
+        // to spend (the token is re-minted from the client id/secret), so it is
+        // a different exchange and is left on the path below.
+        if (provider.refreshGrant && String(clientRow.grant) !== "client_credentials") {
+          if (!row.refresh_item_id) {
+            return yield* reauth("No refresh token is stored for this connection.");
+          }
+          const granted = yield* provider.refreshGrant({
+            refreshItemId: ProviderItemId.make(String(row.refresh_item_id)),
+            accessItemId: tokenItemId,
+            clientSecretItemId: clientRow.client_secret_item_id
+              ? ProviderItemId.make(String(clientRow.client_secret_item_id))
+              : undefined,
+            tokenUrl,
+            clientId: String(clientRow.client_id),
+            scopes: grantedScopes,
+            // RFC 8707: keep the re-minted token bound to the same resource.
+            resource: clientRow.resource ? String(clientRow.resource) : undefined,
+          });
+          yield* recordRefreshOutcome(granted.expiresAt, granted.scope ?? undefined);
+          return yield* provider.get(tokenItemId);
+        }
+
         // client_credentials (machine-to-machine) has NO refresh token — the
         // token is RE-MINTED from the client id/secret. The authorization_code
         // path below needs a stored refresh token. Branching on grant here is
@@ -1959,12 +2015,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
               });
 
         if (provider.set) {
-          // OAuth is always single-input: the access token lives in the `token`
-          // item. Fall back to a deterministic id if the map is somehow empty.
-          const tokenItemId =
-            connectionItemIds(row)[PRIMARY_INPUT_VARIABLE] ??
-            `connection:${row.owner}:${row.integration}:${row.name}:${PRIMARY_INPUT_VARIABLE}`;
-          yield* provider.set(ProviderItemId.make(tokenItemId), token.access_token);
+          yield* provider.set(tokenItemId, token.access_token);
           if (token.refresh_token && row.refresh_item_id) {
             yield* provider.set(ProviderItemId.make(row.refresh_item_id), token.refresh_token);
           }
@@ -1972,20 +2023,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
 
         const nextExpiresAt =
           typeof token.expires_in === "number" ? Date.now() + token.expires_in * 1000 : null;
-        const set: Record<string, unknown> = {
-          expires_at: nextExpiresAt,
-          updated_at: new Date(),
-        };
-        if (token.scope !== undefined) set.oauth_scope = token.scope;
-        yield* core.updateMany("connection", {
-          where: (b: AnyCb) =>
-            b.and(
-              byOwner(owner)(b),
-              b("integration", "=", String(row.integration)),
-              b("name", "=", String(row.name)),
-            ),
-          set,
-        });
+        yield* recordRefreshOutcome(nextExpiresAt, token.scope);
 
         return token.access_token;
       }).pipe(
