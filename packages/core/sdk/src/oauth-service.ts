@@ -20,7 +20,7 @@ import { FetchHttpClient, type HttpClient } from "effect/unstable/http";
 import { connectionIdentifier } from "./connection-name-identifier";
 import type { Connection } from "./connection";
 import type { IFumaClient, StorageFailure } from "./fuma-runtime";
-import { StorageError } from "./fuma-runtime";
+import { afterCommit, StorageError } from "./fuma-runtime";
 import {
   AuthTemplateSlug,
   ConnectionName,
@@ -690,11 +690,24 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
         )
         .pipe(Effect.asVoid);
       // Best-effort: drop the secret from the provider so it isn't orphaned.
+      //
+      // Deferred to the outermost commit. This function opens no transaction of
+      // its own, but a caller can wrap it in one — and `provider.delete` reaches
+      // a store that does not roll back with it. An abort would then restore the
+      // client row while its secret stayed destroyed, leaving a client that
+      // looks configured and can never authenticate again. Orphaning a secret is
+      // recoverable; deleting one that is still referenced is not, so the
+      // deletion waits until the row's removal is durable. With no transaction
+      // active `afterCommit` runs it immediately, which is the behaviour this
+      // path already had.
       const provider = deps.defaultWritableProvider();
-      if (provider?.delete) {
-        yield* provider
-          .delete(ProviderItemId.make(clientSecretItemId(owner, slug)))
-          .pipe(Effect.catch(() => Effect.void));
+      const dropSecret = provider?.delete;
+      if (provider && dropSecret) {
+        yield* afterCommit(
+          dropSecret
+            .call(provider, ProviderItemId.make(clientSecretItemId(owner, slug)))
+            .pipe(Effect.catch(() => Effect.void)),
+        );
       }
     });
 

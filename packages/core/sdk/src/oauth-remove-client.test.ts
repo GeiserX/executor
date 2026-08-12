@@ -3,9 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, it } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Exit } from "effect";
 
-import { OAuthClientSlug } from "./ids";
+import { OAuthClientSlug, ProviderItemId, ProviderKey } from "./ids";
+import { definePlugin } from "./plugin";
 import { makeTestWorkspaceHarness, memoryCredentialsPlugin } from "./test-config";
 
 // removeClient permanently deletes an owner-scoped oauth_client row, keyed by
@@ -172,6 +173,76 @@ describe("oauth.removeClient", () => {
         // It is gone for A too — org rows are tenant-shared.
         const clientsA = yield* a.executor.oauth.listClients();
         expect(clientsA.map((client) => String(client.slug))).not.toContain("shared-org");
+      }),
+    ),
+  );
+});
+
+// Removing a client deletes its secret from the provider, and that reaches a
+// store which does not roll back with a transaction. `removeClient` opens none
+// itself, but a caller can wrap it — and an abort would then restore the client
+// row while its secret stayed destroyed, leaving a client that looks configured
+// and can never authenticate again.
+const txPlugin = (store: Map<string, string>) =>
+  definePlugin(() => ({
+    id: "demo" as const,
+    storage: () => ({}),
+    credentialProviders: [
+      {
+        key: ProviderKey.make("memory"),
+        writable: true as const,
+        get: (id: ProviderItemId) => Effect.sync(() => store.get(String(id)) ?? null),
+        set: (id: ProviderItemId, value: string) =>
+          Effect.sync(() => {
+            store.set(String(id), value);
+          }),
+        delete: (id: ProviderItemId) =>
+          Effect.sync(() => {
+            store.delete(String(id));
+          }),
+      },
+    ],
+    extension: (ctx) => ({
+      inTransaction: <A, E>(effect: Effect.Effect<A, E>) => ctx.transaction(effect),
+    }),
+  }))();
+
+describe("removing a client defers the secret deletion to the outermost commit", () => {
+  it.effect("a rolled-back removal leaves the client secret intact", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const store = new Map<string, string>();
+        const { executor } = yield* makeTestWorkspaceHarness({
+          plugins: [txPlugin(store)] as const,
+        });
+        yield* executor.oauth.createClient({
+          owner: "user",
+          slug: USER_CLIENT,
+          authorizationUrl: "https://acme.test/authorize",
+          tokenUrl: "https://acme.test/token",
+          grant: "authorization_code",
+          clientId: "user-client-id",
+          clientSecret: "user-secret",
+        });
+        const secretItem = "oauth-client:user:acme-user:secret";
+        expect(store.get(secretItem)).toBe("user-secret");
+
+        // A caller wraps the removal in its own transaction, then fails.
+        const outcome = yield* Effect.exit(
+          executor.demo.inTransaction(
+            Effect.gen(function* () {
+              yield* executor.oauth.removeClient("user", USER_CLIENT);
+              return yield* Effect.fail("rollback" as const);
+            }),
+          ),
+        );
+        expect(Exit.isFailure(outcome)).toBe(true);
+
+        // The client came back...
+        const after = yield* executor.oauth.listClients();
+        expect(after.map((client) => String(client.slug))).toContain(String(USER_CLIENT));
+        // ...so its secret must still be there, or it can never authenticate again.
+        expect(store.get(secretItem)).toBe("user-secret");
       }),
     ),
   );
