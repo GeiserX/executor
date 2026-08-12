@@ -3215,7 +3215,30 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
           // "we never write here" is the safer reading.
           const provider = credentialProviders.get(String(row.provider));
           if (provider?.writable === true && provider.delete) {
-            for (const id of mintedItemIds(row)) {
+            const minted = mintedItemIds(row);
+            // Nothing stops a second connection pointing AT this one's minted
+            // item through the `from` origin — the reference path stores
+            // whatever id it is handed. Deleting the item would then pull the
+            // credential out from under a connection that is still live and
+            // still using it. The connection row above is already gone, so
+            // anything still referencing the id here is by definition somebody
+            // else, and the item stays.
+            const stillReferenced =
+              minted.length === 0
+                ? new Set<string>()
+                : yield* core.findMany("connection", { where: () => true }).pipe(
+                    Effect.map(
+                      (rows) =>
+                        new Set(
+                          rows.flatMap((other) => [
+                            ...Object.values(connectionItemIds(other)),
+                            ...(other.refresh_item_id ? [String(other.refresh_item_id)] : []),
+                          ]),
+                        ),
+                    ),
+                  );
+            for (const id of minted) {
+              if (stillReferenced.has(id)) continue;
               yield* provider.delete(ProviderItemId.make(id)).pipe(Effect.ignore);
             }
           }

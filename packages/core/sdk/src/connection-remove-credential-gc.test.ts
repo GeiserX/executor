@@ -144,6 +144,43 @@ describe("removing a connection removes the credential it minted", () => {
     }),
   );
 
+  it.effect("LEAVES a minted item that another connection has aliased", () =>
+    Effect.gen(function* () {
+      const store = new Map<string, string>();
+      const executor = yield* setup(store);
+      // `first` mints its own item.
+      yield* executor.connections.create({
+        owner: "org",
+        name: ConnectionName.make("first"),
+        integration: INTEG,
+        template: TEMPLATE,
+        value: "shared-token",
+      });
+      const mintedId = "connection:org:vercel:first:token";
+      expect(store.get(mintedId)).toBe("shared-token");
+
+      // `second` points AT that same item instead of minting its own. Nothing
+      // stops this: the reference path stores whatever id it is handed.
+      yield* executor.connections.create({
+        owner: "org",
+        name: ConnectionName.make("second"),
+        integration: INTEG,
+        template: TEMPLATE,
+        from: { provider: ProviderKey.make("memory"), id: ProviderItemId.make(mintedId) },
+      });
+
+      yield* executor.connections.remove({
+        owner: "org",
+        integration: INTEG,
+        name: ConnectionName.make("first"),
+      });
+
+      // Deleting the minting connection must not pull the credential out from
+      // under the one still using it — that would break a live connection.
+      expect(store.get(mintedId)).toBe("shared-token");
+    }),
+  );
+
   it.effect("removing one connection does not touch another's credential", () =>
     Effect.gen(function* () {
       const store = new Map<string, string>();
