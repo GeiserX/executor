@@ -432,3 +432,68 @@ describe("removing an integration removes the credentials its connections minted
     }),
   );
 });
+
+// The dangerous direction of the bulk delete: a connection on a DIFFERENT
+// integration can reference an item this integration's connection minted. That
+// connection survives the removal and is still using the credential, so
+// deleting it would destroy a secret belonging to something still alive — the
+// same "it is still there" pairing the single-connection path already carries,
+// asked of the wider blast radius.
+const OTHER = IntegrationSlug.make("netlify");
+
+const twoIntegrationPlugin = (store: Map<string, string>) =>
+  definePlugin(() => ({
+    id: "demo" as const,
+    credentialProviders: [inspectableProvider(store, true)],
+    storage: () => ({}),
+    resolveTools: () =>
+      Effect.succeed({ tools: [{ name: ToolName.make("deploy"), description: "deploy" }] }),
+    invokeTool: ({ toolRow }) => Effect.succeed({ ran: toolRow.name }),
+    extension: (ctx) => ({
+      seed: () =>
+        Effect.gen(function* () {
+          yield* ctx.core.integrations.register({ slug: INTEG, description: "Vercel", config: {} });
+          yield* ctx.core.integrations.register({
+            slug: OTHER,
+            description: "Netlify",
+            config: {},
+          });
+        }),
+    }),
+  }))();
+
+describe("removing an integration respects connections that outlive it", () => {
+  it.effect("keeps a minted item another integration's connection still points at", () =>
+    Effect.gen(function* () {
+      const store = new Map<string, string>();
+      const executor = yield* makeTestExecutor({
+        plugins: [twoIntegrationPlugin(store)] as const,
+      }).pipe(Effect.tap((e) => e.demo.seed()));
+
+      yield* executor.connections.create({
+        owner: "org",
+        name: ConnectionName.make("a"),
+        integration: INTEG,
+        template: TEMPLATE,
+        value: "shared-secret",
+      });
+      const mintedId = "connection:org:vercel:a:token";
+      expect(store.get(mintedId)).toBe("shared-secret");
+
+      // A live connection on a different integration, pointing at that item.
+      yield* executor.connections.create({
+        owner: "org",
+        name: ConnectionName.make("b"),
+        integration: OTHER,
+        template: TEMPLATE,
+        from: { provider: ProviderKey.make("memory"), id: ProviderItemId.make(mintedId) },
+      });
+
+      yield* executor.integrations.remove(INTEG);
+
+      // "b" is untouched by this removal and is still using the credential.
+      // Deleting it would break a connection that nobody asked to remove.
+      expect(store.get(mintedId)).toBe("shared-secret");
+    }),
+  );
+});
