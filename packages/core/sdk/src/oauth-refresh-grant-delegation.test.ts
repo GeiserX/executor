@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect } from "effect";
+import { Cause, Effect, Exit } from "effect";
 
+import { StorageError } from "./fuma-runtime";
 import {
   AuthTemplateSlug,
   ConnectionName,
@@ -12,7 +13,13 @@ import {
   ToolName,
 } from "./ids";
 import { definePlugin } from "./plugin";
-import { RefreshGrantRejected, type CredentialProvider, type RefreshGrantInput } from "./provider";
+import {
+  MAX_REFRESH_GRANT_EXPIRES_IN_SECONDS,
+  RefreshGrantRejected,
+  type CredentialProvider,
+  type RefreshGrantInput,
+  type RefreshGrantRejectionCode,
+} from "./provider";
 import { makeTestWorkspaceHarness } from "./test-config";
 import { serveOAuthTestServer } from "./testing/oauth-test-server";
 
@@ -25,6 +32,7 @@ const INTEG = IntegrationSlug.make("acme");
 const TEMPLATE = AuthTemplateSlug.make("oauth");
 const CLIENT = OAuthClientSlug.make("acme-app");
 const TOOL = ToolAddress.make("tools.acme.org.main.whoami");
+const TOKEN_CANARY = "refresh-token-canary-must-never-cross-the-provider-boundary";
 
 const oauthPlugin = definePlugin(() => ({
   id: "acme" as const,
@@ -61,7 +69,33 @@ type GrantBehaviour =
   /** Reports success but leaves nothing resolvable under `accessItemId`. */
   | { readonly kind: "sealsNothing" }
   /** The authorization server refused the grant (RFC 6749 §5.2). */
-  | { readonly kind: "rejected"; readonly error?: string };
+  | {
+      readonly kind: "rejected";
+      readonly error?: RefreshGrantRejectionCode;
+      /** Test-only hostile fields a JavaScript/remote provider could attach despite the type. */
+      readonly unsafeDetails?: string;
+      readonly unsafeError?: string;
+    }
+  /** A provider-side storage failure whose diagnostic details must remain provider-side. */
+  | { readonly kind: "storageFailure" }
+  /** A provider implementation that throws before it can return an Effect. */
+  | { readonly kind: "syncThrow" }
+  /** A provider implementation that dies inside its Effect. */
+  | { readonly kind: "defect" }
+  /** A concurrent provider failure that contains cancellation plus a secret-bearing defect. */
+  | { readonly kind: "interruptedDefect" }
+  /** A malformed remote provider object whose classification getter throws. */
+  | { readonly kind: "throwingRejectionGetter" }
+  /** A stateful rejection getter that changes after returning one valid code. */
+  | { readonly kind: "changingRejectionGetter" }
+  /** Reading the optional capability itself throws before a grant can start. */
+  | { readonly kind: "throwingCapabilityGetter" }
+  /** A success object whose property access throws after the provider Effect succeeds. */
+  | { readonly kind: "throwingResultGetter"; readonly field: "expiry" | "scope" }
+  /** A method-shaped provider that relies on its receiver. */
+  | { readonly kind: "requiresReceiver" }
+  /** A successful grant followed by a failure while resolving the new access token. */
+  | { readonly kind: "readFailure"; readonly failure: "storage" | "defect" };
 
 const SEALS: GrantBehaviour = { kind: "seals", scope: "read", expiresInSeconds: 3_600 };
 
@@ -69,6 +103,7 @@ const SEALS: GrantBehaviour = { kind: "seals", scope: "read", expiresInSeconds: 
 interface Recorder {
   readonly reads: string[];
   readonly grants: RefreshGrantInput[];
+  rejectionErrorReads: number;
 }
 
 /** A memory provider that can also perform the refresh grant itself.
@@ -84,9 +119,26 @@ const delegatingCredentialsPlugin = (recorder: Recorder, behaviour: GrantBehavio
       key: ProviderKey.make("memory"),
       writable: true as const,
       get: (id: ProviderItemId) =>
-        Effect.sync(() => {
+        Effect.suspend(() => {
           recorder.reads.push(String(id));
-          return store.get(String(id)) ?? null;
+          if (
+            behaviour?.kind === "readFailure" &&
+            recorder.grants.length > 0 &&
+            recorder.grants.some((grant) => String(grant.accessItemId) === String(id))
+          ) {
+            return behaviour.failure === "storage"
+              ? Effect.fail(
+                  new StorageError({
+                    message: TOKEN_CANARY,
+                    cause: { tokenResponse: TOKEN_CANARY },
+                  }),
+                )
+              : Effect.die(
+                  // oxlint-disable-next-line executor/no-error-constructor -- boundary: leak test deliberately injects a raw provider defect
+                  new Error(TOKEN_CANARY),
+                );
+          }
+          return Effect.succeed(store.get(String(id)) ?? null);
         }),
       set: (id: ProviderItemId, value: string) =>
         Effect.sync(() => {
@@ -101,33 +153,119 @@ const delegatingCredentialsPlugin = (recorder: Recorder, behaviour: GrantBehavio
     const provider: CredentialProvider =
       behaviour === null
         ? base
-        : {
-            ...base,
-            refreshGrant: (input: RefreshGrantInput) =>
-              Effect.suspend(() => {
+        : behaviour.kind === "throwingCapabilityGetter"
+          ? (Object.defineProperty({ ...base }, "refreshGrant", {
+              get: () => {
+                // oxlint-disable-next-line executor/no-try-catch-or-throw -- boundary: leak test simulates an untyped plugin capability getter
+                throw TOKEN_CANARY;
+              },
+            }) as CredentialProvider)
+          : {
+              ...base,
+              refreshGrant(input: RefreshGrantInput) {
                 recorder.grants.push(input);
-                if (behaviour.kind === "rejected") {
+                if (behaviour.kind === "requiresReceiver" && this.key !== base.key) {
+                  return Effect.die(TOKEN_CANARY);
+                }
+                // oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: leak test simulates an untyped plugin throwing before it returns an Effect
+                if (behaviour.kind === "syncThrow") throw new Error(TOKEN_CANARY);
+                if (behaviour.kind === "storageFailure") {
                   return Effect.fail(
-                    new RefreshGrantRejected({
-                      message: "the authorization server refused the grant",
-                      error: behaviour.error,
+                    new StorageError({
+                      message: TOKEN_CANARY,
+                      cause: { tokenResponse: TOKEN_CANARY },
                     }),
                   );
                 }
-                if (behaviour.kind === "sealsNothing") {
-                  // A provider reporting a grant it did not perform is out of contract. What the
-                  // host CAN do is refuse to stamp the row healthy over a token it cannot read
-                  // back, which is what this drives.
-                  store.delete(String(input.accessItemId));
-                  return Effect.succeed({ expiresInSeconds: 3_600, scope: "read" });
+                if (behaviour.kind === "defect") {
+                  // oxlint-disable-next-line executor/no-error-constructor -- boundary: leak test deliberately injects a raw provider defect
+                  return Effect.die(new Error(TOKEN_CANARY));
                 }
-                store.set(String(input.accessItemId), "delegated-access-token");
-                return Effect.succeed({
-                  expiresInSeconds: behaviour.expiresInSeconds,
-                  scope: behaviour.scope,
+                if (behaviour.kind === "interruptedDefect") {
+                  return Effect.failCause(
+                    Cause.combine(Cause.die(TOKEN_CANARY), Cause.interrupt(123)),
+                  );
+                }
+                if (behaviour.kind === "throwingRejectionGetter") {
+                  const malformed = Object.defineProperty(
+                    { _tag: "RefreshGrantRejected" },
+                    "error",
+                    {
+                      get: () => {
+                        // oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: leak test simulates a malformed remote object with a throwing getter
+                        throw new Error(TOKEN_CANARY);
+                      },
+                    },
+                  );
+                  return Effect.fail(malformed as RefreshGrantRejected);
+                }
+                if (behaviour.kind === "changingRejectionGetter") {
+                  const malformed = Object.defineProperty(
+                    { _tag: "RefreshGrantRejected" },
+                    "error",
+                    {
+                      get: () => {
+                        recorder.rejectionErrorReads += 1;
+                        return recorder.rejectionErrorReads === 1 ? "invalid_grant" : TOKEN_CANARY;
+                      },
+                    },
+                  );
+                  return Effect.fail(malformed as RefreshGrantRejected);
+                }
+                if (behaviour.kind === "throwingResultGetter") {
+                  const result = { expiresInSeconds: 3_600, scope: "read" };
+                  Object.defineProperty(
+                    result,
+                    behaviour.field === "expiry" ? "expiresInSeconds" : "scope",
+                    {
+                      get: () => {
+                        // oxlint-disable-next-line executor/no-try-catch-or-throw -- boundary: leak test simulates a malformed remote success object
+                        throw TOKEN_CANARY;
+                      },
+                    },
+                  );
+                  return Effect.succeed(result);
+                }
+                return Effect.suspend(() => {
+                  if (behaviour.kind === "rejected") {
+                    const rejection = new RefreshGrantRejected({ error: behaviour.error });
+                    if (
+                      behaviour.unsafeDetails === undefined &&
+                      behaviour.unsafeError === undefined
+                    ) {
+                      return Effect.fail(rejection);
+                    }
+                    // Simulate an untyped JavaScript or remote provider. Executor must project only
+                    // the validated RFC classification, even when extra secret-bearing fields exist.
+                    return Effect.fail(
+                      Object.assign(rejection, {
+                        error: behaviour.unsafeError ?? rejection.error,
+                        message: behaviour.unsafeDetails,
+                        cause: { message: behaviour.unsafeDetails },
+                      }),
+                    );
+                  }
+                  if (behaviour.kind === "sealsNothing") {
+                    // A provider reporting a grant it did not perform is out of contract. What the
+                    // host CAN do is refuse to stamp the row healthy over a token it cannot read
+                    // back, which is what this drives.
+                    store.delete(String(input.accessItemId));
+                    return Effect.succeed({ expiresInSeconds: 3_600, scope: "read" });
+                  }
+                  store.set(String(input.accessItemId), "delegated-access-token");
+                  return Effect.succeed({
+                    expiresInSeconds:
+                      behaviour.kind === "readFailure" || behaviour.kind === "requiresReceiver"
+                        ? 3_600
+                        : behaviour.expiresInSeconds,
+                    scope:
+                      behaviour.kind === "readFailure" || behaviour.kind === "requiresReceiver"
+                        ? "read"
+                        : behaviour.scope,
+                  });
                 });
-              }),
-          };
+              },
+            };
 
     return {
       id: "memory-credentials" as const,
@@ -137,6 +275,19 @@ const delegatingCredentialsPlugin = (recorder: Recorder, behaviour: GrantBehavio
   })();
 
 describe("provider-owned OAuth refresh grant", () => {
+  const expectOpaqueProviderFailure = (exit: Exit.Exit<unknown, unknown>, message: string) => {
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (!Exit.isFailure(exit)) return;
+    expect(JSON.stringify(exit)).not.toContain(TOKEN_CANARY);
+    expect(Cause.pretty(exit.cause)).not.toContain(TOKEN_CANARY);
+    const reason = exit.cause.reasons.find(Cause.isFailReason);
+    expect(reason).toBeDefined();
+    if (reason === undefined) return;
+    expect(reason.error).toBeInstanceOf(StorageError);
+    expect((reason.error as StorageError).message).toBe(message);
+    expect((reason.error as StorageError).cause).toBeUndefined();
+  };
+
   /** Connect, force the connection past expiry, and hand back the pieces a test asserts on. The
    *  tool is NOT invoked here — each test drives the refresh itself so it can assert on failure. */
   const scenario = (options: {
@@ -144,14 +295,14 @@ describe("provider-owned OAuth refresh grant", () => {
     readonly grant?: "authorization_code" | "client_credentials";
   }) =>
     Effect.gen(function* () {
-      const recorder: Recorder = { reads: [], grants: [] };
+      const recorder: Recorder = { reads: [], grants: [], rejectionErrorReads: 0 };
       const server = yield* serveOAuthTestServer({ scopes: ["read"] });
       const plugins = [
         delegatingCredentialsPlugin(recorder, options.behaviour),
         oauthPlugin,
       ] as const;
       const { executor, config } = yield* makeTestWorkspaceHarness({ plugins });
-      yield* executor.acme.seed();
+      yield* executor.acme.seed(["read"]);
 
       const grant = options.grant ?? "authorization_code";
       yield* executor.oauth.createClient({
@@ -264,6 +415,47 @@ describe("provider-owned OAuth refresh grant", () => {
     ),
   );
 
+  it.effect("accepts the documented maximum delegated token lifetime", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const before = Date.now();
+        const { config, executor } = yield* scenario({
+          behaviour: {
+            kind: "seals",
+            scope: "read",
+            expiresInSeconds: MAX_REFRESH_GRANT_EXPIRES_IN_SECONDS,
+          },
+        });
+        yield* executor.execute(TOOL, {});
+        const row = yield* Effect.promise(() =>
+          config.db.findFirst("connection", { where: (b) => b("name", "=", "main") }),
+        );
+        expect(Number(row?.expires_at)).toBeGreaterThanOrEqual(
+          before + MAX_REFRESH_GRANT_EXPIRES_IN_SECONDS * 1_000,
+        );
+      }),
+    ),
+  );
+
+  it.effect("rejects a delegated token lifetime above the documented maximum", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { executor } = yield* scenario({
+          behaviour: {
+            kind: "seals",
+            scope: "read",
+            expiresInSeconds: MAX_REFRESH_GRANT_EXPIRES_IN_SECONDS + 1,
+          },
+        });
+        const exit = yield* Effect.exit(executor.execute(TOOL, {}));
+        expectOpaqueProviderFailure(
+          exit,
+          "Credential provider could not complete OAuth token refresh.",
+        );
+      }),
+    ),
+  );
+
   it.effect("leaves the recorded scope alone when the provider reports none", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -295,13 +487,19 @@ describe("provider-owned OAuth refresh grant", () => {
     Effect.scoped(
       Effect.gen(function* () {
         const { config, executor, recorder } = yield* scenario({
-          behaviour: { kind: "rejected", error: "invalid_grant" },
+          behaviour: {
+            kind: "rejected",
+            error: "invalid_grant",
+            unsafeDetails: TOKEN_CANARY,
+          },
         });
 
         const failure = yield* Effect.flip(executor.execute(TOOL, {}));
         // Not a StorageError: that is scrubbed to "Internal tool error [id]" at the sandbox
         // boundary, so the user would never be told to reconnect.
-        expect(JSON.stringify(failure)).toContain("invalid_grant");
+        const serializedFailure = JSON.stringify(failure);
+        expect(serializedFailure).toContain("invalid_grant");
+        expect(serializedFailure).not.toContain(TOKEN_CANARY);
 
         const row = yield* Effect.promise(() =>
           config.db.findFirst("connection", { where: (b) => b("name", "=", "main") }),
@@ -310,6 +508,9 @@ describe("provider-owned OAuth refresh grant", () => {
           (row?.provider_state as { oauthReauthRequiredAt?: number } | null)?.oauthReauthRequiredAt,
         ).toEqual(expect.any(Number));
         expect(row?.last_health).toMatchObject({ status: "expired" });
+        expect(
+          JSON.stringify({ providerState: row?.provider_state, lastHealth: row?.last_health }),
+        ).not.toContain(TOKEN_CANARY);
 
         // The gate is armed, so the doomed grant is not re-sent on the next resolve. Without this
         // a dead connection re-sends its dead grant on every proactive cycle, indefinitely.
@@ -320,13 +521,306 @@ describe("provider-owned OAuth refresh grant", () => {
     ),
   );
 
+  it.effect("preserves RFC 8707 invalid_target as a safe actionable classification", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { config, executor, recorder } = yield* scenario({
+          behaviour: { kind: "rejected", error: "invalid_target" },
+        });
+        const exit = yield* Effect.exit(executor.execute(TOOL, {}));
+        expect(Exit.isFailure(exit)).toBe(true);
+        if (!Exit.isFailure(exit)) return;
+        expect(Cause.pretty(exit.cause)).toContain("invalid_target");
+        expect(Cause.pretty(exit.cause)).not.toContain(TOKEN_CANARY);
+        const row = yield* Effect.promise(() =>
+          config.db.findFirst("connection", { where: (b) => b("name", "=", "main") }),
+        );
+        expect(
+          (row?.provider_state as { oauthReauthRequiredAt?: number } | null)?.oauthReauthRequiredAt,
+        ).toBeUndefined();
+
+        // Unlike invalid_grant, invalid_target does not prove the refresh token is dead.
+        recorder.grants.length = 0;
+        yield* Effect.exit(executor.execute(TOOL, {}));
+        expect(recorder.grants).toHaveLength(1);
+      }),
+    ),
+  );
+
+  it.effect("drops free-form rejection details and malformed classifications", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { config, executor, recorder } = yield* scenario({
+          behaviour: {
+            kind: "rejected",
+            unsafeDetails: TOKEN_CANARY,
+            unsafeError: TOKEN_CANARY,
+          },
+        });
+
+        const failure = yield* Effect.flip(executor.execute(TOOL, {}));
+        // This is also the failure object an outer boundary may log. A fixed message plus an
+        // undefined cause proves the hostile provider payload cannot flow through that log path.
+        expect(failure).toMatchObject({
+          _tag: "StorageError",
+          message: "Credential provider could not complete OAuth token refresh.",
+          cause: undefined,
+        });
+        expect(JSON.stringify(failure)).not.toContain(TOKEN_CANARY);
+
+        const row = yield* Effect.promise(() =>
+          config.db.findFirst("connection", { where: (b) => b("name", "=", "main") }),
+        );
+        expect(
+          (row?.provider_state as { oauthReauthRequiredAt?: number } | null)?.oauthReauthRequiredAt,
+        ).toBeUndefined();
+        expect(
+          JSON.stringify({ providerState: row?.provider_state, lastHealth: row?.last_health }),
+        ).not.toContain(TOKEN_CANARY);
+
+        // An unknown classification is retryable and must not arm the known-dead gate.
+        recorder.grants.length = 0;
+        yield* Effect.flip(executor.execute(TOOL, {}));
+        expect(recorder.grants).toHaveLength(1);
+      }),
+    ),
+  );
+
+  it.effect("scrubs provider storage failures before they reach host error channels", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { config, executor, recorder } = yield* scenario({
+          behaviour: { kind: "storageFailure" },
+        });
+
+        const exit = yield* Effect.exit(executor.execute(TOOL, {}));
+        expectOpaqueProviderFailure(
+          exit,
+          "Credential provider could not complete OAuth token refresh.",
+        );
+
+        const row = yield* Effect.promise(() =>
+          config.db.findFirst("connection", { where: (b) => b("name", "=", "main") }),
+        );
+        expect(
+          JSON.stringify({ providerState: row?.provider_state, lastHealth: row?.last_health }),
+        ).not.toContain(TOKEN_CANARY);
+        expect(
+          (row?.provider_state as { oauthReauthRequiredAt?: number } | null)?.oauthReauthRequiredAt,
+        ).toBeUndefined();
+
+        // A storage failure is retryable and must not arm the known-dead grant gate.
+        recorder.grants.length = 0;
+        const retry = yield* Effect.exit(executor.execute(TOOL, {}));
+        expectOpaqueProviderFailure(
+          retry,
+          "Credential provider could not complete OAuth token refresh.",
+        );
+        expect(recorder.grants).toHaveLength(1);
+      }),
+    ),
+  );
+
+  it.effect("scrubs a synchronous provider throw", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { executor } = yield* scenario({ behaviour: { kind: "syncThrow" } });
+        const exit = yield* Effect.exit(executor.execute(TOOL, {}));
+        expectOpaqueProviderFailure(
+          exit,
+          "Credential provider could not complete OAuth token refresh.",
+        );
+      }),
+    ),
+  );
+
+  it.effect("scrubs a provider defect", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { executor } = yield* scenario({ behaviour: { kind: "defect" } });
+        const exit = yield* Effect.exit(executor.execute(TOOL, {}));
+        expectOpaqueProviderFailure(
+          exit,
+          "Credential provider could not complete OAuth token refresh.",
+        );
+      }),
+    ),
+  );
+
+  it.effect("scrubs malformed rejection getters", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { executor } = yield* scenario({
+          behaviour: { kind: "throwingRejectionGetter" },
+        });
+        const exit = yield* Effect.exit(executor.execute(TOOL, {}));
+        expectOpaqueProviderFailure(
+          exit,
+          "Credential provider could not complete OAuth token refresh.",
+        );
+      }),
+    ),
+  );
+
+  it.effect("snapshots a stateful rejection classification exactly once", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { config, executor, recorder } = yield* scenario({
+          behaviour: { kind: "changingRejectionGetter" },
+        });
+        const exit = yield* Effect.exit(executor.execute(TOOL, {}));
+        expect(Exit.isFailure(exit)).toBe(true);
+        if (!Exit.isFailure(exit)) return;
+        expect(recorder.rejectionErrorReads).toBe(1);
+        expect(Cause.pretty(exit.cause)).toContain("invalid_grant");
+        expect(Cause.pretty(exit.cause)).not.toContain(TOKEN_CANARY);
+
+        const row = yield* Effect.promise(() =>
+          config.db.findFirst("connection", { where: (b) => b("name", "=", "main") }),
+        );
+        expect(
+          JSON.stringify({ providerState: row?.provider_state, lastHealth: row?.last_health }),
+        ).not.toContain(TOKEN_CANARY);
+      }),
+    ),
+  );
+
+  it.effect("scrubs a throwing refresh capability getter", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { executor } = yield* scenario({
+          behaviour: { kind: "throwingCapabilityGetter" },
+        });
+        const exit = yield* Effect.exit(executor.execute(TOOL, {}));
+        expectOpaqueProviderFailure(
+          exit,
+          "Credential provider could not complete OAuth token refresh.",
+        );
+      }),
+    ),
+  );
+
+  it.effect("scrubs a throwing expiry getter on a successful provider result", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { executor } = yield* scenario({
+          behaviour: { kind: "throwingResultGetter", field: "expiry" },
+        });
+        const exit = yield* Effect.exit(executor.execute(TOOL, {}));
+        expectOpaqueProviderFailure(
+          exit,
+          "Credential provider could not complete OAuth token refresh.",
+        );
+      }),
+    ),
+  );
+
+  it.effect("scrubs a throwing scope getter on a successful provider result", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { executor } = yield* scenario({
+          behaviour: { kind: "throwingResultGetter", field: "scope" },
+        });
+        const exit = yield* Effect.exit(executor.execute(TOOL, {}));
+        expectOpaqueProviderFailure(
+          exit,
+          "Credential provider could not complete OAuth token refresh.",
+        );
+      }),
+    ),
+  );
+
+  it.effect("refuses to persist a provider scope outside the host-trusted grant set", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { config, executor } = yield* scenario({
+          behaviour: {
+            kind: "seals",
+            expiresInSeconds: 3_600,
+            scope: TOKEN_CANARY,
+          },
+        });
+        const exit = yield* Effect.exit(executor.execute(TOOL, {}));
+        expectOpaqueProviderFailure(
+          exit,
+          "Credential provider could not complete OAuth token refresh.",
+        );
+        const row = yield* Effect.promise(() =>
+          config.db.findFirst("connection", { where: (b) => b("name", "=", "main") }),
+        );
+        expect(
+          JSON.stringify({ scope: row?.oauth_scope, lastHealth: row?.last_health }),
+        ).not.toContain(TOKEN_CANARY);
+      }),
+    ),
+  );
+
+  it.effect("preserves a provider method's receiver", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { executor } = yield* scenario({ behaviour: { kind: "requiresReceiver" } });
+        expect(yield* executor.execute(TOOL, {})).toEqual({ token: "delegated-access-token" });
+      }),
+    ),
+  );
+
+  it.effect("preserves cancellation while dropping a concurrent secret-bearing defect", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { executor } = yield* scenario({ behaviour: { kind: "interruptedDefect" } });
+        const exit = yield* Effect.exit(executor.execute(TOOL, {}));
+        expect(Exit.isFailure(exit)).toBe(true);
+        if (!Exit.isFailure(exit)) return;
+        expect(Cause.hasInterrupts(exit.cause)).toBe(true);
+        expect(exit.cause.reasons.every(Cause.isInterruptReason)).toBe(true);
+        expect(Cause.pretty(exit.cause)).not.toContain(TOKEN_CANARY);
+      }),
+    ),
+  );
+
+  it.effect("scrubs storage failures while resolving the refreshed access token", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { executor } = yield* scenario({
+          behaviour: { kind: "readFailure", failure: "storage" },
+        });
+        const exit = yield* Effect.exit(executor.execute(TOOL, {}));
+        expectOpaqueProviderFailure(
+          exit,
+          "Credential provider could not resolve the refreshed access token.",
+        );
+      }),
+    ),
+  );
+
+  it.effect("scrubs defects while resolving the refreshed access token", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { executor } = yield* scenario({
+          behaviour: { kind: "readFailure", failure: "defect" },
+        });
+        const exit = yield* Effect.exit(executor.execute(TOOL, {}));
+        expectOpaqueProviderFailure(
+          exit,
+          "Credential provider could not resolve the refreshed access token.",
+        );
+      }),
+    ),
+  );
+
   it.effect("fails rather than reporting success when the new token cannot be read back", () =>
     Effect.scoped(
       Effect.gen(function* () {
-        const { config, executor } = yield* scenario({ behaviour: { kind: "sealsNothing" } });
+        const { config, executor, recorder } = yield* scenario({
+          behaviour: { kind: "sealsNothing" },
+        });
 
         const failure = yield* Effect.flip(executor.execute(TOOL, {}));
-        expect(JSON.stringify(failure)).toContain("could not be resolved");
+        expect(failure).toBeInstanceOf(StorageError);
+        expect(failure.message).toBe(
+          "Credential provider did not make the refreshed access token resolvable.",
+        );
+        expect(failure.cause).toBeUndefined();
 
         // The row must NOT have been stamped with a fresh expiry — doing that over a token nobody
         // can resolve leaves the connection reading healthy for a full lifetime while every call
@@ -335,6 +829,15 @@ describe("provider-owned OAuth refresh grant", () => {
           config.db.findFirst("connection", { where: (b) => b("name", "=", "main") }),
         );
         expect(Number(row?.expires_at)).toBeLessThan(Date.now());
+        expect(
+          (row?.provider_state as { oauthReauthRequiredAt?: number } | null)?.oauthReauthRequiredAt,
+        ).toBeUndefined();
+        expect((row?.last_health as { status?: string } | null)?.status).not.toBe("expired");
+
+        // This is a provider invariant/storage failure, not a dead OAuth grant: retry it.
+        recorder.grants.length = 0;
+        yield* Effect.flip(executor.execute(TOOL, {}));
+        expect(recorder.grants).toHaveLength(1);
       }),
     ),
   );

@@ -1,4 +1,4 @@
-import { Effect, Inspectable, Layer, Option, Predicate, Schema } from "effect";
+import { Cause, Effect, Inspectable, Layer, Option, Predicate, Schema } from "effect";
 import { FetchHttpClient, type HttpClient } from "effect/unstable/http";
 import { fumadb } from "@executor-js/fumadb";
 import { memoryAdapter } from "@executor-js/fumadb/adapters/memory";
@@ -122,7 +122,13 @@ import {
   type ToolPolicy,
   type UpdateToolPolicyInput,
 } from "./policies";
-import type { CredentialProvider, ProviderEntry } from "./provider";
+import {
+  MAX_REFRESH_GRANT_EXPIRES_IN_SECONDS,
+  isRefreshGrantRejectionCode,
+  type CredentialProvider,
+  type ProviderEntry,
+  type RefreshGrantRejected,
+} from "./provider";
 import { touchSubject } from "./subject-registry";
 import type {
   AnyPlugin,
@@ -1898,7 +1904,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         // non-invalid_grant 400 and callers saw only the opaque defect).
         // Code-less failures (transport blips, non-OAuth-shaped responses) stay
         // StorageError so the next invoke retries.
-        const classifyGrantRefusal = (cause: {
+        const classifyHostGrantRefusal = (cause: {
           readonly message: string;
           readonly error?: string;
         }): CredentialResolutionError | StorageError =>
@@ -1917,6 +1923,31 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
                 message: `OAuth token refresh failed: ${cause.message}`,
                 cause,
               });
+
+        // A provider is a credential boundary, so never project its Error
+        // message/cause (or an unrecognised `error` value) into host errors.
+        // Those values may contain token responses or other secret material.
+        // The closed standards-defined code is the only provider-controlled value allowed to
+        // reach callers, health persistence, or span attributes.
+        const classifyProviderGrantRefusal = (
+          cause: RefreshGrantRejected,
+        ): CredentialResolutionError | StorageError => {
+          const reportedError = cause.error;
+          const error = isRefreshGrantRejectionCode(reportedError) ? reportedError : undefined;
+          return error !== undefined
+            ? new CredentialResolutionError({
+                owner,
+                integration: IntegrationSlug.make(row.integration),
+                name: ConnectionName.make(row.name),
+                message: `OAuth token refresh was rejected (${error}).`,
+                reauthRequired: error === "invalid_grant",
+                oauthErrorCode: error,
+              })
+            : new StorageError({
+                message: "Credential provider could not complete OAuth token refresh.",
+                cause: undefined,
+              });
+        };
 
         // Persist the definitive verdict so the NEXT refresh skips the doomed
         // grant (see the known-dead gate above) and the connection shows
@@ -1941,7 +1972,26 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         // client_credentials is excluded deliberately: it has no refresh token
         // to spend (the token is re-minted from the client id/secret), so it is
         // a different exchange and is left on the path below.
-        if (provider.refreshGrant && String(clientRow.grant) !== "client_credentials") {
+        const providerRefreshFailure = () =>
+          new StorageError({
+            message: "Credential provider could not complete OAuth token refresh.",
+            cause: undefined,
+          });
+        const preserveProviderInterruption = <E>(
+          cause: Cause.Cause<E>,
+        ): Effect.Effect<never, never> =>
+          Effect.failCause(Cause.fromReasons<never>(cause.reasons.filter(Cause.isInterruptReason)));
+        const delegatedRefreshGrant =
+          String(clientRow.grant) === "client_credentials"
+            ? undefined
+            : yield* Effect.suspend(() => Effect.succeed(provider.refreshGrant)).pipe(
+                Effect.catchCause((cause) =>
+                  Cause.hasInterrupts(cause)
+                    ? preserveProviderInterruption(cause)
+                    : Effect.fail(providerRefreshFailure()),
+                ),
+              );
+        if (delegatedRefreshGrant && String(clientRow.grant) !== "client_credentials") {
           if (!row.refresh_item_id) {
             return yield* reauth("No refresh token is stored for this connection.");
           }
@@ -1953,8 +2003,8 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
               `OAuth token URL "${tokenUrl}" must use https: or loopback http:.`,
             );
           }
-          const granted = yield* provider
-            .refreshGrant({
+          const granted = yield* Effect.suspend(() =>
+            delegatedRefreshGrant.call(provider, {
               refreshItemId: ProviderItemId.make(String(row.refresh_item_id)),
               accessItemId: tokenItemId,
               clientSecretItemId: clientRow.client_secret_item_id
@@ -1968,21 +2018,95 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
               scopes: grantedScopes,
               // RFC 8707: keep the re-minted token bound to the same resource.
               resource: clientRow.resource ? String(clientRow.resource) : undefined,
-            })
-            .pipe(
-              Effect.catchTag("RefreshGrantRejected", (cause) =>
-                Effect.fail(classifyGrantRefusal(cause)),
-              ),
-              Effect.tapError(armKnownDeadGate),
-            );
+            }),
+          ).pipe(
+            // Project the success value while it is still inside the guarded provider boundary.
+            // Accessors on a remote/plugin object can throw, and an arbitrary scope string would
+            // otherwise be a direct channel into persisted host state. Rebuild scope exclusively
+            // from the host's already-trusted grant set.
+            Effect.flatMap((result) =>
+              Effect.suspend(() => {
+                const expiresInSeconds = result.expiresInSeconds;
+                const reportedScope = result.scope;
+                if (
+                  expiresInSeconds !== null &&
+                  (typeof expiresInSeconds !== "number" ||
+                    !Number.isFinite(expiresInSeconds) ||
+                    expiresInSeconds < 0 ||
+                    expiresInSeconds > MAX_REFRESH_GRANT_EXPIRES_IN_SECONDS)
+                ) {
+                  return Effect.fail(providerRefreshFailure());
+                }
+                if (reportedScope !== null && typeof reportedScope !== "string") {
+                  return Effect.fail(providerRefreshFailure());
+                }
+                const trustedScopes = new Map(grantedScopes.map((scope) => [scope, scope]));
+                const reportedScopes =
+                  reportedScope === null
+                    ? null
+                    : [...new Set(reportedScope.split(/\s+/).filter(Boolean))];
+                if (
+                  reportedScopes !== null &&
+                  reportedScopes.some((scope) => !trustedScopes.has(scope))
+                ) {
+                  return Effect.fail(providerRefreshFailure());
+                }
+                return Effect.succeed({
+                  expiresInSeconds,
+                  scope:
+                    reportedScopes === null
+                      ? null
+                      : reportedScopes.map((scope) => trustedScopes.get(scope)!).join(" "),
+                });
+              }),
+            ),
+            // This is an external plugin boundary. Preserve cancellation, but discard every
+            // provider-authored failure/defect before it can reach Cause.pretty, traces, or logs.
+            Effect.catchCause((cause) => {
+              if (Cause.hasInterrupts(cause)) return preserveProviderInterruption(cause);
+              const reason = cause.reasons.length === 1 ? cause.reasons[0] : undefined;
+              return Effect.suspend(() =>
+                Effect.succeed(
+                  reason !== undefined &&
+                    Cause.isFailReason(reason) &&
+                    Predicate.isTagged(reason.error, "RefreshGrantRejected")
+                    ? classifyProviderGrantRefusal(reason.error)
+                    : providerRefreshFailure(),
+                ),
+              ).pipe(
+                // Even a malformed tagged object may throw from `_tag`/`error` accessors.
+                Effect.catchCause((classificationCause) =>
+                  Cause.hasInterrupts(classificationCause)
+                    ? preserveProviderInterruption(classificationCause)
+                    : Effect.succeed(providerRefreshFailure()),
+                ),
+                Effect.flatMap((error) => Effect.fail(error)),
+              );
+            }),
+            Effect.tapError(armKnownDeadGate),
+          );
           // Read the token back BEFORE recording success. A provider that
           // reported a grant it did not actually seal would otherwise leave the
           // row stamped with a fresh expiry over a stale or absent token, and
           // the connection would read healthy for a whole token lifetime while
           // every call using it failed.
-          const access = yield* provider.get(tokenItemId);
-          if (!access) {
-            return yield* reauth("Refreshed access token could not be resolved.");
+          const access = yield* Effect.suspend(() => provider.get(tokenItemId)).pipe(
+            Effect.catchCause((cause) =>
+              Cause.hasInterrupts(cause)
+                ? preserveProviderInterruption(cause)
+                : Effect.fail(
+                    new StorageError({
+                      message: "Credential provider could not resolve the refreshed access token.",
+                      cause: undefined,
+                    }),
+                  ),
+            ),
+          );
+          if (typeof access !== "string" || access.length === 0) {
+            return yield* new StorageError({
+              message: "Credential provider did not make the refreshed access token resolvable.",
+              cause: undefined,
+            });
           }
           // Convert on OUR clock, never the provider's — `shouldRefreshToken`
           // compares the stored instant against this same clock, so an absolute
@@ -2051,7 +2175,10 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
                   resource: clientRow.resource ? String(clientRow.resource) : undefined,
                   endpointUrlPolicy: config.oauthEndpointUrlPolicy,
                   fetch: config.fetch,
-                }).pipe(Effect.mapError(classifyGrantRefusal), Effect.tapError(armKnownDeadGate));
+                }).pipe(
+                  Effect.mapError(classifyHostGrantRefusal),
+                  Effect.tapError(armKnownDeadGate),
+                );
               });
 
         if (provider.set) {

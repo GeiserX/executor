@@ -102,11 +102,16 @@ export type {
 export type { Tool, ToolDef, ToolListFilter, ToolAnnotations } from "./tool";
 
 // Credential providers.
-export { RefreshGrantRejected } from "./provider";
+export {
+  MAX_REFRESH_GRANT_EXPIRES_IN_SECONDS,
+  RefreshGrantRejected,
+  isRefreshGrantRejectionCode,
+} from "./provider";
 export type {
   CredentialProvider,
   ProviderEntry,
   RefreshGrantInput,
+  RefreshGrantRejectionCode,
   RefreshGrantResult,
 } from "./provider";
 
