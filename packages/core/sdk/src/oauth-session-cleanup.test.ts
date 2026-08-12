@@ -70,29 +70,9 @@ const acmePlugin = definePlugin(() => ({
   }),
 }))();
 
-const startFlow = (executor: any, server: any, name: string) =>
-  Effect.gen(function* () {
-    const started = yield* executor.oauth.start({
-      owner: "org",
-      client: CLIENT,
-      clientOwner: "org",
-      name: ConnectionName.make(name),
-      integration: INTEG,
-      template: TEMPLATE,
-    });
-    if (started.status !== "redirect") {
-      return yield* Effect.die("expected a redirect-status OAuth start");
-    }
-    const callback = yield* server.completeAuthorizationCodeFlow({
-      authorizationUrl: started.authorizationUrl,
-    });
-    return { state: started.state, code: callback.code };
-  });
-
-const sessionRow = (config: any, state: string) =>
-  Effect.promise(() =>
-    config.db.findFirst("oauth_session", { where: (b: any) => b("state", "=", state) }),
-  );
+interface SessionRow {
+  readonly pkce_verifier?: string | null;
+}
 
 describe("a dead authorization flow does not keep its PKCE verifier", () => {
   it.effect("drops the session when the completion cannot be retried", () =>
@@ -113,25 +93,57 @@ describe("a dead authorization flow does not keep its PKCE verifier", () => {
           clientSecret: "test-secret",
         });
 
-        const dying = yield* startFlow(executor, server, "dying");
-        const bystander = yield* startFlow(executor, server, "bystander");
+        const readSession = (state: string) =>
+          Effect.promise(
+            () =>
+              config.db.findFirst("oauth_session", {
+                where: (b) => b("state", "=", state),
+              }) as Promise<SessionRow | null>,
+          );
+
+        const dying = yield* executor.oauth.start({
+          owner: "org",
+          client: CLIENT,
+          clientOwner: "org",
+          name: ConnectionName.make("dying"),
+          integration: INTEG,
+          template: TEMPLATE,
+        });
+        if (dying.status !== "redirect") {
+          return yield* Effect.die("expected a redirect-status OAuth start");
+        }
+        const dyingCallback = yield* server.completeAuthorizationCodeFlow({
+          authorizationUrl: dying.authorizationUrl,
+        });
+
+        const bystander = yield* executor.oauth.start({
+          owner: "org",
+          client: CLIENT,
+          clientOwner: "org",
+          name: ConnectionName.make("bystander"),
+          integration: INTEG,
+          template: TEMPLATE,
+        });
+        if (bystander.status !== "redirect") {
+          return yield* Effect.die("expected a redirect-status OAuth start");
+        }
 
         // The verifier really is sitting there in plaintext.
-        const before = yield* sessionRow(config, dying.state);
+        const before = yield* readSession(String(dying.state));
         expect(before?.pkce_verifier).toEqual(expect.any(String));
 
-        // Remove the app the flow was started against. Completion now fails with
-        // restartRequired, so this state can never be redeemed again.
+        // Remove the app this flow was started against, so completion fails with
+        // restartRequired — this state can never be redeemed again.
         yield* executor.oauth.removeClient("org", CLIENT);
         const failed = yield* Effect.flip(
-          executor.oauth.complete({ state: dying.state, code: dying.code }),
+          executor.oauth.complete({ state: dying.state, code: dyingCallback.code }),
         );
         expect(JSON.stringify(failed)).toContain("restartRequired");
 
-        expect(yield* sessionRow(config, dying.state)).toBeNull();
+        expect(yield* readSession(String(dying.state))).toBeNull();
         // The other flow is still live and untouched — a cleanup must not sweep
         // sessions it was not asked about.
-        const survivor = yield* sessionRow(config, bystander.state);
+        const survivor = yield* readSession(String(bystander.state));
         expect(survivor?.pkce_verifier).toEqual(expect.any(String));
       }),
     ),
