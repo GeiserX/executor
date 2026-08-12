@@ -75,6 +75,90 @@ interface SessionRow {
 }
 
 describe("a dead authorization flow does not keep its PKCE verifier", () => {
+  it.effect("sweeps an expired verifier the next time authorization starts", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const server = yield* serveOAuthTestServer({});
+        const { executor, config } = yield* makeTestWorkspaceHarness({
+          plugins: [memoryCredentialsPlugin, acmePlugin] as const,
+        });
+        yield* executor.acme.seed();
+        yield* executor.oauth.createClient({
+          owner: "org",
+          slug: CLIENT,
+          authorizationUrl: server.authorizationEndpoint,
+          tokenUrl: server.tokenEndpoint,
+          grant: "authorization_code",
+          clientId: "test-client",
+          clientSecret: "test-secret",
+        });
+
+        const readSession = (state: string) =>
+          Effect.promise(
+            () =>
+              config.db.findFirst("oauth_session", {
+                where: (b) => b("state", "=", state),
+              }) as Promise<SessionRow | null>,
+          );
+
+        // An abandoned flow: started, never returned to. Nothing completes it, so
+        // the lazy expiry check in `complete` never runs for it.
+        const abandoned = yield* executor.oauth.start({
+          owner: "org",
+          client: CLIENT,
+          clientOwner: "org",
+          name: ConnectionName.make("abandoned"),
+          integration: INTEG,
+          template: TEMPLATE,
+        });
+        if (abandoned.status !== "redirect") {
+          return yield* Effect.die("expected a redirect-status OAuth start");
+        }
+        // A live flow started beside it, which must survive the sweep.
+        const live = yield* executor.oauth.start({
+          owner: "org",
+          client: CLIENT,
+          clientOwner: "org",
+          name: ConnectionName.make("live"),
+          integration: INTEG,
+          template: TEMPLATE,
+        });
+        if (live.status !== "redirect") {
+          return yield* Effect.die("expected a redirect-status OAuth start");
+        }
+
+        // Age only the abandoned one past its expiry.
+        yield* Effect.promise(() =>
+          config.db.updateMany("oauth_session", {
+            where: (b) => b("state", "=", String(abandoned.state)),
+            set: { expires_at: Date.now() - 60_000 },
+          }),
+        );
+        expect((yield* readSession(String(abandoned.state)))?.pkce_verifier).toEqual(
+          expect.any(String),
+        );
+
+        // Starting any authorization is what tidies up.
+        const third = yield* executor.oauth.start({
+          owner: "org",
+          client: CLIENT,
+          clientOwner: "org",
+          name: ConnectionName.make("third"),
+          integration: INTEG,
+          template: TEMPLATE,
+        });
+        if (third.status !== "redirect") {
+          return yield* Effect.die("expected a redirect-status OAuth start");
+        }
+
+        expect(yield* readSession(String(abandoned.state))).toBeNull();
+        // The unexpired flow is untouched — a sweep must not cancel someone
+        // else's authorization mid-flight.
+        expect((yield* readSession(String(live.state)))?.pkce_verifier).toEqual(expect.any(String));
+      }),
+    ),
+  );
+
   it.effect("drops the session when the completion cannot be retried", () =>
     Effect.scoped(
       Effect.gen(function* () {

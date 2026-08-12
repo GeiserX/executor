@@ -1197,6 +1197,26 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
 
       const now = new Date();
       const expiresAt = Date.now() + OAUTH2_SESSION_TTL_MS;
+
+      // Drop verifiers that have already expired before parking a new one.
+      // `complete` discards an expired session lazily, but an ABANDONED flow is
+      // never completed, so that check never runs for it — and nothing else
+      // sweeps this table, so its verifier would sit here in plaintext forever.
+      // Doing it on `start` costs one delete on a path that is already writing,
+      // needs no scheduler in any host, and bounds the table by how often
+      // authorization is STARTED rather than by how often it is abandoned.
+      //
+      // Owner-scoped by the table's own delete policy, so a caller only ever
+      // sweeps rows it can already see. Best-effort: failing to tidy up must not
+      // stop someone connecting an account.
+      yield* deps.fuma
+        .use("oauth_session.sweepExpired", (db) =>
+          looseDb(db).deleteMany("oauth_session", {
+            where: (b: any) => b("expires_at", "<", Date.now()),
+          }),
+        )
+        .pipe(Effect.ignore);
+
       yield* deps.fuma.use("oauth_session.create", (db) =>
         looseDb(db).create("oauth_session", {
           tenant: keys.tenant,
