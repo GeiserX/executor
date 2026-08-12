@@ -6,7 +6,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, Exit, Ref } from "effect";
+import { Cause, Effect, Exit, Ref } from "effect";
 import { HttpServerResponse } from "effect/unstable/http";
 
 import {
@@ -649,6 +649,48 @@ describe("exchangeAuthorizationCode", () => {
         }),
     ),
   );
+
+  // A malformed HTTP 200 is the worst case in this module. The OAuth library
+  // rejects it by attaching the PARSED BODY — the whole token response — and
+  // these are ordinary provider quirks, not exotic inputs. Each of these bodies
+  // was confirmed to leak both tokens before the `cause` field was removed.
+  for (const [label, quirk] of [
+    ["expires_in is null", { expires_in: null }],
+    ["scope is an array", { scope: ["read"] }],
+    ["token_type is not a string", { token_type: 7 }],
+  ] as const) {
+    it.effect(`keeps tokens out of the failure when ${label}`, () =>
+      withTokenEndpoint(
+        () =>
+          json(200, {
+            access_token: "AT-CANARY-must-not-escape",
+            refresh_token: "RT-CANARY-must-not-escape",
+            token_type: "Bearer",
+            ...quirk,
+          }),
+        ({ tokenUrl }) =>
+          Effect.gen(function* () {
+            const exit = yield* Effect.exit(
+              exchangeAuthorizationCode({
+                tokenUrl,
+                clientId: "cid",
+                redirectUrl: "https://cb",
+                codeVerifier: "v",
+                code: "c",
+              }),
+            );
+            expect(Exit.isFailure(exit)).toBe(true);
+            if (!Exit.isFailure(exit)) return;
+            // Both renderings, because different sinks use different ones:
+            // structured capture serialises, console output pretty-prints.
+            for (const rendering of [JSON.stringify(exit.cause), Cause.pretty(exit.cause)]) {
+              expect(rendering).not.toContain("AT-CANARY-must-not-escape");
+              expect(rendering).not.toContain("RT-CANARY-must-not-escape");
+            }
+          }),
+      ),
+    );
+  }
 
   it.effect("redacts a credential echoed back under a field name nobody predicted", () =>
     withTokenEndpoint(
