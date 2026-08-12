@@ -5,13 +5,15 @@ import {
   AuthTemplateSlug,
   ConnectionName,
   IntegrationSlug,
+  OAuthClientSlug,
   ProviderItemId,
   ProviderKey,
   ToolName,
 } from "./ids";
 import { definePlugin } from "./plugin";
 import type { CredentialProvider } from "./provider";
-import { makeTestExecutor } from "./test-config";
+import { makeTestExecutor, makeTestWorkspaceHarness } from "./test-config";
+import { serveOAuthTestServer } from "./testing/oauth-test-server";
 
 // Removing a connection has to remove the SECRET, not just the row that points at
 // it — an item left behind in the store is still decryptable, which is the one
@@ -59,6 +61,30 @@ const demoPlugin = (store: Map<string, string>, writable = true) =>
         ctx.core.integrations.register({ slug: INTEG, description: "Vercel", config: {} }),
     }),
   }))();
+
+const OAUTH_INTEG = IntegrationSlug.make("oauthdemo");
+const OAUTH_TEMPLATE = AuthTemplateSlug.make("oauth");
+
+const oauthIntegrationPlugin = definePlugin(() => ({
+  id: "oauthdemo" as const,
+  storage: () => ({}),
+  resolveTools: () =>
+    Effect.succeed({ tools: [{ name: ToolName.make("whoami"), description: "whoami" }] }),
+  describeAuthMethods: () => [
+    {
+      id: "oauth",
+      label: "OAuth2",
+      kind: "oauth" as const,
+      template: String(OAUTH_TEMPLATE),
+      oauth: { scopes: [] },
+    },
+  ],
+  invokeTool: ({ credential }) => Effect.succeed({ token: credential.value }),
+  extension: (ctx) => ({
+    seed: () =>
+      ctx.core.integrations.register({ slug: OAUTH_INTEG, description: "OAuth demo", config: {} }),
+  }),
+}))();
 
 const setup = (store: Map<string, string>, writable = true) =>
   makeTestExecutor({ plugins: [demoPlugin(store, writable)] as const }).pipe(
@@ -179,6 +205,62 @@ describe("removing a connection removes the credential it minted", () => {
       // under the one still using it — that would break a live connection.
       expect(store.get(mintedId)).toBe("shared-token");
     }),
+  );
+
+  it.effect("deletes BOTH the access and the refresh token of an OAuth connection", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        // The OAuth mint is the security-relevant half: it parks a long-lived
+        // REFRESH token, and leaving that behind is far worse than leaving an
+        // access token. Nothing else in the suite exercises an `oauth:` item id,
+        // so without this the `:refresh` half of the rebuild is unpinned.
+        const store = new Map<string, string>();
+        const server = yield* serveOAuthTestServer({});
+        const { executor } = yield* makeTestWorkspaceHarness({
+          plugins: [demoPlugin(store), oauthIntegrationPlugin] as const,
+        });
+        yield* executor.oauthdemo.seed();
+        yield* executor.oauth.createClient({
+          owner: "org",
+          slug: OAuthClientSlug.make("demo-app"),
+          authorizationUrl: server.authorizationEndpoint,
+          tokenUrl: server.tokenEndpoint,
+          grant: "authorization_code",
+          clientId: "test-client",
+          clientSecret: "test-secret",
+        });
+
+        const started = yield* executor.oauth.start({
+          owner: "org",
+          client: OAuthClientSlug.make("demo-app"),
+          clientOwner: "org",
+          name: ConnectionName.make("main"),
+          integration: OAUTH_INTEG,
+          template: OAUTH_TEMPLATE,
+        });
+        if (started.status !== "redirect") {
+          return yield* Effect.die("expected a redirect-status OAuth start");
+        }
+        const callback = yield* server.completeAuthorizationCodeFlow({
+          authorizationUrl: started.authorizationUrl,
+        });
+        yield* executor.oauth.complete({ state: started.state, code: callback.code });
+
+        const accessId = "oauth:org:oauthdemo:main";
+        expect(store.get(accessId)).toEqual(expect.any(String));
+        expect(store.get(`${accessId}:refresh`)).toEqual(expect.any(String));
+
+        yield* executor.connections.remove({
+          owner: "org",
+          integration: OAUTH_INTEG,
+          name: ConnectionName.make("main"),
+        });
+
+        expect(store.has(accessId)).toBe(false);
+        // The long-lived half. Leaving this behind is the worst outcome here.
+        expect(store.has(`${accessId}:refresh`)).toBe(false);
+      }),
+    ),
   );
 
   it.effect("removing one connection does not touch another's credential", () =>

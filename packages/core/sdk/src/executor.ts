@@ -861,9 +861,6 @@ const normalizeConnectionInputs = (
   return [{ variable: PRIMARY_INPUT_VARIABLE, origin: { value: input.value } }];
 };
 
-/** Decode a connection row's `item_ids` JSON map (`variable → provider item id`).
- *  Tolerates the historically-single shape by returning `{}` for anything that
- *  isn't an object. */
 /** The provider items a connection MINTED, as opposed to ones it merely points
  *  at.
  *
@@ -891,6 +888,9 @@ const mintedItemIds = (row: ConnectionRow): readonly string[] => {
   return [...new Set(stored.filter((id) => mintable.has(id)))];
 };
 
+/** Decode a connection row's `item_ids` JSON map (`variable → provider item id`).
+ *  Tolerates the historically-single shape by returning `{}` for anything that
+ *  isn't an object. */
 const connectionItemIds = (row: ConnectionRow): Record<string, string> => {
   const decoded = decodeJsonColumn(row.item_ids);
   if (decoded == null || typeof decoded !== "object") return {};
@@ -3235,7 +3235,14 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
               minted.length === 0
                 ? new Set<string>()
                 : yield* core
-                    .findMany("connection", { where: () => true })
+                    .findMany("connection", {
+                      // An item id only means anything inside ONE provider's
+                      // namespace, so a connection on a different provider
+                      // holding the same string is not an alias. Counting it as
+                      // one would leave this connection's secret behind, which
+                      // is the orphan this delete exists to remove.
+                      where: (b: AnyCb) => b("provider", "=", String(row.provider)),
+                    })
                     .pipe(
                       Effect.map(
                         (rows) =>
