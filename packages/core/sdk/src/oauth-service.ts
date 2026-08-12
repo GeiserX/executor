@@ -14,7 +14,7 @@
 // redeems the session, exchanges the code, and mints the connection.
 // ---------------------------------------------------------------------------
 
-import { Duration, Effect, Layer, Option, Schema } from "effect";
+import { Duration, Effect, Layer, Option, Predicate, Schema } from "effect";
 import { FetchHttpClient, type HttpClient } from "effect/unstable/http";
 
 import { connectionIdentifier } from "./connection-name-identifier";
@@ -1395,6 +1395,20 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
       yield* deleteSession(input.state);
       return connection;
     }).pipe(
+      // A completion that cannot be retried has finished with this session, so
+      // drop it rather than leaving its PKCE verifier sitting in the table. The
+      // happy path and `cancel` already delete; the failure paths did not, and
+      // nothing sweeps the table, so a flow that died here kept its verifier
+      // indefinitely. `restartRequired` is the authorization the code already
+      // computes for this: false means the caller may redeem the same state
+      // again, and deleting it then would turn a retryable hiccup into a
+      // restart. Best-effort — a failed cleanup must not replace the real
+      // error with a storage one.
+      Effect.tapError((error) =>
+        Predicate.isTagged(error, "OAuthCompleteError") && error.restartRequired === true
+          ? deleteSession(input.state).pipe(Effect.ignore)
+          : Effect.void,
+      ),
       Effect.withSpan("executor.oauth.complete", {
         attributes: {
           "executor.oauth.grant": "authorization_code",
