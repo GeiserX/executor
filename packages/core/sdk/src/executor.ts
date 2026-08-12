@@ -864,6 +864,33 @@ const normalizeConnectionInputs = (
 /** Decode a connection row's `item_ids` JSON map (`variable → provider item id`).
  *  Tolerates the historically-single shape by returning `{}` for anything that
  *  isn't an object. */
+/** The provider items a connection MINTED, as opposed to ones it merely points
+ *  at.
+ *
+ *  Both kinds sit in the same `item_ids` map, and the row records no flag saying
+ *  which is which — but it does not need to, because the minted ids are
+ *  deterministic. `connectionsCreate` writes
+ *  `connection:<owner>:<integration>:<name>:<variable>` for a pasted value and
+ *  the OAuth mint writes `oauth:<owner>:<integration>:<name>` plus its
+ *  `:refresh` sibling, while a referenced item keeps whatever id the user's own
+ *  store gave it. So rebuilding those ids from the row and keeping only exact
+ *  matches recovers the distinction with no schema change and no guesswork: an
+ *  id we did not write cannot equal one we would have. */
+const mintedItemIds = (row: ConnectionRow): readonly string[] => {
+  const owner = String(row.owner);
+  const integration = String(row.integration);
+  const name = String(row.name);
+  const oauthItemId = `oauth:${owner}:${integration}:${name}`;
+  const itemIds = connectionItemIds(row);
+  const mintable = new Set<string>([oauthItemId, `${oauthItemId}:refresh`]);
+  for (const variable of Object.keys(itemIds)) {
+    mintable.add(`connection:${owner}:${integration}:${name}:${variable}`);
+  }
+  const stored = Object.values(itemIds);
+  if (row.refresh_item_id) stored.push(String(row.refresh_item_id));
+  return [...new Set(stored.filter((id) => mintable.has(id)))];
+};
+
 const connectionItemIds = (row: ConnectionRow): Record<string, string> => {
   const decoded = decodeJsonColumn(row.item_ids);
   if (decoded == null || typeof decoded !== "object") return {};
@@ -3151,6 +3178,32 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
                 b("name", "=", String(ref.name)),
               ),
           });
+
+          // Now the credential itself, not just the routing to it. Deleting the
+          // rows above only dropped the pointer: the secret stayed in the
+          // provider and stayed decryptable, which is precisely what a user
+          // deleting a connection is asking us to stop being true.
+          //
+          // Only ids THIS connection minted. A connection can instead REFERENCE
+          // an item the user already had (the `from` origin at the create path),
+          // and the provider contract is explicit that such a removal "only
+          // drops our routing, leaving the item intact" — deleting one would
+          // destroy a credential we never created and cannot restore. The two
+          // are told apart by rebuilding the deterministic id we would have
+          // written and requiring exact equality, because that is the only test
+          // that cannot mistake somebody else's item for one of ours. It also
+          // leaves the OAuth app's `oauth-client:…:secret` alone, which is
+          // shared by every connection minted through that app.
+          //
+          // Best-effort: a provider that cannot delete must not resurrect a
+          // connection the user has already removed, so a failure here leaves
+          // an orphan exactly as before rather than failing the removal.
+          const provider = credentialProviders.get(String(row.provider));
+          if (provider?.writable === true && provider.delete) {
+            for (const id of mintedItemIds(row)) {
+              yield* provider.delete(ProviderItemId.make(id)).pipe(Effect.ignore);
+            }
+          }
         }),
       );
 
