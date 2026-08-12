@@ -36,7 +36,16 @@ import * as oauth from "oauth4webapi";
  *
  *  Everything genuinely diagnostic is lifted out before that can happen: the
  *  `error_description` and a redacted HTTP summary into `message`, and the RFC
- *  6749 §5.2 code into `error`. */
+ *  6749 §5.2 code into `error`.
+ *
+ *  KNOWN COST, accepted deliberately. Transport failures lose detail: a refused
+ *  connection and a DNS miss both arrive as "fetch failed", because the runtime
+ *  reports them only through the rejection chain this drops. Lifting the
+ *  innermost error code back out was tried and removed — this runtime's fetch
+ *  rejection carries no `code` at any depth, so the code was inert, and lifting
+ *  the innermost MESSAGE instead would put unbounded prose back on a path that
+ *  is persisted onto the connection. Restoring that detail safely needs a
+ *  transport-level signal this module does not currently receive. */
 export class OAuth2Error extends Data.TaggedError("OAuth2Error")<{
   readonly message: string;
   /**
@@ -306,7 +315,12 @@ const responseFromOAuthErrorCause = (cause: unknown): Response | undefined => {
  *  array). Everything here describes a failure; none of it is credential
  *  material. */
 /** RFC 6749 §5.2's own error fields — safe to show wherever they appear. */
-const PREVIEWABLE_BODY_FIELDS = new Set(["error", "errors", "error_description", "error_uri"]);
+export const PREVIEWABLE_BODY_FIELDS = new Set([
+  "error",
+  "errors",
+  "error_description",
+  "error_uri",
+]);
 
 /** Safe only INSIDE one of the fields above.
  *
@@ -315,7 +329,7 @@ const PREVIEWABLE_BODY_FIELDS = new Set(["error", "errors", "error_description",
  *  readable at the top level: `code` in particular is the RFC 6749
  *  authorization code, which is credential material, and the form-encoded scrub
  *  in this same file has always redacted `code=` for exactly that reason. */
-const PREVIEWABLE_WITHIN_ERROR_FIELDS = new Set(["code", "message", "detail"]);
+export const PREVIEWABLE_WITHIN_ERROR_FIELDS = new Set(["code", "message", "detail"]);
 
 /** Redact a token-endpoint body for display.
  *
@@ -504,39 +518,14 @@ const toOAuth2Error = (cause: unknown): OAuth2Error => {
         : typeof c.message === "string"
           ? c.message
           : undefined;
-    const reason = innermostFailureReason(cause);
     return new OAuth2Error({
-      message: `OAuth token exchange failed: ${description ?? code ?? "unknown error"}${
-        reason ? ` (${reason})` : ""
-      }`,
+      message: `OAuth token exchange failed: ${description ?? code ?? "unknown error"}`,
       error: code,
     });
   }
   return new OAuth2Error({
     message: "OAuth token exchange failed",
   });
-};
-
-/** The innermost machine-readable reason from a rejection chain — `ECONNREFUSED`,
- *  `ENOTFOUND`, `OAUTH_INVALID_RESPONSE`.
- *
- *  Dropping the `cause` object closed a leak but took the whole chain with it,
- *  and a network failure is by far the most common way this call fails. Without
- *  this, connection-refused and DNS-not-found render as the same three words and
- *  an operator cannot tell them apart. Only the `code` is lifted — a short
- *  screaming-snake identifier from the runtime, never a message, a URL, or a
- *  response body — so the diagnosis comes back without the payload. */
-const innermostFailureReason = (cause: unknown): string | undefined => {
-  let reason: string | undefined;
-  let current: unknown = cause;
-  for (let depth = 0; depth < 8 && typeof current === "object" && current !== null; depth++) {
-    const code = (current as { readonly code?: unknown }).code;
-    // Codes are identifiers like ECONNREFUSED; anything longer or containing
-    // spaces is prose, and prose is where secrets hide.
-    if (typeof code === "string" && /^[A-Z][A-Z0-9_]{2,39}$/.test(code)) reason = code;
-    current = (current as { readonly cause?: unknown }).cause;
-  }
-  return reason;
 };
 
 const toOAuth2ErrorWithHttpSummary = (cause: unknown): Effect.Effect<OAuth2Error> => {

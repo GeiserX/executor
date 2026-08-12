@@ -13,6 +13,8 @@ import {
   OAUTH2_DEFAULT_TIMEOUT_MS,
   OAUTH2_REFRESH_SKEW_MS,
   OAuth2Error,
+  PREVIEWABLE_BODY_FIELDS,
+  PREVIEWABLE_WITHIN_ERROR_FIELDS,
   buildAuthorizationUrl,
   providerAuthorizeExtras,
   createPkceCodeChallenge,
@@ -843,6 +845,24 @@ describe("exchangeAuthorizationCode", () => {
         }),
     ),
   );
+
+  it("previews only the RFC 6749 error fields — widening this list is a security change", () => {
+    // Nothing else pins the allowlist's CONTENTS, so adding a field to it would
+    // otherwise be invisible: `token_type` and `scope` sit right beside the
+    // tokens in a real response, and a future `access_token` entry would defeat
+    // the whole redactor while every existing test stayed green.
+    for (const field of ["token_type", "scope", "access_token", "refresh_token", "id_token"]) {
+      expect(PREVIEWABLE_BODY_FIELDS.has(field)).toBe(false);
+      expect(PREVIEWABLE_WITHIN_ERROR_FIELDS.has(field)).toBe(false);
+    }
+    expect([...PREVIEWABLE_BODY_FIELDS].sort()).toEqual([
+      "error",
+      "error_description",
+      "error_uri",
+      "errors",
+    ]);
+    expect([...PREVIEWABLE_WITHIN_ERROR_FIELDS].sort()).toEqual(["code", "detail", "message"]);
+  });
 
   it.effect("matches allowlisted field names case-insensitively", () =>
     withTokenEndpoint(
