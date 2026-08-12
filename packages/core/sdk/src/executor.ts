@@ -3223,20 +3223,30 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
             // still using it. The connection row above is already gone, so
             // anything still referencing the id here is by definition somebody
             // else, and the item stays.
+            //
+            // This read is owner-scoped by the table's own visibility policy, so
+            // it sees the org partition plus this caller's own rows and NOT
+            // another subject's. An alias held by a different subject is
+            // therefore invisible here and its credential can still be deleted.
+            // That is left as-is deliberately: reading around a tenant-isolation
+            // boundary to widen a DELETE would be a worse defect than the narrow
+            // one it closes.
             const stillReferenced =
               minted.length === 0
                 ? new Set<string>()
-                : yield* core.findMany("connection", { where: () => true }).pipe(
-                    Effect.map(
-                      (rows) =>
-                        new Set(
-                          rows.flatMap((other) => [
-                            ...Object.values(connectionItemIds(other)),
-                            ...(other.refresh_item_id ? [String(other.refresh_item_id)] : []),
-                          ]),
-                        ),
-                    ),
-                  );
+                : yield* core
+                    .findMany("connection", { where: () => true })
+                    .pipe(
+                      Effect.map(
+                        (rows) =>
+                          new Set(
+                            rows.flatMap((other) => [
+                              ...Object.values(connectionItemIds(other)),
+                              ...(other.refresh_item_id ? [String(other.refresh_item_id)] : []),
+                            ]),
+                          ),
+                      ),
+                    );
             for (const id of minted) {
               if (stillReferenced.has(id)) continue;
               yield* provider.delete(ProviderItemId.make(id)).pipe(Effect.ignore);
