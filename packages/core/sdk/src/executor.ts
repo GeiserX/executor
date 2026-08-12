@@ -3198,6 +3198,21 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
           // Best-effort: a provider that cannot delete must not resurrect a
           // connection the user has already removed, so a failure here leaves
           // an orphan exactly as before rather than failing the removal.
+          //
+          // TWO CASES THIS DOES NOT COVER, both deliberate:
+          //  - A v1-migrated connection stores a `secret_<hash>` id, which is
+          //    executor-owned but not derivable from v2 state, so it cannot be
+          //    matched and its item is still left behind. Closing that needs a
+          //    schema change, not a better rule here.
+          //  - A second connection can point at this one's minted id through the
+          //    `from` origin, in which case deleting it breaks that connection.
+          //    Detecting it needs a reference scan across the partition.
+          //
+          // `writable` is checked as well as the id, never instead of it: a
+          // picked item can live in a writable store, so writability alone would
+          // destroy user data. It is only reachable when a provider stops being
+          // writable after the item was minted, where honouring the contract's
+          // "we never write here" is the safer reading.
           const provider = credentialProviders.get(String(row.provider));
           if (provider?.writable === true && provider.delete) {
             for (const id of mintedItemIds(row)) {

@@ -28,7 +28,10 @@ const TEMPLATE = AuthTemplateSlug.make("apiKey");
 /** A provider whose store the test can inspect directly, so an assertion reads
  *  the actual item rather than a resolution that a deleted connection can no
  *  longer perform. */
-const inspectableProvider = (store: Map<string, string>, writable: boolean): CredentialProvider => ({
+const inspectableProvider = (
+  store: Map<string, string>,
+  writable: boolean,
+): CredentialProvider => ({
   key: ProviderKey.make("memory"),
   writable,
   get: (id) => Effect.sync(() => store.get(String(id)) ?? null),
