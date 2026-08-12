@@ -879,4 +879,31 @@ describe("provider-owned OAuth refresh grant", () => {
       }),
     ),
   );
+
+  it.effect("keeps refreshing a connection that has no recorded scope", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { config, executor } = yield* scenario({ behaviour: SEALS });
+        // RFC 6749 §5.1 lets an authorization server omit the granted scope, so a live connection
+        // can legitimately carry none. The scope validation must not turn that into a permanent
+        // failure: with nothing recorded there is nothing to widen from.
+        yield* Effect.promise(() =>
+          config.db.updateMany("connection", {
+            where: (b) => b("name", "=", "main"),
+            set: { oauth_scope: null },
+          }),
+        );
+
+        const out = yield* executor.execute(TOOL, {});
+        expect(out).toEqual({ token: "delegated-access-token" });
+
+        // The provider's scope string is still never persisted — that is the property the
+        // validation exists to hold, and it holds here by recording nothing at all.
+        const row = yield* Effect.promise(() =>
+          config.db.findFirst("connection", { where: (b) => b("name", "=", "main") }),
+        );
+        expect(row?.oauth_scope).toBeNull();
+      }),
+    ),
+  );
 });

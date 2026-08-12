@@ -2045,6 +2045,15 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
                   reportedScope === null
                     ? null
                     : [...new Set(reportedScope.split(/\s+/).filter(Boolean))];
+                // With no recorded grant there is nothing to validate against — and nothing to
+                // widen FROM either, since the request omits the scope parameter entirely. Failing
+                // here would strand a legitimate connection in a permanent retry loop, because
+                // RFC 6749 §5.1 lets an authorization server omit the scope it granted. So keep
+                // the refresh and simply record no scope: the reported value is still never
+                // persisted, which is the property this validation exists to hold.
+                if (trustedScopes.size === 0) {
+                  return Effect.succeed({ expiresInSeconds, scope: null });
+                }
                 if (
                   reportedScopes !== null &&
                   reportedScopes.some((scope) => !trustedScopes.has(scope))
