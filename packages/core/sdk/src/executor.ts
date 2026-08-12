@@ -2441,18 +2441,39 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
           }
           // Drop owned connections / tools / definitions for this integration.
           const where = (b: AnyCb) => b("integration", "=", String(slug));
+          // Read the connections BEFORE dropping them. Once those rows are gone
+          // nothing names the credentials they minted, and those are the
+          // long-lived secrets: a refresh token that outlives the integration it
+          // belonged to is invisible in the product and revocable by nobody.
+          // `connections.remove` already deletes them one at a time; removing
+          // the integration took the same rows out in bulk and left every
+          // secret behind.
+          const doomed = yield* core.findMany("connection", { where });
           yield* core.deleteMany("tool", { where });
           yield* core.deleteMany("definition", { where });
           yield* core.deleteMany("connection", { where });
           yield* core.deleteMany("integration", {
             where: (b: AnyCb) => b("slug", "=", String(slug)),
           });
-          return existing.plugin_id;
+          return { pluginId: existing.plugin_id, doomed };
         }),
       ).pipe(
-        Effect.tap((removedPluginId) =>
-          removedPluginId !== null
-            ? notifyIntegrationChange({ kind: "removed", pluginKey: removedPluginId, slug })
+        Effect.tap((removed) =>
+          removed !== null
+            ? notifyIntegrationChange({ kind: "removed", pluginKey: removed.pluginId, slug })
+            : Effect.void,
+        ),
+        Effect.tap((removed) =>
+          removed !== null
+            ? // After the OUTERMOST commit, for the same reason the single-row
+              // removal defers: deleting a secret is not undone by a rollback,
+              // so a restored connection would point at a credential that no
+              // longer exists.
+              afterCommit(
+                Effect.gen(function* () {
+                  for (const row of removed.doomed) yield* deleteMintedCredentials(row);
+                }),
+              )
             : Effect.void,
         ),
         Effect.asVoid,

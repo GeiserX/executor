@@ -349,3 +349,86 @@ describe("the credential deletion runs after the transaction commits", () => {
     }),
   );
 });
+
+// Removing the INTEGRATION takes the same connection rows out, in bulk. It left
+// every secret those connections had minted behind — the identical orphan the
+// per-connection removal above exists to prevent, reachable through a different
+// door and stranding many at once instead of one. Paired the same way: what we
+// minted goes, what the user already had stays.
+describe("removing an integration removes the credentials its connections minted", () => {
+  it.effect("deletes the minted items of every connection it drops", () =>
+    Effect.gen(function* () {
+      const store = new Map<string, string>();
+      const executor = yield* setup(store);
+      yield* executor.connections.create({
+        owner: "org",
+        name: ConnectionName.make("one"),
+        integration: INTEG,
+        template: TEMPLATE,
+        value: "secret-one",
+      });
+      yield* executor.connections.create({
+        owner: "org",
+        name: ConnectionName.make("two"),
+        integration: INTEG,
+        template: TEMPLATE,
+        value: "secret-two",
+      });
+      expect(store.get("connection:org:vercel:one:token")).toBe("secret-one");
+      expect(store.get("connection:org:vercel:two:token")).toBe("secret-two");
+
+      yield* executor.integrations.remove(INTEG);
+
+      // Both, not just the first — the bulk delete is the whole point.
+      expect(store.has("connection:org:vercel:one:token")).toBe(false);
+      expect(store.has("connection:org:vercel:two:token")).toBe(false);
+    }),
+  );
+
+  it.effect("keeps an item the connection only referenced", () =>
+    Effect.gen(function* () {
+      const store = new Map<string, string>();
+      const executor = yield* setup(store);
+      store.set("ext-item", "user-owned-secret");
+      yield* executor.connections.create({
+        owner: "org",
+        name: ConnectionName.make("byo"),
+        integration: INTEG,
+        template: TEMPLATE,
+        from: { provider: ProviderKey.make("memory"), id: ProviderItemId.make("ext-item") },
+      });
+
+      yield* executor.integrations.remove(INTEG);
+
+      // Widening a delete to a whole integration must not widen WHAT it deletes.
+      expect(store.get("ext-item")).toBe("user-owned-secret");
+    }),
+  );
+
+  it.effect("a rolled-back integration removal leaves the credentials intact", () =>
+    Effect.gen(function* () {
+      const store = new Map<string, string>();
+      const executor = yield* makeTestExecutor({ plugins: [txPlugin(store)] as const }).pipe(
+        Effect.tap((e) => e.demo.seed()),
+      );
+      yield* executor.connections.create({
+        owner: "org",
+        name: ConnectionName.make("one"),
+        integration: INTEG,
+        template: TEMPLATE,
+        value: "secret-one",
+      });
+
+      const outcome = yield* Effect.exit(
+        executor.demo.inTransaction(
+          Effect.gen(function* () {
+            yield* executor.integrations.remove(INTEG);
+            return yield* Effect.fail("rollback" as const);
+          }),
+        ),
+      );
+      expect(Exit.isFailure(outcome)).toBe(true);
+      expect(store.get("connection:org:vercel:one:token")).toBe("secret-one");
+    }),
+  );
+});
