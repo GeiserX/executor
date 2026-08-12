@@ -650,6 +650,65 @@ describe("exchangeAuthorizationCode", () => {
     ),
   );
 
+  it.effect("redacts a credential echoed back under a field name nobody predicted", () =>
+    withTokenEndpoint(
+      // The failure the old name-based scrub could not see. It hid four known
+      // field names, so a server that echoes a submitted secret — or returns its
+      // token — under ANY other key walked straight through into the message,
+      // and that message is persisted into connection health and shown to the
+      // caller. An unknown field is exactly the case that has to fail closed.
+      // No `error` field: a NON-conform body, which is the shape that actually
+      // reaches the body preview. A conform error response is summarised from
+      // its typed fields instead and never renders the body at all.
+      () => json(400, { oops: "AT-CANARY-must-not-escape" }),
+      ({ tokenUrl }) =>
+        Effect.gen(function* () {
+          const exit = yield* Effect.exit(
+            exchangeAuthorizationCode({
+              tokenUrl,
+              clientId: "cid",
+              redirectUrl: "https://cb",
+              codeVerifier: "v",
+              code: "c",
+            }),
+          );
+          expect(Exit.isFailure(exit)).toBe(true);
+          if (!Exit.isFailure(exit)) return;
+          const failure = JSON.stringify(exit.cause);
+          expect(failure).not.toContain("AT-CANARY-must-not-escape");
+          // Structure survives, so an operator still sees WHAT the server sent.
+          // Structure survives, so an operator still sees WHAT the server sent.
+          expect(failure).toContain("oops");
+          expect(failure).toContain("[redacted]");
+        }),
+    ),
+  );
+
+  it.effect("reports the token endpoint by hostname, never by path", () =>
+    withTokenEndpoint(
+      () => HttpServerResponse.text("nope", { status: 404 }),
+      ({ tokenUrl }) =>
+        Effect.gen(function* () {
+          const exit = yield* Effect.exit(
+            exchangeAuthorizationCode({
+              tokenUrl,
+              clientId: "cid",
+              redirectUrl: "https://cb",
+              codeVerifier: "v",
+              code: "c",
+            }),
+          );
+          expect(Exit.isFailure(exit)).toBe(true);
+          if (!Exit.isFailure(exit)) return;
+          const failure = JSON.stringify(exit.cause);
+          // Persisted into connection health, so a tenant id in the path would
+          // outlive the request. The host is enough to identify the server.
+          expect(failure).toContain(new URL(tokenUrl).hostname);
+          expect(failure).not.toContain(`${new URL(tokenUrl).origin}/token`);
+        }),
+    ),
+  );
+
   it.effect("preserves provider error codes while redacting token endpoint secrets", () =>
     withTokenEndpoint(
       () =>
@@ -981,12 +1040,21 @@ describe("OAuth2Error tagging", () => {
     }),
   );
 
-  it("OAuth2Error is constructable directly with message and cause", () => {
-    const err = new OAuth2Error({ message: "test", cause: { foo: 1 } });
+  it("OAuth2Error is constructable directly with message and code", () => {
+    const err = new OAuth2Error({ message: "test", error: "invalid_grant" });
     expect(err).toMatchObject({
       _tag: "OAuth2Error",
       message: "test",
-      cause: { foo: 1 },
+      error: "invalid_grant",
     });
+  });
+
+  it("carries no cause, so nothing unsanitised can ride along", () => {
+    // The type forbids it; this pins the RUNTIME shape too. The leak this
+    // prevents came from an object attached at construction and rendered far
+    // away, so a re-added `cause` field would compile and silently reopen it.
+    const err = new OAuth2Error({ message: "test", error: "invalid_grant" });
+    expect(Object.hasOwn(err, "cause")).toBe(false);
+    expect(JSON.stringify(err)).not.toContain("cause");
   });
 });

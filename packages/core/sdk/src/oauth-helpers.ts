@@ -23,6 +23,20 @@ import * as oauth from "oauth4webapi";
 // Errors
 // ---------------------------------------------------------------------------
 
+/** A token-endpoint failure, carrying only values this module has inspected.
+ *
+ *  There is deliberately NO `cause`. The OAuth library rejects a malformed HTTP
+ *  200 by attaching the PARSED BODY, and that body is the whole token response —
+ *  a live access and refresh token. It is not an exotic case: an `expires_in` of
+ *  null, an array-valued `scope`, or a non-string `token_type` all trigger it,
+ *  and those are ordinary provider quirks. A cause decides nothing — no code
+ *  reads one — it only rides along to be rendered, and it renders everywhere:
+ *  `Cause.pretty`, `JSON.stringify`, the tool-dispatch error log, and from there
+ *  the error-capture sink and an OTLP collector.
+ *
+ *  Everything genuinely diagnostic is lifted out before that can happen: the
+ *  `error_description` and a redacted HTTP summary into `message`, and the RFC
+ *  6749 §5.2 code into `error`. */
 export class OAuth2Error extends Data.TaggedError("OAuth2Error")<{
   readonly message: string;
   /**
@@ -32,7 +46,6 @@ export class OAuth2Error extends Data.TaggedError("OAuth2Error")<{
    * the AS no longer honours → re-auth required) from transient ones.
    */
   readonly error?: string;
-  readonly cause?: unknown;
 }> {}
 
 // ---------------------------------------------------------------------------
@@ -286,8 +299,67 @@ const responseFromOAuthErrorCause = (cause: unknown): Response | undefined => {
   return undefined;
 };
 
-const redactTokenEndpointBody = (body: string): string =>
-  body
+/** Field names whose STRING value is safe to show in an error preview.
+ *
+ *  RFC 6749 §5.2's own error fields, plus the container names real providers
+ *  wrap them in (`error` as an object with `code`/`message`, Datadog's `errors`
+ *  array). Everything here describes a failure; none of it is credential
+ *  material. */
+const PREVIEWABLE_BODY_FIELDS = new Set([
+  "error",
+  "errors",
+  "error_description",
+  "error_uri",
+  "code",
+  "message",
+  "detail",
+]);
+
+/** Redact a token-endpoint body for display.
+ *
+ *  ALLOWLIST, deliberately. This used to name the four fields to hide, which
+ *  silently trusted every field it had not thought of: a provider that returns
+ *  its token under any other key — or that echoes a submitted secret back
+ *  inside an arbitrary error field — walked straight through. This preview is
+ *  not just a log line; it reaches persisted connection health and the caller,
+ *  so an unknown field is exactly the case that must fail closed.
+ *
+ *  Structure is preserved rather than dropped: every key stays visible and only
+ *  non-allowlisted STRING values become `[redacted]`, so an operator can still
+ *  see the shape of what the server sent. Non-strings are left alone — a number
+ *  or boolean cannot carry a token. */
+const redactJsonValues = (value: unknown, keyIsPreviewable = false): unknown => {
+  if (typeof value === "string") return keyIsPreviewable ? value : "[redacted]";
+  if (Array.isArray(value)) return value.map((item) => redactJsonValues(item, keyIsPreviewable));
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key,
+        redactJsonValues(item, PREVIEWABLE_BODY_FIELDS.has(key.toLowerCase())),
+      ]),
+    );
+  }
+  return value;
+};
+
+const redactTokenEndpointBody = (body: string): string => {
+  // A JSON body is the token-endpoint shape, so it gets the structural
+  // allowlist above. Anything else (an HTML error page, a plain-text 404) is
+  // not a token response; keep the legacy name-based scrub so those stay
+  // readable, which is the only thing that made them useful to begin with.
+  const json: unknown = (() => {
+    // oxlint-disable-next-line executor/no-try-catch-or-throw -- boundary: probing an untrusted upstream body for display; a parse failure just means "not a JSON token response"
+    try {
+      // oxlint-disable-next-line executor/no-json-parse -- boundary: same untrusted-body probe; the value is only re-serialised for a redacted preview, never decoded into domain types
+      return JSON.parse(body) as unknown;
+    } catch {
+      return undefined;
+    }
+  })();
+  if (typeof json === "object" && json !== null) {
+    return JSON.stringify(redactJsonValues(json));
+  }
+  return body
     .replaceAll(
       /("(?:access_token|refresh_token|id_token|client_secret)"\s*:\s*")[^"]*(")/gi,
       "$1[redacted]$2",
@@ -296,12 +368,17 @@ const redactTokenEndpointBody = (body: string): string =>
       /((?:access_token|refresh_token|id_token|client_secret|code)=)[^&\s]*/gi,
       "$1[redacted]",
     );
+};
 
 const tokenEndpointHttpSummary = async (response: Response): Promise<string> => {
   const status = `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`;
   const contentType = response.headers.get("content-type");
-  const url = response.url ? ` from ${response.url}` : "";
-  const parts = [`${status}${url}`];
+  // Hostname, never the full URL — the same discipline the token-request span
+  // already applies, and for the same reason: some providers carry tenant ids
+  // in the path. This summary is persisted into connection health and shown to
+  // callers, so it outlives the request by far longer than a log line does.
+  const host = response.url ? hostnameForTelemetry(response.url) : "";
+  const parts = [`${status}${host ? ` from ${host}` : ""}`];
   if (contentType) parts.push(`content-type ${contentType}`);
   const preview = await bodyPreviewFromResponse(response);
   if (preview) parts.push(`body: ${preview}`);
@@ -387,12 +464,10 @@ const toOAuth2Error = (cause: unknown): OAuth2Error => {
     return new OAuth2Error({
       message: `OAuth token exchange failed: ${description ?? code ?? "unknown error"}`,
       error: code,
-      cause,
     });
   }
   return new OAuth2Error({
     message: "OAuth token exchange failed",
-    cause,
   });
 };
 
@@ -420,7 +495,6 @@ const toOAuth2ErrorWithHttpSummary = (cause: unknown): Effect.Effect<OAuth2Error
     return new OAuth2Error({
       message: `${base.message} (${summary})`,
       error: base.error ?? recovered,
-      cause,
     });
   });
 };
