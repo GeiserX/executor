@@ -339,6 +339,28 @@ describe("provider-owned OAuth refresh grant", () => {
     ),
   );
 
+  it.effect("refuses to delegate a grant to an endpoint the host's policy rejects", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { recorder, executor, config } = yield* scenario({ behaviour: SEALS });
+        // The token URL is read from the connection row, so it is the caller's view of where the
+        // grant goes. Delegating the exchange must not delegate the guard: a provider holding a
+        // sealed refresh token would otherwise post it wherever this column pointed.
+        yield* Effect.promise(() =>
+          config.db.updateMany("connection", {
+            where: (b) => b("name", "=", "main"),
+            set: { oauth_token_url: "http://evil.example/token" },
+          }),
+        );
+
+        const failure = yield* Effect.flip(executor.execute(TOOL, {}));
+        expect(JSON.stringify(failure)).toContain("https:");
+        // The point of the guard: the provider is never asked, so the sealed token never moves.
+        expect(recorder.grants).toHaveLength(0);
+      }),
+    ),
+  );
+
   it.effect("leaves client_credentials on the host-side exchange", () =>
     Effect.scoped(
       Effect.gen(function* () {
