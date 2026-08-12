@@ -119,7 +119,14 @@ ${detailsHtml}
 try{if(window.opener)window.opener.postMessage(p,window.location.origin)}catch(e){}
 try{if("BroadcastChannel"in window){const c=new BroadcastChannel(${serializedChannel});c.postMessage(p);setTimeout(()=>c.close(),100)}}catch(e){}
 try{localStorage.setItem(${serializedChannel},JSON.stringify(p))}catch(e){}
-if(p.ok)setTimeout(()=>window.close(),400);})();
+// The payload carries the identity label — an email — and, on failure, the
+// error preview, so it must not outlive the handover. Clearing it cannot cost a
+// listener the result: a 'storage' event captures newValue at dispatch, so an
+// opener that has been notified already holds it. Leaving it would park that
+// data in the user's browser profile indefinitely whenever nobody is listening,
+// which is every abandoned or opener-less flow.
+const clear=()=>{try{localStorage.removeItem(${serializedChannel})}catch(e){}};
+if(p.ok)setTimeout(()=>{clear();window.close()},400);else setTimeout(clear,5000);})();
 </script>
 </body></html>`;
 };
