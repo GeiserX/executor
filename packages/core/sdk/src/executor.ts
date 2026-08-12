@@ -163,6 +163,7 @@ import { collectReferencedDefinitions } from "./schema-refs";
 import {
   refreshAccessToken,
   exchangeClientCredentials,
+  isSupportedOAuthEndpointUrl,
   shouldRefreshToken,
   type OAuthEndpointUrlPolicy,
 } from "./oauth-helpers";
@@ -1848,11 +1849,6 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
           return yield* reauth(`OAuth client "${row.oauth_client}" is no longer registered.`);
         }
 
-        // The secret is stored in the provider (a vault item id), not inline.
-        const clientSecret = clientRow.client_secret_item_id
-          ? ((yield* provider.get(ProviderItemId.make(String(clientRow.client_secret_item_id)))) ??
-            "")
-          : "";
         // Re-request the scopes this connection was GRANTED (RFC 6749 §6: a
         // refresh must not exceed the originally-granted scope). Empty → omit
         // the param, which the AS treats as "same scopes as granted".
@@ -1893,6 +1889,48 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
             });
           });
 
+        // Shared by both grant paths so a refusal is classified identically no
+        // matter who performed the exchange. An RFC 6749 §5.2 code is the AS's
+        // definitive verdict — retrying cannot change it — and every code must
+        // reach the caller as an auth failure, because a StorageError is
+        // scrubbed to "Internal tool error [id]" at the sandbox boundary (the
+        // Pylon prod regression: the AS rejected refreshes with a
+        // non-invalid_grant 400 and callers saw only the opaque defect).
+        // Code-less failures (transport blips, non-OAuth-shaped responses) stay
+        // StorageError so the next invoke retries.
+        const classifyGrantRefusal = (cause: {
+          readonly message: string;
+          readonly error?: string;
+        }): CredentialResolutionError | StorageError =>
+          cause.error !== undefined
+            ? new CredentialResolutionError({
+                owner,
+                integration: IntegrationSlug.make(row.integration),
+                name: ConnectionName.make(row.name),
+                // oxlint-disable-next-line executor/no-unknown-error-message -- boundary: the refusal carries a typed `message`
+                message: `OAuth token refresh was rejected (${cause.error}): ${cause.message}`,
+                reauthRequired: cause.error === "invalid_grant",
+                oauthErrorCode: cause.error,
+              })
+            : new StorageError({
+                // oxlint-disable-next-line executor/no-unknown-error-message -- boundary: the refusal carries a typed `message`
+                message: `OAuth token refresh failed: ${cause.message}`,
+                cause,
+              });
+
+        // Persist the definitive verdict so the NEXT refresh skips the doomed
+        // grant (see the known-dead gate above) and the connection shows
+        // `expired` without waiting for a probe. Shared for the same reason as
+        // the classifier: a delegating provider that armed no gate would re-send
+        // a dead grant on every proactive cycle, forever.
+        const armKnownDeadGate = (
+          error: CredentialResolutionError | StorageFailure,
+        ): Effect.Effect<void> =>
+          Predicate.isTagged(error, "CredentialResolutionError") && error.reauthRequired === true
+            ? // oxlint-disable-next-line executor/no-unknown-error-message -- boundary: CredentialResolutionError carries a typed `message` field
+              markRefreshGrantDead(row, error.message)
+            : Effect.void;
+
         // A provider that can perform the grant itself owns the whole exchange:
         // it spends the refresh token, seals the newly minted tokens under the
         // same item ids, and tells us only when they expire and what scope was
@@ -1907,21 +1945,63 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
           if (!row.refresh_item_id) {
             return yield* reauth("No refresh token is stored for this connection.");
           }
-          const granted = yield* provider.refreshGrant({
-            refreshItemId: ProviderItemId.make(String(row.refresh_item_id)),
-            accessItemId: tokenItemId,
-            clientSecretItemId: clientRow.client_secret_item_id
-              ? ProviderItemId.make(String(clientRow.client_secret_item_id))
-              : undefined,
-            tokenUrl,
-            clientId: String(clientRow.client_id),
-            scopes: grantedScopes,
-            // RFC 8707: keep the re-minted token bound to the same resource.
-            resource: clientRow.resource ? String(clientRow.resource) : undefined,
-          });
-          yield* recordRefreshOutcome(granted.expiresAt, granted.scope ?? undefined);
-          return yield* provider.get(tokenItemId);
+          // Delegating the exchange must not delegate the guard: the endpoint
+          // policy is the HOST's, so enforce it here rather than trusting every
+          // provider to reimplement it.
+          if (!isSupportedOAuthEndpointUrl(tokenUrl, config.oauthEndpointUrlPolicy)) {
+            return yield* reauth(
+              `OAuth token URL "${tokenUrl}" must use https: or loopback http:.`,
+            );
+          }
+          const granted = yield* provider
+            .refreshGrant({
+              refreshItemId: ProviderItemId.make(String(row.refresh_item_id)),
+              accessItemId: tokenItemId,
+              clientSecretItemId: clientRow.client_secret_item_id
+                ? ProviderItemId.make(String(clientRow.client_secret_item_id))
+                : undefined,
+              tokenUrl,
+              clientId: String(clientRow.client_id),
+              // Mirrors the method the host-side exchange uses; there is no
+              // per-client column recording a negotiated one to read instead.
+              clientAuth: "body",
+              scopes: grantedScopes,
+              // RFC 8707: keep the re-minted token bound to the same resource.
+              resource: clientRow.resource ? String(clientRow.resource) : undefined,
+            })
+            .pipe(
+              Effect.catchTag("RefreshGrantRejected", (cause) =>
+                Effect.fail(classifyGrantRefusal(cause)),
+              ),
+              Effect.tapError(armKnownDeadGate),
+            );
+          // Read the token back BEFORE recording success. A provider that
+          // reported a grant it did not actually seal would otherwise leave the
+          // row stamped with a fresh expiry over a stale or absent token, and
+          // the connection would read healthy for a whole token lifetime while
+          // every call using it failed.
+          const access = yield* provider.get(tokenItemId);
+          if (!access) {
+            return yield* reauth("Refreshed access token could not be resolved.");
+          }
+          // Convert on OUR clock, never the provider's — `shouldRefreshToken`
+          // compares the stored instant against this same clock, so an absolute
+          // instant computed on a remote machine would import its skew.
+          yield* recordRefreshOutcome(
+            granted.expiresInSeconds === null ? null : Date.now() + granted.expiresInSeconds * 1000,
+            granted.scope ?? undefined,
+          );
+          return access;
         }
+
+        // The secret is stored in the provider (a vault item id), not inline.
+        // Resolved BELOW the delegated branch: a store that seals this item
+        // would fail the whole refresh here, before the provider that can do the
+        // grant without ever revealing it is even consulted.
+        const clientSecret = clientRow.client_secret_item_id
+          ? ((yield* provider.get(ProviderItemId.make(String(clientRow.client_secret_item_id)))) ??
+            "")
+          : "";
 
         // client_credentials (machine-to-machine) has NO refresh token — the
         // token is RE-MINTED from the client id/secret. The authorization_code
@@ -1971,47 +2051,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
                   resource: clientRow.resource ? String(clientRow.resource) : undefined,
                   endpointUrlPolicy: config.oauthEndpointUrlPolicy,
                   fetch: config.fetch,
-                }).pipe(
-                  Effect.mapError((cause) => {
-                    // An RFC 6749 §5.2 error code is the AS's definitive
-                    // verdict on this grant — retrying cannot change it.
-                    // invalid_grant means the refresh token itself is dead
-                    // (re-auth required); every other code must still reach
-                    // the caller as an auth failure, because a StorageError
-                    // is scrubbed to "Internal tool error [id]" at the
-                    // sandbox boundary (the Pylon prod regression: the AS
-                    // rejected refreshes with a non-invalid_grant 400 and
-                    // callers saw only the opaque defect). Code-less
-                    // failures (transport blips, non-OAuth-shaped responses)
-                    // stay StorageError so the next invoke retries.
-                    if (cause.error !== undefined) {
-                      return new CredentialResolutionError({
-                        owner,
-                        integration: IntegrationSlug.make(row.integration),
-                        name: ConnectionName.make(row.name),
-                        // oxlint-disable-next-line executor/no-unknown-error-message -- boundary: OAuth2Error carries a typed `message`
-                        message: `OAuth token refresh was rejected (${cause.error}): ${cause.message}`,
-                        reauthRequired: cause.error === "invalid_grant",
-                        oauthErrorCode: cause.error,
-                      });
-                    }
-                    return new StorageError({
-                      // oxlint-disable-next-line executor/no-unknown-error-message -- boundary: OAuth2Error carries a typed `message`
-                      message: `OAuth token refresh failed: ${cause.message}`,
-                      cause,
-                    });
-                  }),
-                  // Persist the definitive verdict so the NEXT refresh skips
-                  // the doomed grant (see the known-dead gate above) and the
-                  // connection shows `expired` without waiting for a probe.
-                  Effect.tapError((error) =>
-                    Predicate.isTagged(error, "CredentialResolutionError") &&
-                    error.reauthRequired === true
-                      ? // oxlint-disable-next-line executor/no-unknown-error-message -- boundary: CredentialResolutionError carries a typed `message` field
-                        markRefreshGrantDead(row, error.message)
-                      : Effect.void,
-                  ),
-                );
+                }).pipe(Effect.mapError(classifyGrantRefusal), Effect.tapError(armKnownDeadGate));
               });
 
         if (provider.set) {

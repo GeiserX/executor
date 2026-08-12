@@ -1,4 +1,4 @@
-import type { Effect } from "effect";
+import { Data, type Effect } from "effect";
 
 import type { StorageFailure } from "./fuma-runtime";
 import type { ProviderItemId, ProviderKey } from "./ids";
@@ -35,28 +35,21 @@ export interface CredentialProvider {
   /** Perform the OAuth refresh grant inside the provider, instead of handing the
    *  refresh token out to be exchanged here.
    *
-   *  WHY THIS EXISTS. A provider that hides values behind an indirection can
-   *  protect an access token, because that token's only use is to be sent to a
-   *  bound host and the reply is not itself a credential. The refresh grant
-   *  breaks that: the exchange needs the real refresh token AND the authorization
-   *  server's reply carries a brand-new real access token, so a provider that
-   *  serves indirection here only moves the exposure one step later while
-   *  appearing to have removed it. Providers backed by a sealed store therefore
-   *  have to refuse the refresh item outright — the honest option, but it costs
-   *  them refresh entirely.
+   *  A provider that serves an indirection can protect an access token: it is
+   *  spent against a bound host, and the reply is not itself a credential. The
+   *  refresh grant breaks that — the exchange needs the real refresh token and
+   *  the reply carries a brand-new one — so a store the host genuinely cannot
+   *  read has to refuse the refresh item, losing refresh entirely. Implementing
+   *  this gives it the other option: own the exchange, seal the new tokens under
+   *  the same item ids, and report only what the caller's bookkeeping needs.
    *
-   *  Implementing this gives them the other option: own the exchange, seal the
-   *  new tokens under the same item ids, and return only what the caller needs to
-   *  update its bookkeeping. The caller then resolves the access token through
-   *  `get`, exactly as it resolves every other credential.
-   *
-   *  OPTIONAL, and absence is not a downgrade: when it is missing the caller
-   *  performs the exchange itself, unchanged. Implement it only if the exchange
-   *  genuinely happens somewhere the host cannot read — returning success without
-   *  performing the grant is worse than not implementing it. */
+   *  OPTIONAL — when absent the caller performs the exchange itself, unchanged.
+   *  Implement it only if the exchange genuinely happens somewhere the host
+   *  cannot read; returning success without performing the grant is worse than
+   *  not implementing it. */
   readonly refreshGrant?: (
     input: RefreshGrantInput,
-  ) => Effect.Effect<RefreshGrantResult, StorageFailure>;
+  ) => Effect.Effect<RefreshGrantResult, StorageFailure | RefreshGrantRejected>;
 }
 
 /** What the provider needs to perform the grant on the caller's behalf.
@@ -72,8 +65,21 @@ export interface RefreshGrantInput {
   readonly accessItemId: ProviderItemId;
   /** The OAuth app's client secret, by id. Absent for a public client. */
   readonly clientSecretItemId?: ProviderItemId;
+  /** The token endpoint to post to.
+   *
+   *  SECURITY: this is the CALLER's view of the endpoint, and a caller whose
+   *  process is part of your threat model is not a trustworthy source for it —
+   *  a rewritten value turns the grant into an exfiltration of the very token
+   *  this interface exists to seal. A provider whose whole purpose is to
+   *  withhold the refresh token from the caller MUST pin the endpoint against a
+   *  value it recorded when the item was sealed, and reject a mismatch. */
   readonly tokenUrl: string;
   readonly clientId: string;
+  /** How to present the client secret: `"body"` is `client_secret_post`,
+   *  `"basic"` is `client_secret_basic`. Passed explicitly so a provider never
+   *  has to guess — RFC 6749 §2.3.1 prefers Basic, while this caller's default
+   *  is post, so a guess would be wrong as often as right. */
+  readonly clientAuth: "body" | "basic";
   readonly scopes: readonly string[];
   /** RFC 8707 — keeps the re-minted token bound to the same resource. */
   readonly resource?: string;
@@ -86,9 +92,36 @@ export interface RefreshGrantInput {
  *  data path. A rotated refresh token is sealed by the provider under the same
  *  `refreshItemId` and is never reported here. */
 export interface RefreshGrantResult {
-  /** Epoch millis, or null when the authorization server did not say. */
-  readonly expiresAt: number | null;
+  /** Lifetime in seconds (RFC 6749 §5.1 `expires_in`), or null when the
+   *  authorization server did not say.
+   *
+   *  RELATIVE, not an absolute instant, precisely because the provider may run
+   *  where the caller cannot read — which usually means a different machine and
+   *  therefore a different clock. The caller converts against its OWN clock, the
+   *  same one that later decides whether the token is due for refresh. */
+  readonly expiresInSeconds: number | null;
   /** The granted scope as reported by the authorization server, or null when it
    *  did not report one (distinct from an empty scope). */
   readonly scope: string | null;
 }
+
+/** The authorization server refused the grant.
+ *
+ *  Distinct from `StorageFailure` because the two demand opposite responses: a
+ *  storage failure is transient and worth retrying, whereas an RFC 6749 §5.2
+ *  refusal is the AS's standing verdict — `invalid_grant` in particular means
+ *  the refresh token is dead and only re-authentication recovers it. Without
+ *  this the caller cannot tell "the vault is down" from "this connection is
+ *  finished", so it can neither prompt for re-auth nor stop re-sending a grant
+ *  that will never succeed.
+ *
+ *  The §5.2 error response carries no token material, so reporting the code
+ *  costs nothing in custody. */
+export class RefreshGrantRejected extends Data.TaggedError("RefreshGrantRejected")<{
+  readonly message: string;
+  /** The RFC 6749 §5.2 code (`invalid_grant`, `invalid_client`, …) when the
+   *  token endpoint returned one. Omit it for a failure that carried no code —
+   *  the caller then treats the failure as transient. */
+  readonly error?: string;
+  readonly cause?: unknown;
+}> {}
