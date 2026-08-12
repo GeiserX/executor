@@ -305,15 +305,17 @@ const responseFromOAuthErrorCause = (cause: unknown): Response | undefined => {
  *  wrap them in (`error` as an object with `code`/`message`, Datadog's `errors`
  *  array). Everything here describes a failure; none of it is credential
  *  material. */
-const PREVIEWABLE_BODY_FIELDS = new Set([
-  "error",
-  "errors",
-  "error_description",
-  "error_uri",
-  "code",
-  "message",
-  "detail",
-]);
+/** RFC 6749 §5.2's own error fields — safe to show wherever they appear. */
+const PREVIEWABLE_BODY_FIELDS = new Set(["error", "errors", "error_description", "error_uri"]);
+
+/** Safe only INSIDE one of the fields above.
+ *
+ *  Providers wrap the real error in an envelope — `{"error":{"code":…,
+ *  "message":…}}` — so these have to be readable there. They must NOT be
+ *  readable at the top level: `code` in particular is the RFC 6749
+ *  authorization code, which is credential material, and the form-encoded scrub
+ *  in this same file has always redacted `code=` for exactly that reason. */
+const PREVIEWABLE_WITHIN_ERROR_FIELDS = new Set(["code", "message", "detail"]);
 
 /** Redact a token-endpoint body for display.
  *
@@ -328,14 +330,31 @@ const PREVIEWABLE_BODY_FIELDS = new Set([
  *  non-allowlisted STRING values become `[redacted]`, so an operator can still
  *  see the shape of what the server sent. Non-strings are left alone — a number
  *  or boolean cannot carry a token. */
-const redactJsonValues = (value: unknown, keyIsPreviewable = false): unknown => {
+/** Deepest body this walker will descend. A token endpoint's error body is a
+ *  handful of levels; anything past this is not something an operator was going
+ *  to read anyway. The bound exists because the walk is recursive and this runs
+ *  on a failure path: without it a pathologically nested body turns a leak into
+ *  an uncontained stack overflow, which is a worse bug than the one being fixed. */
+const MAX_PREVIEW_DEPTH = 32;
+
+const isPreviewableKey = (key: string, insideError: boolean): boolean => {
+  const name = key.toLowerCase();
+  return (
+    PREVIEWABLE_BODY_FIELDS.has(name) || (insideError && PREVIEWABLE_WITHIN_ERROR_FIELDS.has(name))
+  );
+};
+
+const redactJsonValues = (value: unknown, keyIsPreviewable = false, depth = 0): unknown => {
+  if (depth > MAX_PREVIEW_DEPTH) return "[redacted]";
   if (typeof value === "string") return keyIsPreviewable ? value : "[redacted]";
-  if (Array.isArray(value)) return value.map((item) => redactJsonValues(item, keyIsPreviewable));
+  if (Array.isArray(value)) {
+    return value.map((item) => redactJsonValues(item, keyIsPreviewable, depth + 1));
+  }
   if (typeof value === "object" && value !== null) {
     return Object.fromEntries(
       Object.entries(value).map(([key, item]) => [
         key,
-        redactJsonValues(item, PREVIEWABLE_BODY_FIELDS.has(key.toLowerCase())),
+        redactJsonValues(item, isPreviewableKey(key, keyIsPreviewable), depth + 1),
       ]),
     );
   }
@@ -356,9 +375,28 @@ const redactTokenEndpointBody = (body: string): string => {
       return undefined;
     }
   })();
-  if (typeof json === "object" && json !== null) {
+  // Anything that parsed as JSON goes through the walker, not just an object.
+  // A body that is a bare JSON string is still a body the server chose to send,
+  // and gating on `object` let exactly that case fall through to the name-based
+  // scrub below — which cannot match a value that has no field name.
+  if (json !== undefined) {
     return JSON.stringify(redactJsonValues(json));
   }
+  // A form-encoded body is the OTHER shape a token endpoint answers in, and it
+  // gets the same allowlist. It used to fall through to a name-based scrub,
+  // which meant a server returning its token as `session_token=…` — any name
+  // the scrub had not enumerated — rendered it verbatim into a message that is
+  // persisted onto the connection.
+  if (isFormEncoded(body)) {
+    const params = new URLSearchParams(body);
+    return [...params]
+      .map(([key, value]) => `${key}=${isPreviewableKey(key, false) ? value : "[redacted]"}`)
+      .join("&");
+  }
+  // Neither shape: an HTML error page or a plain-text status line. There is no
+  // field structure to reason about, so keep it readable — that legibility is
+  // the only reason the preview earns its place for these responses — but still
+  // scrub the named credentials, since such a page can echo a submitted one.
   return body
     .replaceAll(
       /("(?:access_token|refresh_token|id_token|client_secret)"\s*:\s*")[^"]*(")/gi,
@@ -369,6 +407,11 @@ const redactTokenEndpointBody = (body: string): string => {
       "$1[redacted]",
     );
 };
+
+/** `a=b&c=d` — no whitespace, at least one `key=`. Deliberately strict: a prose
+ *  body like `route not found` must NOT be mistaken for one field. */
+const isFormEncoded = (body: string): boolean =>
+  /^[^=&\s]+=[^&\s]*(?:&[^=&\s]+=[^&\s]*)*$/.test(body);
 
 const tokenEndpointHttpSummary = async (response: Response): Promise<string> => {
   const status = `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`;
@@ -461,14 +504,39 @@ const toOAuth2Error = (cause: unknown): OAuth2Error => {
         : typeof c.message === "string"
           ? c.message
           : undefined;
+    const reason = innermostFailureReason(cause);
     return new OAuth2Error({
-      message: `OAuth token exchange failed: ${description ?? code ?? "unknown error"}`,
+      message: `OAuth token exchange failed: ${description ?? code ?? "unknown error"}${
+        reason ? ` (${reason})` : ""
+      }`,
       error: code,
     });
   }
   return new OAuth2Error({
     message: "OAuth token exchange failed",
   });
+};
+
+/** The innermost machine-readable reason from a rejection chain — `ECONNREFUSED`,
+ *  `ENOTFOUND`, `OAUTH_INVALID_RESPONSE`.
+ *
+ *  Dropping the `cause` object closed a leak but took the whole chain with it,
+ *  and a network failure is by far the most common way this call fails. Without
+ *  this, connection-refused and DNS-not-found render as the same three words and
+ *  an operator cannot tell them apart. Only the `code` is lifted — a short
+ *  screaming-snake identifier from the runtime, never a message, a URL, or a
+ *  response body — so the diagnosis comes back without the payload. */
+const innermostFailureReason = (cause: unknown): string | undefined => {
+  let reason: string | undefined;
+  let current: unknown = cause;
+  for (let depth = 0; depth < 8 && typeof current === "object" && current !== null; depth++) {
+    const code = (current as { readonly code?: unknown }).code;
+    // Codes are identifiers like ECONNREFUSED; anything longer or containing
+    // spaces is prose, and prose is where secrets hide.
+    if (typeof code === "string" && /^[A-Z][A-Z0-9_]{2,39}$/.test(code)) reason = code;
+    current = (current as { readonly cause?: unknown }).cause;
+  }
+  return reason;
 };
 
 const toOAuth2ErrorWithHttpSummary = (cause: unknown): Effect.Effect<OAuth2Error> => {
