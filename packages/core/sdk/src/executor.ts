@@ -3134,6 +3134,115 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         return rowToConnection(updated ?? row);
       });
 
+    /** Delete the credentials a removed connection minted. Runs AFTER the
+     *  transaction that removed its rows has committed, and deliberately so:
+     *  `provider.delete` reaches outside the database — a sealed store, a
+     *  keychain, somebody else's API — and nothing out there enlists in this
+     *  transaction or rolls back with it. Called inside, an abort (including
+     *  one owned by an outer caller's transaction) would restore the connection
+     *  row while leaving its secret permanently destroyed: a live connection
+     *  pointing at a credential that no longer exists. That is strictly worse
+     *  than the orphan this deletion exists to remove, and unlike the orphan it
+     *  cannot be repaired. Same order the catalog-change notification already
+     *  follows — durable state commits, then the outside world is told.
+     *
+     *  Routed through `afterCommit` rather than simply sequenced after the
+     *  `transaction()` call, because `transaction()` NESTS BY PASS-THROUGH: an
+     *  inner call inside an active transaction just runs its effect, so
+     *  "after the inner transaction" is not after any commit at all. A caller
+     *  that wraps `remove` in its own transaction and then aborts would still
+     *  have destroyed the secret. `afterCommit` queues onto the OUTERMOST
+     *  transaction and its queue is discarded on rollback, which is the only
+     *  version of this that holds for a nested caller.
+     *
+     *  Its own failures are swallowed for the same best-effort reason as the
+     *  provider delete below: a failed alias scan leaves an orphan, which is
+     *  recoverable, instead of deleting a credential that may still be in
+     *  use, which is not. */
+    const deleteMintedCredentials = (row: ConnectionRow): Effect.Effect<void> =>
+      Effect.gen(function* () {
+      // Now the credential itself, not just the routing to it. Deleting the
+      // rows above only dropped the pointer: the secret stayed in the
+      // provider and stayed decryptable, which is precisely what a user
+      // deleting a connection is asking us to stop being true.
+      //
+      // Only ids THIS connection minted. A connection can instead REFERENCE
+      // an item the user already had (the `from` origin at the create path),
+      // and the provider contract is explicit that such a removal "only
+      // drops our routing, leaving the item intact" — deleting one would
+      // destroy a credential we never created and cannot restore. The two
+      // are told apart by rebuilding the deterministic id we would have
+      // written and requiring exact equality, because that is the only test
+      // that cannot mistake somebody else's item for one of ours. It also
+      // leaves the OAuth app's `oauth-client:…:secret` alone, which is
+      // shared by every connection minted through that app.
+      //
+      // Best-effort: a provider that cannot delete must not resurrect a
+      // connection the user has already removed, so a failure here leaves
+      // an orphan exactly as before rather than failing the removal.
+      //
+      // TWO CASES THIS DOES NOT COVER, both deliberate:
+      //  - A v1-migrated connection stores a `secret_<hash>` id, which is
+      //    executor-owned but not derivable from v2 state, so it cannot be
+      //    matched and its item is still left behind. Closing that needs a
+      //    schema change, not a better rule here.
+      //  - A second connection can point at this one's minted id through the
+      //    `from` origin, in which case deleting it breaks that connection.
+      //    Detecting it needs a reference scan across the partition.
+      //
+      // `writable` is checked as well as the id, never instead of it: a
+      // picked item can live in a writable store, so writability alone would
+      // destroy user data. It is only reachable when a provider stops being
+      // writable after the item was minted, where honouring the contract's
+      // "we never write here" is the safer reading.
+      const provider = credentialProviders.get(String(row.provider));
+      if (provider?.writable === true && provider.delete) {
+        const minted = mintedItemIds(row);
+        // Nothing stops a second connection pointing AT this one's minted
+        // item through the `from` origin — the reference path stores
+        // whatever id it is handed. Deleting the item would then pull the
+        // credential out from under a connection that is still live and
+        // still using it. The connection row above is already gone, so
+        // anything still referencing the id here is by definition somebody
+        // else, and the item stays.
+        //
+        // This read is owner-scoped by the table's own visibility policy, so
+        // it sees the org partition plus this caller's own rows and NOT
+        // another subject's. An alias held by a different subject is
+        // therefore invisible here and its credential can still be deleted.
+        // That is left as-is deliberately: reading around a tenant-isolation
+        // boundary to widen a DELETE would be a worse defect than the narrow
+        // one it closes.
+        const stillReferenced =
+          minted.length === 0
+            ? new Set<string>()
+            : yield* core
+                .findMany("connection", {
+                  // An item id only means anything inside ONE provider's
+                  // namespace, so a connection on a different provider
+                  // holding the same string is not an alias. Counting it as
+                  // one would leave this connection's secret behind, which
+                  // is the orphan this delete exists to remove.
+                  where: (b: AnyCb) => b("provider", "=", String(row.provider)),
+                })
+                .pipe(
+                  Effect.map(
+                    (rows) =>
+                      new Set(
+                        rows.flatMap((other) => [
+                          ...Object.values(connectionItemIds(other)),
+                          ...(other.refresh_item_id ? [String(other.refresh_item_id)] : []),
+                        ]),
+                      ),
+                  ),
+                );
+        for (const id of minted) {
+          if (stillReferenced.has(id)) continue;
+          yield* provider.delete(ProviderItemId.make(id)).pipe(Effect.ignore);
+        }
+      }
+      }).pipe(Effect.ignoreCause({ log: false }));
+
     const connectionsRemove = (
       ref: ConnectionRef,
     ): Effect.Effect<void, ConnectionNotFoundError | StorageFailure> =>
@@ -3179,88 +3288,9 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
               ),
           });
 
-          // Now the credential itself, not just the routing to it. Deleting the
-          // rows above only dropped the pointer: the secret stayed in the
-          // provider and stayed decryptable, which is precisely what a user
-          // deleting a connection is asking us to stop being true.
-          //
-          // Only ids THIS connection minted. A connection can instead REFERENCE
-          // an item the user already had (the `from` origin at the create path),
-          // and the provider contract is explicit that such a removal "only
-          // drops our routing, leaving the item intact" — deleting one would
-          // destroy a credential we never created and cannot restore. The two
-          // are told apart by rebuilding the deterministic id we would have
-          // written and requiring exact equality, because that is the only test
-          // that cannot mistake somebody else's item for one of ours. It also
-          // leaves the OAuth app's `oauth-client:…:secret` alone, which is
-          // shared by every connection minted through that app.
-          //
-          // Best-effort: a provider that cannot delete must not resurrect a
-          // connection the user has already removed, so a failure here leaves
-          // an orphan exactly as before rather than failing the removal.
-          //
-          // TWO CASES THIS DOES NOT COVER, both deliberate:
-          //  - A v1-migrated connection stores a `secret_<hash>` id, which is
-          //    executor-owned but not derivable from v2 state, so it cannot be
-          //    matched and its item is still left behind. Closing that needs a
-          //    schema change, not a better rule here.
-          //  - A second connection can point at this one's minted id through the
-          //    `from` origin, in which case deleting it breaks that connection.
-          //    Detecting it needs a reference scan across the partition.
-          //
-          // `writable` is checked as well as the id, never instead of it: a
-          // picked item can live in a writable store, so writability alone would
-          // destroy user data. It is only reachable when a provider stops being
-          // writable after the item was minted, where honouring the contract's
-          // "we never write here" is the safer reading.
-          const provider = credentialProviders.get(String(row.provider));
-          if (provider?.writable === true && provider.delete) {
-            const minted = mintedItemIds(row);
-            // Nothing stops a second connection pointing AT this one's minted
-            // item through the `from` origin — the reference path stores
-            // whatever id it is handed. Deleting the item would then pull the
-            // credential out from under a connection that is still live and
-            // still using it. The connection row above is already gone, so
-            // anything still referencing the id here is by definition somebody
-            // else, and the item stays.
-            //
-            // This read is owner-scoped by the table's own visibility policy, so
-            // it sees the org partition plus this caller's own rows and NOT
-            // another subject's. An alias held by a different subject is
-            // therefore invisible here and its credential can still be deleted.
-            // That is left as-is deliberately: reading around a tenant-isolation
-            // boundary to widen a DELETE would be a worse defect than the narrow
-            // one it closes.
-            const stillReferenced =
-              minted.length === 0
-                ? new Set<string>()
-                : yield* core
-                    .findMany("connection", {
-                      // An item id only means anything inside ONE provider's
-                      // namespace, so a connection on a different provider
-                      // holding the same string is not an alias. Counting it as
-                      // one would leave this connection's secret behind, which
-                      // is the orphan this delete exists to remove.
-                      where: (b: AnyCb) => b("provider", "=", String(row.provider)),
-                    })
-                    .pipe(
-                      Effect.map(
-                        (rows) =>
-                          new Set(
-                            rows.flatMap((other) => [
-                              ...Object.values(connectionItemIds(other)),
-                              ...(other.refresh_item_id ? [String(other.refresh_item_id)] : []),
-                            ]),
-                          ),
-                      ),
-                    );
-            for (const id of minted) {
-              if (stillReferenced.has(id)) continue;
-              yield* provider.delete(ProviderItemId.make(id)).pipe(Effect.ignore);
-            }
-          }
+          return row;
         }),
-      );
+      ).pipe(Effect.flatMap((row) => afterCommit(deleteMintedCredentials(row))));
 
     const connectionsRefresh = (
       ref: ConnectionRef,

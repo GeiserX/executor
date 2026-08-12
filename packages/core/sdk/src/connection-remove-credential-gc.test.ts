@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Exit } from "effect";
 
 import {
   AuthTemplateSlug,
@@ -285,6 +285,67 @@ describe("removing a connection removes the credential it minted", () => {
 
       expect(store.has("connection:org:vercel:first:token")).toBe(false);
       expect(store.get("connection:org:vercel:second:token")).toBe("second-token");
+    }),
+  );
+});
+
+// The deletion reaches OUTSIDE the database, so it must not run inside the
+// transaction that removes the rows. Nothing in a provider — a sealed store, a
+// keychain, someone else's API — enlists in that transaction or rolls back with
+// it. If an abort restores the connection row after its secret has already been
+// destroyed, the result is a live connection pointing at a credential that no
+// longer exists: worse than the orphan this whole feature removes, and unlike
+// the orphan, unrepairable.
+const txPlugin = (store: Map<string, string>) =>
+  definePlugin(() => ({
+    id: "demo" as const,
+    credentialProviders: [inspectableProvider(store, true)],
+    storage: () => ({}),
+    resolveTools: () =>
+      Effect.succeed({ tools: [{ name: ToolName.make("deploy"), description: "deploy" }] }),
+    invokeTool: ({ toolRow }) => Effect.succeed({ ran: toolRow.name }),
+    extension: (ctx) => ({
+      seed: () =>
+        ctx.core.integrations.register({ slug: INTEG, description: "Vercel", config: {} }),
+      /** The plugin-owned OUTER transaction the removal can find itself inside. */
+      inTransaction: <A, E>(effect: Effect.Effect<A, E>) => ctx.transaction(effect),
+    }),
+  }))();
+
+describe("the credential deletion runs after the transaction commits", () => {
+  it.effect("a rolled-back removal leaves the credential intact", () =>
+    Effect.gen(function* () {
+      const store = new Map<string, string>();
+      const executor = yield* makeTestExecutor({ plugins: [txPlugin(store)] as const }).pipe(
+        Effect.tap((e) => e.demo.seed()),
+      );
+      const ref = {
+        owner: "org",
+        integration: INTEG,
+        name: ConnectionName.make("main"),
+      } as const;
+      yield* executor.connections.create({ ...ref, template: TEMPLATE, value: "secret-token" });
+      const mintedId = "connection:org:vercel:main:token";
+      expect(store.get(mintedId)).toBe("secret-token");
+
+      // A caller wraps the removal in its own transaction and then fails, so the
+      // row deletions roll back.
+      const outcome = yield* Effect.exit(
+        executor.demo.inTransaction(
+          Effect.gen(function* () {
+            yield* executor.connections.remove(ref);
+            return yield* Effect.fail("rollback" as const);
+          }),
+        ),
+      );
+      expect(Exit.isFailure(outcome)).toBe(true);
+
+      // The connection came back...
+      const stillThere = yield* executor.connections.get(ref);
+      expect(String(stillThere?.name)).toBe("main");
+      // ...so its credential MUST still be there. A restored row pointing at a
+      // destroyed secret is the one outcome that cannot be repaired.
+      expect(store.get(mintedId)).toBe("secret-token");
     }),
   );
 });
