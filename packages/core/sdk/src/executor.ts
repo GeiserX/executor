@@ -4676,6 +4676,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         oauth,
         execute: (address, args, options) => execute(address, args, options),
         transaction: <A, E>(effect: Effect.Effect<A, E>) => transaction(effect),
+        afterCommit: (effect: Effect.Effect<void>) => afterCommit(effect),
       };
 
       if (plugin.toolPolicyProvider) {
