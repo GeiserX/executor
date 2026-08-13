@@ -1523,6 +1523,30 @@ export const mcpPlugin = definePlugin((options?: McpPluginOptions) => {
         if (!parsed) {
           return { status: "unknown" as const, checkedAt: Date.now() } satisfies HealthCheckResult;
         }
+        // An unresolved apikey input reports `expired`, not `healthy`.
+        //
+        // Rendering skips a placement whose value is missing, so without this the
+        // probe dials UNAUTHENTICATED — and any server that lists tools without
+        // auth answers, making a connection whose credential is gone report as
+        // healthy. Health is the signal that tells a user to re-authenticate, so
+        // that is the one status it must never give here. The invoke path already
+        // refuses for the same reason, and the OpenAPI health check reports
+        // `expired` in exactly this case.
+        if (parsed.transport === "remote") {
+          const method = selectAuthMethod(parsed, String(credential.template));
+          if (method?.kind === "apikey") {
+            const missing = requiredPlacementVariables(method.placements).filter(
+              (variable) => credential.values[variable] == null,
+            );
+            if (missing.length > 0) {
+              return {
+                status: "expired" as const,
+                checkedAt: Date.now(),
+                detail: `Connection has no resolvable credential value for input(s): ${missing.join(", ")}.`,
+              } satisfies HealthCheckResult;
+            }
+          }
+        }
         const connector = yield* buildConnectorInput(
           parsed,
           credential.values,
