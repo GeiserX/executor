@@ -132,4 +132,67 @@ describe("makeOnePasswordService", () => {
       // oxlint-enable executor/no-unknown-error-message
     }),
   );
+
+  // -------------------------------------------------------------------------
+  // Service-account token lifetime.
+  //
+  // `op-js` parks the token on a process-global (`cli.serviceAccountToken`) and
+  // reads it when spawning `op`. Nothing in the library clears it, so without
+  // the `ensuring` in `makeCliService` a token set to serve one resolve stays
+  // readable for the rest of the process's life.
+  //
+  // Both halves are pinned on purpose: clearing it is only correct if it is
+  // still SET while the call runs. A change that cleared it too early would
+  // pass a "no longer parked" assertion and silently break authentication.
+  // -------------------------------------------------------------------------
+
+  it.effect("clears the service-account token from the op-js global after a CLI call", () =>
+    Effect.gen(function* () {
+      opMocks.readParse.mockReturnValue("resolved-secret");
+
+      const service = yield* makeOnePasswordService(
+        { kind: "service-account", token: "ops_test_token" },
+        { timeoutMs: 1_000 },
+      );
+      const secret = yield* service.resolveSecret("op://vault/item/field");
+
+      expect(secret).toBe("resolved-secret");
+      // Still handed to the CLI for the call that needed it...
+      expect(opMocks.setServiceAccount).toHaveBeenCalledWith("ops_test_token");
+      // ...and gone by the time the call is over.
+      expect(opMocks.setServiceAccount).toHaveBeenLastCalledWith("");
+    }),
+  );
+
+  it.effect("clears the token even when the CLI call fails", () =>
+    Effect.gen(function* () {
+      // The failure path is the one that matters most: an error unwinding past a
+      // manual "clear it afterwards" line is exactly how a token gets stranded.
+      opMocks.readParse.mockImplementation(() => {
+        // oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: simulates the untyped op-js CLI wrapper throwing
+        throw new Error("spawn op ENOENT");
+      });
+      sdkMocks.createClient.mockResolvedValue({
+        secrets: {
+          resolve: vi.fn(async () => {
+            // oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: simulates the untyped 1Password SDK rejecting
+            throw new Error("sdk unavailable");
+          }),
+        },
+        vaults: { list: vi.fn(async () => []) },
+        items: { list: vi.fn(async () => []) },
+      });
+
+      yield* makeOnePasswordService(
+        { kind: "service-account", token: "ops_test_token" },
+        { timeoutMs: 1_000 },
+      ).pipe(
+        Effect.flatMap((service) => service.resolveSecret("op://vault/item/field")),
+        Effect.flip,
+      );
+
+      expect(opMocks.setServiceAccount).toHaveBeenCalledWith("ops_test_token");
+      expect(opMocks.setServiceAccount).toHaveBeenLastCalledWith("");
+    }),
+  );
 });
