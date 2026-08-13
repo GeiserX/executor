@@ -1,0 +1,11 @@
+---
+"executor": patch
+---
+
+**Idle MCP connections age out even when their identity is never dialled again**
+
+The pool's five-minute idle window was only consulted against the entry being requested, so an identity that was never asked for a second time was never examined a second time. Its session stayed open and authenticated for as long as the pool lived, holding the bearer token or API key it was dialled with. The advertised bound applied only to connections that happened to be reused.
+
+`acquire` now sweeps every entry past the window, closing each one, rather than just the entry matching the key. This stays lazy in the sense the pool intends — activity drives it, there is no timer and no background fiber — and the map holds at most one entry per identity, so the scan is trivial.
+
+Reuse is unchanged: an entry still inside the window is left alone, and a second call for the same identity still gets the parked session rather than a fresh dial.

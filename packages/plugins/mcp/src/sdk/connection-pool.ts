@@ -60,12 +60,40 @@ export interface McpConnectionPool {
 }
 
 /** Creates an MCP connection pool with lazy five-minute idle eviction and one
- * automatic fresh-dial retry for a reused session rejected with HTTP 404. */
+ * automatic fresh-dial retry for a reused session rejected with HTTP 404.
+ *
+ * "Lazy" means activity-driven — there is no timer and no background fiber — but
+ * it applies to EVERY parked connection, not only the identity being asked for.
+ * A pooled session holds the credential it was dialled with, so an identity that
+ * is never requested again must still age out. */
 export const createMcpConnectionPool = (): McpConnectionPool => {
   const idle = new Map<string, IdleConnection>();
 
+  /** Close and drop every entry past the idle window, not just the one being
+   *  asked for.
+   *
+   *  The TTL used to be consulted only against `idle.get(key)`, so an identity
+   *  that was never dialled again was never examined again: its session stayed
+   *  open and authenticated indefinitely, holding the bearer it was dialled
+   *  with. The advertised bound only held for connections that happened to be
+   *  reused.
+   *
+   *  Still lazy — activity drives it, there is no timer and no background fiber.
+   *  The map holds at most one entry per identity, so scanning it is trivial. */
+  const sweepExpired = Effect.suspend(() => {
+    const now = Date.now();
+    const expired: McpConnection[] = [];
+    for (const [key, entry] of idle) {
+      if (now - entry.idleSince < IDLE_TTL_MS) continue;
+      idle.delete(key);
+      expired.push(entry.connection);
+    }
+    return Effect.forEach(expired, closeQuietly, { discard: true });
+  });
+
   const acquire = (key: string, connector: McpConnector, forceFresh: boolean) =>
     Effect.gen(function* () {
+      yield* sweepExpired;
       if (forceFresh) {
         const connection = yield* connector;
         return { connection, reused: false } satisfies ConnectionLease;
