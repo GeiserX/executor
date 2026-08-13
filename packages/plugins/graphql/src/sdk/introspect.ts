@@ -235,18 +235,32 @@ export const introspect = Effect.fn("GraphQL.introspect")(function* (
   queryParams?: Record<string, string>,
 ) {
   const client = yield* HttpClient.HttpClient;
-  const requestEndpoint =
-    queryParams && Object.keys(queryParams).length > 0
-      ? (() => {
-          const url = new URL(endpoint);
-          for (const [name, value] of Object.entries(queryParams)) {
-            url.searchParams.set(name, value);
-          }
-          return url.toString();
-        })()
-      : endpoint;
+  // Hand `post` a URL OBJECT rather than a string, deliberately.
+  //
+  // `HttpClientRequest.setUrl` keeps a string verbatim as `request.url`, and
+  // every `HttpClientError` renders `${method} ${request.url}` into its
+  // `message` getter. The `query` carrier is a supported credential placement,
+  // so an endpoint reached with `?token=…` put that secret inside the error
+  // message — and the `Effect.logError(…, cause)` below writes the message
+  // straight to the log on any transport failure or non-JSON response.
+  //
+  // Given a URL object, `setUrl` moves the query into `request.urlParams` and
+  // clears it from `request.url`, so the same failure logs the bare endpoint.
+  // Nothing is lost on the wire: the client recombines url + urlParams when it
+  // executes the request. Handling the endpoint's OWN query the same way (not
+  // just the `queryParams` argument) matters — a configured endpoint can carry
+  // a credential in its query string too.
+  const requestUrl: string | URL = URL.canParse(endpoint)
+    ? (() => {
+        const url = new URL(endpoint);
+        for (const [name, value] of Object.entries(queryParams ?? {})) {
+          url.searchParams.set(name, value);
+        }
+        return url;
+      })()
+    : endpoint;
 
-  let request = HttpClientRequest.post(requestEndpoint).pipe(
+  let request = HttpClientRequest.post(requestUrl).pipe(
     HttpClientRequest.setHeader("Content-Type", "application/json"),
     HttpClientRequest.setHeader("Accept", "application/json"),
     HttpClientRequest.setHeader("User-Agent", "executor-graphql"),
