@@ -14,6 +14,7 @@ import {
   IntegrationSlug,
   mergeAuthTemplates,
   OAuthClientSlug,
+  sha256Hex,
   tool,
   ToolResult,
   type AuthMethodDescriptor,
@@ -628,20 +629,45 @@ const sortedRecord = (
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
   );
 
-const connectionPoolKey = (
+/** The pooled remote connection's identity, as an opaque digest.
+ *
+ *  HASHED, not carried in the clear, because three of the fields below hold a
+ *  live credential: `values` is the connection's resolved secret inputs, and
+ *  `headers` / `queryParams` are those SAME secrets already rendered onto the
+ *  outbound request by `buildConnectorInput`. The result is retained as a `Map`
+ *  key for the POOL's lifetime (`connection-pool.ts`), which outlives by far the
+ *  call that needed the secret — so a plaintext key leaves credentials sitting
+ *  in process memory with no reader.
+ *
+ *  Hashing the WHOLE serialized identity rather than only the fields known to
+ *  be sensitive keeps equality exactly (same identity → same digest, so reuse is
+ *  unchanged) and keeps any field added later covered without anyone having to
+ *  remember it carries a secret. Nothing reads the key back: the pool only ever
+ *  compares it, and it reaches no log, span or error message.
+ *
+ *  SHA-256 rather than a cheap non-cryptographic hash on purpose. A collision
+ *  means reusing a connection authenticated as somebody else, so the hash has to
+ *  be one an attacker who controls their own credential values cannot aim.
+ *
+ *  Exported for tests (not re-exported from `sdk/index.ts`, so this widens no
+ *  public API): the retention property is a property of the KEY, and asserting
+ *  it through pool behaviour alone would not see it. */
+export const connectionPoolKey = (
   input: Extract<ConnectorInput, { readonly transport: "remote" }>,
   template: string,
   values: Record<string, string | null>,
-): string =>
-  JSON.stringify({
-    endpoint: input.endpoint,
-    transport: input.transport,
-    remoteTransport: input.remoteTransport,
-    headers: sortedRecord(input.headers),
-    queryParams: sortedRecord(input.queryParams),
-    template,
-    values: sortedRecord(values),
-  });
+): Effect.Effect<string> =>
+  sha256Hex(
+    JSON.stringify({
+      endpoint: input.endpoint,
+      transport: input.transport,
+      remoteTransport: input.remoteTransport,
+      headers: sortedRecord(input.headers),
+      queryParams: sortedRecord(input.queryParams),
+      template,
+      values: sortedRecord(values),
+    }),
+  );
 
 // ---------------------------------------------------------------------------
 // Declared auth methods — project the stored MCP config into the catalog's
@@ -1306,7 +1332,11 @@ export const mcpPlugin = definePlugin((options?: McpPluginOptions) => {
         const connector: McpConnector = createMcpConnector(connectorInput);
         const poolKey =
           connectorInput.transport === "remote"
-            ? connectionPoolKey(connectorInput, String(credential.template), credential.values)
+            ? yield* connectionPoolKey(
+                connectorInput,
+                String(credential.template),
+                credential.values,
+              )
             : undefined;
 
         const connectionRef = {
