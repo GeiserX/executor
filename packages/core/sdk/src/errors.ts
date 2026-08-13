@@ -50,10 +50,16 @@ export class ToolNotFoundError extends Schema.TaggedErrorClass<ToolNotFoundError
   {
     address: ToolAddress,
     suggestions: Schema.optional(Schema.Array(ToolAddress)),
+    /** Why the address did not resolve, when something more useful than the
+     *  address is known — a connection that produced no tools, say. Optional:
+     *  an ordinary unknown tool name has nothing to add. */
+    reason: Schema.optional(Schema.String),
   },
 ) {
   override get message(): string {
-    return `Tool not found: ${this.address}`;
+    return this.reason === undefined
+      ? `Tool not found: ${this.address}`
+      : `Tool not found: ${this.address} — ${this.reason}`;
   }
 }
 

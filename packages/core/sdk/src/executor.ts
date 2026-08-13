@@ -4372,9 +4372,25 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
           const searchMatches = yield* searchToolRowsForConnection(parsed);
           const connectionTools =
             searchMatches.length > 0 ? searchMatches : yield* findToolRowsForConnection(parsed);
+          // An empty catalog on a connection that DOES exist is usually not a
+          // wrong tool name: discovery produced nothing, most often because the
+          // upstream rejected the credential. Reporting only the address sends
+          // the reader after a tool that was never the problem, so name the
+          // connection and point at the surface that knows the cause.
+          const connectionExists =
+            connectionTools.length === 0 &&
+            (yield* findConnectionRow({
+              owner: parsed.owner,
+              integration: parsed.integration,
+              name: parsed.connection,
+            })) !== null;
           return yield* new ToolNotFoundError({
             address,
             suggestions: toolSuggestions(connectionTools),
+            reason: connectionExists
+              ? `connection "${parsed.integration}/${parsed.connection}" has no tools; ` +
+                `check its health for why discovery produced none`
+              : undefined,
           });
         }
 
