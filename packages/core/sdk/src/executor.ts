@@ -1715,22 +1715,33 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
     /** Wrap a provider so every call it exposes is bounded.
      *
      *  Done once at the registration funnel rather than at each call site: every
-     *  provider passes through here, so a method added later is bounded by default
-     *  instead of by whoever remembers. Optional methods stay optional — a provider
-     *  that cannot enumerate must not appear to. */
+     *  provider passes through here on its way in, rather than every call site
+     *  remembering. The five methods `CredentialProvider` has today are named
+     *  explicitly, so a sixth added to the interface must be added here too.
+     *  Optional methods stay optional — a provider that cannot enumerate must not
+     *  appear to. */
     const boundedProvider = (provider: CredentialProvider, key: string): CredentialProvider => {
-      const { has, set, delete: remove, list } = provider;
+      // Every method is invoked ON the provider. Destructuring them and calling the
+      // bindings bare drops `this`, which every in-tree provider survives only because
+      // it happens to be an object literal — a provider written as a class throws
+      // TypeError on its first call. Wrapping arbitrary providers is the point of this
+      // funnel, so it must not change how their own methods are called.
       return {
         ...provider,
         get: (id) => boundedCall(provider.get(id), key, "get"),
-        ...(has ? { has: (id: ProviderItemId) => boundedCall(has(id), key, "has") } : {}),
-        ...(set
-          ? { set: (id: ProviderItemId, value: string) => boundedCall(set(id, value), key, "set") }
+        ...(provider.has
+          ? { has: (id: ProviderItemId) => boundedCall(provider.has!(id), key, "has") }
           : {}),
-        ...(remove
-          ? { delete: (id: ProviderItemId) => boundedCall(remove(id), key, "delete") }
+        ...(provider.set
+          ? {
+              set: (id: ProviderItemId, value: string) =>
+                boundedCall(provider.set!(id, value), key, "set"),
+            }
           : {}),
-        ...(list ? { list: () => boundedCall(list(), key, "list") } : {}),
+        ...(provider.delete
+          ? { delete: (id: ProviderItemId) => boundedCall(provider.delete!(id), key, "delete") }
+          : {}),
+        ...(provider.list ? { list: () => boundedCall(provider.list!(), key, "list") } : {}),
       };
     };
 

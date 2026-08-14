@@ -15,7 +15,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "@effect/vitest";
-import { Duration, Effect, Fiber } from "effect";
+import { Duration, Effect, Exit, Fiber } from "effect";
 import { TestClock } from "effect/testing";
 
 import { createExecutor } from "./executor";
@@ -77,7 +77,7 @@ describe("a credential provider that stops answering", () => {
       yield* TestClock.adjust(Duration.minutes(5));
       const exit = yield* Fiber.join(fiber);
 
-      expect(exit._tag).toBe("Failure");
+      expect(Exit.isFailure(exit)).toBe(true);
     }),
   );
 
@@ -93,6 +93,69 @@ describe("a credential provider that stops answering", () => {
 
       expect(String(exit)).toContain("remote-store");
       expect(String(exit)).toContain("did not answer");
+      // The operation, too — without this the test passes its own name by accident:
+      // the operation could drop out of the message entirely and nothing would notice.
+      expect(String(exit)).toContain("get");
+    }),
+  );
+
+  it.effect("an object-literal provider stores a pasted value — the control", () =>
+    Effect.gen(function* () {
+      // The control for the class case below: identical in every respect except that the
+      // provider is an object literal. Without it, a red class test could mean anything.
+      const items = new Map<string, string>();
+      const lit: CredentialProvider = {
+        key: STORE,
+        writable: true,
+        get: (id) => Effect.sync(() => items.get(String(id)) ?? null),
+        set: (id, value) => Effect.sync(() => void items.set(String(id), value)),
+      };
+      const executor = yield* createExecutor(makeTestConfig({ plugins: [plugin(lit)] as const }));
+      yield* executor.acme.seed();
+      yield* executor.connections.create({
+        owner: "org",
+        name: CONN,
+        integration: INTEG,
+        template: AuthTemplateSlug.make("api_key"),
+        value: "tok",
+      });
+      expect(yield* executor.acme.read()).toBe("tok");
+    }),
+  );
+
+  it.effect("wraps a CLASS-based provider without breaking its methods", () =>
+    Effect.gen(function* () {
+      // The wrapper must not change HOW a provider's own methods are called. `get` was
+      // invoked with its receiver (`provider.get(id)`) but the optional methods were
+      // destructured and called bare, which silently drops `this`. Every in-tree provider
+      // is an object literal and cannot notice; a provider written as a class — exactly
+      // what "wrap any provider" invites — throws TypeError on the first optional call.
+      class ClassProvider {
+        readonly key = STORE;
+        readonly writable = true;
+        private readonly items = new Map<string, string>();
+        get(id: ProviderItemId) {
+          return Effect.sync(() => this.items.get(String(id)) ?? null);
+        }
+        set(id: ProviderItemId, value: string) {
+          // `this` is the whole point: bare invocation makes this line throw.
+          return Effect.sync(() => void this.items.set(String(id), value));
+        }
+      }
+
+      const executor = yield* createExecutor(
+        makeTestConfig({ plugins: [plugin(new ClassProvider() as CredentialProvider)] as const }),
+      );
+      yield* executor.acme.seed();
+      yield* executor.connections.create({
+        owner: "org",
+        name: CONN,
+        integration: INTEG,
+        template: AuthTemplateSlug.make("api_key"),
+        value: "tok",
+      });
+
+      expect(yield* executor.acme.read()).toBe("tok");
     }),
   );
 
