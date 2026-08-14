@@ -159,6 +159,47 @@ describe("a credential provider that stops answering", () => {
     }),
   );
 
+  it.effect("keeps a capability the provider defines on its PROTOTYPE", () =>
+    Effect.gen(function* () {
+      // The wrapper must not change the provider's SHAPE either. A spread copies only own
+      // ENUMERABLE properties, so anything on a class's prototype — every method, and any
+      // accessor like the `writable` below — is dropped silently. Nothing raises; the wrapper
+      // simply appears not to have it, and the caller takes a path the provider meant to own.
+      // Here that means `defaultWritableProvider` no longer sees a writable store, so creating
+      // a connection from a pasted value fails with no provider at all.
+      class PrototypeProvider {
+        readonly key = STORE;
+        private readonly items = new Map<string, string>();
+        // On the PROTOTYPE, not the instance — this is the property a spread loses.
+        get writable() {
+          return true;
+        }
+        get(id: ProviderItemId) {
+          return Effect.sync(() => this.items.get(String(id)) ?? null);
+        }
+        set(id: ProviderItemId, value: string) {
+          return Effect.sync(() => void this.items.set(String(id), value));
+        }
+      }
+
+      const executor = yield* createExecutor(
+        makeTestConfig({
+          plugins: [plugin(new PrototypeProvider() as CredentialProvider)] as const,
+        }),
+      );
+      yield* executor.acme.seed();
+      yield* executor.connections.create({
+        owner: "org",
+        name: CONN,
+        integration: INTEG,
+        template: AuthTemplateSlug.make("api_key"),
+        value: "tok",
+      });
+
+      expect(yield* executor.acme.read()).toBe("tok");
+    }),
+  );
+
   it.effect("still resolves normally when the provider answers", () =>
     Effect.gen(function* () {
       // The control. A bound that refused everything would satisfy both assertions

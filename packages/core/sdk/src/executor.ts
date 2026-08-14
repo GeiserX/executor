@@ -1721,28 +1721,36 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
      *  Optional methods stay optional — a provider that cannot enumerate must not
      *  appear to. */
     const boundedProvider = (provider: CredentialProvider, key: string): CredentialProvider => {
-      // Every method is invoked ON the provider. Destructuring them and calling the
-      // bindings bare drops `this`, which every in-tree provider survives only because
-      // it happens to be an object literal — a provider written as a class throws
-      // TypeError on its first call. Wrapping arbitrary providers is the point of this
-      // funnel, so it must not change how their own methods are called.
-      return {
-        ...provider,
-        get: (id) => boundedCall(provider.get(id), key, "get"),
-        ...(provider.has
-          ? { has: (id: ProviderItemId) => boundedCall(provider.has!(id), key, "has") }
-          : {}),
-        ...(provider.set
-          ? {
-              set: (id: ProviderItemId, value: string) =>
-                boundedCall(provider.set!(id, value), key, "set"),
-            }
-          : {}),
-        ...(provider.delete
-          ? { delete: (id: ProviderItemId) => boundedCall(provider.delete!(id), key, "delete") }
-          : {}),
-        ...(provider.list ? { list: () => boundedCall(provider.list!(), key, "list") } : {}),
+      // Wrapping must change neither how the provider's methods are CALLED nor what the
+      // object LOOKS like.
+      //
+      // Spreading would break the second: a spread copies only own ENUMERABLE properties, so
+      // everything on a class's prototype — its methods, and accessors like `writable` — is
+      // dropped silently. Nothing raises; the wrapper simply appears not to have the capability
+      // and the caller takes a path the provider meant to own. `Object.create` keeps the whole
+      // object reachable, including anything added to the interface later.
+      //
+      // Each bounded method is invoked ON the provider, which is the first half: a destructured
+      // binding called bare loses `this`, and a class-based provider throws TypeError on its
+      // first call. Every provider in this repo is an object literal and cannot notice either
+      // problem, but "wrap any provider" is the whole point of this funnel.
+      const bounded: Record<string, unknown> = {
+        get: (id: ProviderItemId) => boundedCall(provider.get(id), key, "get"),
       };
+      if (provider.has) {
+        bounded.has = (id: ProviderItemId) => boundedCall(provider.has!(id), key, "has");
+      }
+      if (provider.set) {
+        bounded.set = (id: ProviderItemId, value: string) =>
+          boundedCall(provider.set!(id, value), key, "set");
+      }
+      if (provider.delete) {
+        bounded.delete = (id: ProviderItemId) => boundedCall(provider.delete!(id), key, "delete");
+      }
+      if (provider.list) {
+        bounded.list = () => boundedCall(provider.list!(), key, "list");
+      }
+      return Object.assign(Object.create(provider) as CredentialProvider, bounded);
     };
 
     const registerCredentialProvider = (
