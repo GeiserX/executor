@@ -154,7 +154,7 @@ export const writeCliServerConnectionStore = (
     // This store holds live credentials for a hosted server — a bearer token, or
     // an OAuth access token AND its long-lived refresh token — so create it
     // owner-only, exactly as the local-server manifest does for the sibling
-    // secret in this same directory.
+    // secret it keeps under `server-control/`.
     //
     // Both steps are needed, and the second matters more here than it does
     // there. `mode` applies only when the file is CREATED, so it closes the
