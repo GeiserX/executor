@@ -15,7 +15,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Predicate } from "effect";
 
 import { createExecutor } from "./executor";
 import {
@@ -75,22 +75,26 @@ const failInvoking = (plugin: ReturnType<typeof pluginWith>, tool: string) =>
       from: { provider: STORE, id: ProviderItemId.make("item-1") },
     });
 
-    const exit = yield* Effect.exit(
+    // `Effect.flip` rather than unwrapping an Exit: the failure becomes the value, already
+    // typed, so nothing here inspects a `_tag`, throws, or stringifies an unknown. If the
+    // invocation unexpectedly SUCCEEDS, the flip fails the test on its own.
+    return yield* Effect.flip(
       executor.execute(ToolAddress.make(`tools.${INTEG}.org.${CONN}.${tool}`), {}),
     );
-    expect(exit._tag).toBe("Failure");
-    if (exit._tag !== "Failure") throw new Error("expected a failure");
-    return exit.cause;
   });
 
 describe("invoking a tool on a connection that produced no tools", () => {
   it.effect("says the connection produced no tools", () =>
     Effect.gen(function* () {
-      const cause = yield* failInvoking(EMPTY, "whoami");
+      const error = yield* failInvoking(EMPTY, "whoami");
 
       // Naming only the tool sends the reader after a tool that was never the
-      // problem. The message has to carry the connection's empty catalog.
-      expect(String(cause)).toMatch(/no tools/i);
+      // problem. The error has to carry the connection's empty catalog. Asserting
+      // on the typed `reason` field rather than the rendered message pins the thing
+      // this change actually adds.
+      expect(Predicate.isTagged(error, "ToolNotFoundError")).toBe(true);
+      if (!Predicate.isTagged(error, "ToolNotFoundError")) return;
+      expect(error.reason ?? "").toMatch(/no tools/i);
     }),
   );
 
@@ -99,9 +103,11 @@ describe("invoking a tool on a connection that produced no tools", () => {
       // The control, and the reason the first assertion means something: a
       // message that always mentioned an empty catalog would satisfy it while
       // being wrong for every ordinary typo.
-      const cause = yield* failInvoking(POPULATED, "nosuchtool");
+      const error = yield* failInvoking(POPULATED, "nosuchtool");
 
-      expect(String(cause)).not.toMatch(/no tools/i);
+      expect(Predicate.isTagged(error, "ToolNotFoundError")).toBe(true);
+      if (!Predicate.isTagged(error, "ToolNotFoundError")) return;
+      expect(error.reason).toBeUndefined();
     }),
   );
 });
