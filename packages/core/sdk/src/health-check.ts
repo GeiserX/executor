@@ -379,11 +379,40 @@ export const projectResponseFields = (
   return fields;
 };
 
+/** Placeholder shown instead of a leaf whose key names it as secret-bearing. */
+export const REDACTED_SAMPLE_VALUE = "[redacted]";
+
+/**
+ * Leaf keys whose value is a credential rather than something worth previewing.
+ *
+ * The sample exists so a user can pick their identity field, and the keys that
+ * serve that (`email`, `login`, `username`, `name`, `id`) do not collide with
+ * any of these — so this can afford to be blunt.
+ *
+ * This catches the secrets we do NOT already know. Scrubbing the connection's
+ * own credential value out of the sample only helps when the body echoes the
+ * key we authenticated with; a health check pointed at a key-listing endpoint
+ * returns different secrets entirely, and no scrub of a known value can see
+ * those.
+ */
+const SECRET_KEY_PATTERN =
+  /(^|[^a-z])(secret|token|password|passwd|apikey|api_key|credential|authorization|auth|session|cookie|private|signature|bearer|refresh)([^a-z]|$)/i;
+
+/** True when the last segment of a dotted path names a credential. */
+const namesASecret = (path: string): boolean => {
+  const leaf = path.slice(path.lastIndexOf(".") + 1);
+  return SECRET_KEY_PATTERN.test(leaf);
+};
+
 /**
  * Walk an actual JSON response body and return its scalar leaves as
  * `{ path, value }` rows (value stringified + truncated). Drives the live
  * preview's "show me what this returns" list. Bounded to depth 4, 25 fields,
  * and ~120-char values.
+ *
+ * Leaves whose key names a credential are kept but their value is replaced,
+ * so the preview still shows the field exists without persisting its value —
+ * this result is written to `connection.last_health`.
  */
 export const extractResponseFields = (data: unknown): HealthCheckResponseSample[] => {
   const out: HealthCheckResponseSample[] = [];
@@ -418,7 +447,10 @@ export const extractResponseFields = (data: unknown): HealthCheckResponseSample[
       path !== "" &&
       (typeof node === "string" || typeof node === "number" || typeof node === "boolean")
     ) {
-      out.push({ path, value: render(String(node)) });
+      out.push({
+        path,
+        value: namesASecret(path) ? REDACTED_SAMPLE_VALUE : render(String(node)),
+      });
     }
   };
 

@@ -978,7 +978,17 @@ export const checkHealthOpenApi = (input: {
     // pick an identity field, and error bodies (upstream internals, auth error
     // envelopes) have no business in the preview. Non-healthy runs carry the
     // classified `detail` instead.
-    const responseSample = status === "healthy" ? extractResponseFields(probe.result.data) : [];
+    // Same scrub the `detail` branch below uses, for the same reason: a body
+    // can echo back the key it was authenticated with. `extractResponseFields`
+    // already redacts leaves whose KEY names a credential; this covers the
+    // other direction, a credential value under an innocent-looking key.
+    const responseSample =
+      status === "healthy"
+        ? extractResponseFields(probe.result.data).map((field) => ({
+            ...field,
+            value: scrubSecrets(field.value),
+          }))
+        : [];
     return {
       status,
       httpStatus: probe.result.status,
