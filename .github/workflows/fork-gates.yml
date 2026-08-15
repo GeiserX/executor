@@ -1,0 +1,61 @@
+# FORK-ONLY. This file must never reach an upstream pull request.
+#
+# Upstream's ci.yml runs on `blacksmith-4vcpu-ubuntu-2404`, runners provisioned for the upstream org.
+# On this fork nothing picks those jobs up: they sit `queued` with no runner, forever — no cost, and
+# no signal either. That is why the sixteen PRs have never had a check.
+#
+# This runs the repo's OWN gates on `ubuntu-latest` instead. GitHub-hosted standard runners are free
+# for public repositories with no minute cap, and this repository is public, so this costs nothing.
+# Kept deliberately small for the same reason: the gates that catch real defects, and none of the
+# e2e/deploy/docker jobs, which need secrets this fork does not have and would only fail slowly.
+name: Fork gates
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: fork-gates-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    name: Lint, format, typecheck, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      # Each gate runs even if an earlier one failed, so one run reports everything
+      # rather than hiding the second failure behind the first.
+      - name: Lint
+        id: lint
+        if: ${{ !cancelled() }}
+        run: bunx --bun oxlint -c .oxlintrc.jsonc . --deny-warnings
+
+      - name: Format
+        id: fmt
+        if: ${{ !cancelled() }}
+        run: bunx --bun oxfmt --check .
+
+      - name: Typecheck (core/sdk)
+        id: tc
+        if: ${{ !cancelled() }}
+        working-directory: packages/core/sdk
+        run: bunx --bun tsgo --noEmit
+
+      - name: Test (core/sdk)
+        id: test
+        if: ${{ !cancelled() }}
+        working-directory: packages/core/sdk
+        run: bun run test
