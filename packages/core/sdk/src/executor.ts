@@ -1,4 +1,4 @@
-import { Effect, Inspectable, Layer, Option, Predicate, Schema } from "effect";
+import { Duration, Effect, Inspectable, Layer, Option, Predicate, Schema } from "effect";
 import { FetchHttpClient, type HttpClient } from "effect/unstable/http";
 import { fumadb } from "@executor-js/fumadb";
 import { memoryAdapter } from "@executor-js/fumadb/adapters/memory";
@@ -1672,6 +1672,87 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
       static: true,
     });
 
+    /** How long a credential provider gets to answer one call.
+     *
+     *  A provider is frequently REMOTE — an HTTP secret store, or under sealed custody
+     *  a vault that may live in another enclave — so "stopped answering" is one of its
+     *  ordinary failure modes, not an exotic one. Without a bound, a vault that goes
+     *  away does not fail a tool invocation, it hangs it, and nothing in the resulting
+     *  silence names the provider.
+     *
+     *  Generous on purpose: this is a backstop against a dead dependency, not a latency
+     *  budget. A store legitimately slower than this is better served by the operator
+     *  hearing about it than by the request waiting indefinitely.
+     *
+     *  Executor already bounds its other remote calls this way — OAuth discovery, and
+     *  the MCP plugin's probes. Credential resolution was the one that did not. */
+    const CREDENTIAL_PROVIDER_TIMEOUT_MS = 30_000;
+
+    /** Bound one provider call, failing with an error that names the provider and the
+     *  operation — so the diagnostic points at the store rather than at whatever the
+     *  caller happened to be doing. */
+    const boundedCall = <A>(
+      effect: Effect.Effect<A, StorageFailure>,
+      key: string,
+      operation: string,
+    ): Effect.Effect<A, StorageFailure> =>
+      effect.pipe(
+        Effect.timeoutOrElse({
+          duration: Duration.millis(CREDENTIAL_PROVIDER_TIMEOUT_MS),
+          orElse: () =>
+            Effect.fail(
+              new StorageError({
+                message:
+                  `Credential provider "${key}" did not answer ${operation} within ` +
+                  `${CREDENTIAL_PROVIDER_TIMEOUT_MS}ms. The store is unreachable or not responding; ` +
+                  `the credential was not resolved.`,
+                cause: undefined,
+              }),
+            ),
+        }),
+      );
+
+    /** Wrap a provider so every call it exposes is bounded.
+     *
+     *  Done once at the registration funnel rather than at each call site: every
+     *  provider passes through here on its way in, rather than every call site
+     *  remembering. The five methods `CredentialProvider` has today are named
+     *  explicitly, so a sixth added to the interface must be added here too.
+     *  Optional methods stay optional — a provider that cannot enumerate must not
+     *  appear to. */
+    const boundedProvider = (provider: CredentialProvider, key: string): CredentialProvider => {
+      // Wrapping must change neither how the provider's methods are CALLED nor what the
+      // object LOOKS like.
+      //
+      // Spreading would break the second: a spread copies only own ENUMERABLE properties, so
+      // everything on a class's prototype — its methods, and accessors like `writable` — is
+      // dropped silently. Nothing raises; the wrapper simply appears not to have the capability
+      // and the caller takes a path the provider meant to own. `Object.create` keeps the whole
+      // object reachable, including anything added to the interface later.
+      //
+      // Each bounded method is invoked ON the provider, which is the first half: a destructured
+      // binding called bare loses `this`, and a class-based provider throws TypeError on its
+      // first call. Every provider in this repo is an object literal and cannot notice either
+      // problem, but "wrap any provider" is the whole point of this funnel.
+      const bounded: Record<string, unknown> = {
+        get: (id: ProviderItemId) => boundedCall(provider.get(id), key, "get"),
+      };
+      if (provider.has) {
+        bounded.has = (id: ProviderItemId) => boundedCall(provider.has!(id), key, "has");
+      }
+      if (provider.set) {
+        bounded.set = (id: ProviderItemId, value: string) =>
+          boundedCall(provider.set!(id, value), key, "set");
+      }
+      if (provider.delete) {
+        bounded.delete = (id: ProviderItemId) => boundedCall(provider.delete!(id), key, "delete");
+      }
+      if (provider.list) {
+        bounded.list = () => boundedCall(provider.list!(), key, "list");
+      }
+      return Object.assign(Object.create(provider) as CredentialProvider, bounded);
+    };
+
     const registerCredentialProvider = (
       provider: CredentialProvider,
       sourceLabel: string,
@@ -1685,7 +1766,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
           }),
         );
       }
-      credentialProviders.set(key, provider);
+      credentialProviders.set(key, boundedProvider(provider, key));
       credentialProviderOrder.push(key);
       return Effect.void;
     };
