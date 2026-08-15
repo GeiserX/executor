@@ -26,6 +26,17 @@ export const createStdioTransport = (config: StdioTransportConfig) =>
   new StdioClientTransport({
     command: config.command,
     args: config.args ? [...config.args] : undefined,
-    env: config.env ? ({ ...process.env, ...config.env } as Record<string, string>) : undefined,
+    // Pass only what the integration declared. The SDK already merges this
+    // over `getDefaultEnvironment()`, a sudo-style safe-list (HOME, LOGNAME,
+    // PATH, SHELL, TERM, USER) that deliberately excludes everything else and
+    // skips function-shaped values as a security risk.
+    //
+    // Spreading `process.env` here did not add to that safe-list, it defeated
+    // it: the child received every variable this process holds, which for a
+    // server that spawns one includes `EXECUTOR_SECRET_KEY` (the key that
+    // decrypts the secret store), `EXECUTOR_AUTH_TOKEN`, `DATABASE_URL` and
+    // whatever else the operator exported. A stdio server needing one of
+    // those declares it in the integration's `env` like any other value.
+    env: config.env,
     cwd: config.cwd,
   });
