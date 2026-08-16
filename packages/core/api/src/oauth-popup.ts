@@ -124,8 +124,12 @@ try{localStorage.setItem(${serializedChannel},JSON.stringify(p))}catch(e){}
 // listener the result: a 'storage' event captures newValue at dispatch, so an
 // opener that has been notified already holds it. Leaving it would park that
 // data in the user's browser profile indefinitely whenever nobody is listening,
-// which is every abandoned or opener-less flow.
+// which is every abandoned or opener-less flow. pagehide backs the timers up:
+// the failure page never auto-closes (the user must be able to read the error),
+// and closing it kills any pending timer — without pagehide the entry would
+// outlive the document after all.
 const clear=()=>{try{localStorage.removeItem(${serializedChannel})}catch(e){}};
+window.addEventListener("pagehide",clear);
 if(p.ok)setTimeout(()=>{clear();window.close()},400);else setTimeout(clear,5000);})();
 </script>
 </body></html>`;

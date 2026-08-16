@@ -158,12 +158,16 @@ describe("popupDocument", () => {
     expect(script).toBeDefined();
     const store = new Map<string, string>();
     const timers: { readonly fn: () => void; readonly ms: number }[] = [];
+    const pagehideListeners: (() => void)[] = [];
     let closed = false;
     const win = {
       opener: null,
       location: { origin: "https://app.example" },
       close: () => {
         closed = true;
+      },
+      addEventListener: (type: string, listener: () => void) => {
+        if (type === "pagehide") pagehideListeners.push(listener);
       },
     };
     const fn = new Function(
@@ -190,6 +194,11 @@ describe("popupDocument", () => {
       isClosed: () => closed,
       runTimers: () => {
         for (const t of [...timers]) t.fn();
+      },
+      // Simulates the document dying (user closes the window): pagehide fires,
+      // pending timers never do.
+      firePagehide: () => {
+        for (const listener of [...pagehideListeners]) listener();
       },
     };
   };
@@ -221,6 +230,23 @@ describe("popupDocument", () => {
     expect(run.store.has("chan-2")).toBe(false);
     // A failed flow keeps the window up so the user can read the error.
     expect(run.isClosed()).toBe(false);
+  });
+
+  it("clears the stored result when the user closes the failure window before the timer", () => {
+    const html = popupDocument(
+      { type: OAUTH_POPUP_MESSAGE_TYPE, ok: false, sessionId: null, error: "nope" },
+      "chan-3",
+    );
+    const run = runPopupScript(html);
+    expect(run.store.get("chan-3")).toContain("nope");
+
+    // The failure page never auto-closes; the user reads the error and closes
+    // the window before the 5s timer fires. The document dies — pending timers
+    // never run — so pagehide is the only thing standing between the payload
+    // and living in the browser profile forever.
+    run.firePagehide();
+
+    expect(run.store.has("chan-3")).toBe(false);
   });
 
   it("posts to window.opener AND falls back to BroadcastChannel with the given channel name", () => {
