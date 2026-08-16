@@ -2,7 +2,7 @@
 "executor": patch
 ---
 
-**Idle MCP connections age out even when their identity is never dialled again**
+**Idle MCP connections age out on the pool's next acquire, even when their identity is never dialled again**
 
 The pool's five-minute idle window was only consulted against the entry being requested, so an identity that was never asked for a second time was never examined a second time. Its session stayed open and authenticated for as long as the pool lived, holding the bearer token or API key it was dialled with. The advertised bound applied only to connections that happened to be reused.
 
