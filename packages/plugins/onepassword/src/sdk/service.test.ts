@@ -144,11 +144,21 @@ describe("makeOnePasswordService", () => {
   // Both halves are pinned on purpose: clearing it is only correct if it is
   // still SET while the call runs. A change that cleared it too early would
   // pass a "no longer parked" assertion and silently break authentication.
+  //
+  // The "still set" half has to be observed from INSIDE the spawn: `op-js`
+  // builds the child's env from the global at spawn time, and the mock's call
+  // ledger cannot see the ordering between the token set and the spawn — a
+  // clear hoisted before `fn()` leaves [token, "", ""], which keeps both
+  // after-the-fact assertions green.
   // -------------------------------------------------------------------------
 
   it.effect("clears the service-account token from the op-js global after a CLI call", () =>
     Effect.gen(function* () {
-      opMocks.readParse.mockReturnValue("resolved-secret");
+      let tokenAtSpawn: unknown;
+      opMocks.readParse.mockImplementation(() => {
+        tokenAtSpawn = opMocks.setServiceAccount.mock.lastCall?.[0];
+        return "resolved-secret";
+      });
 
       const service = yield* makeOnePasswordService(
         { kind: "service-account", token: "ops_test_token" },
@@ -157,8 +167,8 @@ describe("makeOnePasswordService", () => {
       const secret = yield* service.resolveSecret("op://vault/item/field");
 
       expect(secret).toBe("resolved-secret");
-      // Still handed to the CLI for the call that needed it...
-      expect(opMocks.setServiceAccount).toHaveBeenCalledWith("ops_test_token");
+      // Still set while the spawn ran — clearing any earlier would break auth...
+      expect(tokenAtSpawn).toBe("ops_test_token");
       // ...and gone by the time the call is over.
       expect(opMocks.setServiceAccount).toHaveBeenLastCalledWith("");
     }),
@@ -168,7 +178,9 @@ describe("makeOnePasswordService", () => {
     Effect.gen(function* () {
       // The failure path is the one that matters most: an error unwinding past a
       // manual "clear it afterwards" line is exactly how a token gets stranded.
+      let tokenAtSpawn: unknown;
       opMocks.readParse.mockImplementation(() => {
+        tokenAtSpawn = opMocks.setServiceAccount.mock.lastCall?.[0];
         // oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: simulates the untyped op-js CLI wrapper throwing
         throw new Error("spawn op ENOENT");
       });
@@ -191,7 +203,7 @@ describe("makeOnePasswordService", () => {
         Effect.flip,
       );
 
-      expect(opMocks.setServiceAccount).toHaveBeenCalledWith("ops_test_token");
+      expect(tokenAtSpawn).toBe("ops_test_token");
       expect(opMocks.setServiceAccount).toHaveBeenLastCalledWith("");
     }),
   );
