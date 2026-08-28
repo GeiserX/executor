@@ -110,4 +110,29 @@ describe("GraphQL introspection credential logging", () => {
       expect(seen[0]).toContain(`token=${SECRET}`);
     }),
   );
+
+  it.effect("fails a malformed endpoint instead of dialing it without the query params", () =>
+    Effect.gen(function* () {
+      // Only a parseable endpoint can carry the query in `urlParams`. An
+      // unparseable one must fail rather than quietly dial without the
+      // credential it was told to send.
+      const logged: Array<string> = [];
+      const seen: Array<string> = [];
+
+      const error = yield* introspect("not a url", undefined, { token: SECRET }).pipe(
+        Effect.flip,
+        Effect.provide(clientLayer(seen)),
+        Effect.provide(Logger.layer([capturingLogger(logged)])),
+      );
+
+      expect(error._tag).toBe("GraphqlIntrospectionError");
+      expect(error.reason).toBe("invalid-endpoint");
+
+      // Nothing was sent: no request at all, rather than one missing the token.
+      expect(seen).toHaveLength(0);
+      // And the rejection itself does not echo the credential.
+      expect(error.message).not.toContain(SECRET);
+      expect(logged.join("\n")).not.toContain(SECRET);
+    }),
+  );
 });

@@ -9,3 +9,5 @@
 The request is now built from a URL **object**, which moves the query into `request.urlParams` and clears it from `request.url`. The secret is therefore absent from the error message, and from anything else that renders the request URL. Nothing changes on the wire: the client recombines url and urlParams when it executes the request.
 
 The endpoint's own query string is handled the same way, not just the separately-supplied query parameters, since a configured endpoint can carry a credential too.
+
+An endpoint that is not a valid URL cannot be split this way, so introspection now rejects it with an `invalid-endpoint` failure instead of sending a request without the query parameters it was asked to include.

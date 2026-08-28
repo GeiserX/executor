@@ -250,15 +250,24 @@ export const introspect = Effect.fn("GraphQL.introspect")(function* (
   // executes the request. Handling the endpoint's OWN query the same way (not
   // just the `queryParams` argument) matters — a configured endpoint can carry
   // a credential in its query string too.
-  const requestUrl: string | URL = URL.canParse(endpoint)
-    ? (() => {
-        const url = new URL(endpoint);
-        for (const [name, value] of Object.entries(queryParams ?? {})) {
-          url.searchParams.set(name, value);
-        }
-        return url;
-      })()
-    : endpoint;
+  //
+  // An endpoint that does not parse has no such split available: it would go
+  // verbatim into `request.url` — query, credential and all — and `queryParams`
+  // could not be applied to it at all. Reject it instead of dialing a request
+  // that silently omits the credential the caller asked us to send. The
+  // endpoint is deliberately left out of the message, since it may be carrying
+  // the secret.
+  if (!URL.canParse(endpoint)) {
+    return yield* new GraphqlIntrospectionError({
+      message: "GraphQL endpoint is not a valid URL",
+      reason: "invalid-endpoint",
+    });
+  }
+
+  const requestUrl = new URL(endpoint);
+  for (const [name, value] of Object.entries(queryParams ?? {})) {
+    requestUrl.searchParams.set(name, value);
+  }
 
   let request = HttpClientRequest.post(requestUrl).pipe(
     HttpClientRequest.setHeader("Content-Type", "application/json"),
