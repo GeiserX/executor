@@ -246,10 +246,20 @@ export const introspect = Effect.fn("GraphQL.introspect")(function* (
   //
   // Given a URL object, `setUrl` moves the query into `request.urlParams` and
   // clears it from `request.url`, so the same failure logs the bare endpoint.
-  // Nothing is lost on the wire: the client recombines url + urlParams when it
-  // executes the request. Handling the endpoint's OWN query the same way (not
-  // just the `queryParams` argument) matters — a configured endpoint can carry
-  // a credential in its query string too.
+  // The query still reaches the upstream: the client recombines url + urlParams
+  // when it executes the request. Handling the endpoint's OWN query the same
+  // way (not just the `queryParams` argument) matters — a configured endpoint
+  // can carry a credential in its query string too.
+  //
+  // The split is NOT byte-transparent, and deliberately so. Recombination
+  // appends each pair through `URLSearchParams`, whose form-urlencoded
+  // serializer writes a space as `+` rather than `%20`, percent-encodes `~` and
+  // `!'()`, and gives a valueless `?flag` a trailing `=`. Key order, duplicate
+  // keys and already-encoded reserved characters survive unchanged. No request
+  // shape avoids this: the raw query bytes only survive inside `request.url`,
+  // which is the one field every error message renders, so byte-transparency
+  // and keeping the credential out of the log cannot both hold. Log safety
+  // wins. `introspect-request-url.test.ts` pins the exact resulting URLs.
   //
   // An endpoint that does not parse has no such split available: it would go
   // verbatim into `request.url` — query, credential and all — and `queryParams`
@@ -265,6 +275,19 @@ export const introspect = Effect.fn("GraphQL.introspect")(function* (
   }
 
   const requestUrl = new URL(endpoint);
+
+  // Userinfo (`https://user:pass@host/…`) is a credential placement with no
+  // split of its own: `URL` keeps it in the origin, so it stays in
+  // `request.url` and renders into every `HttpClientError` message exactly the
+  // way a query-carried secret used to. Reject it rather than log it, with the
+  // same constant message that echoes no part of the endpoint.
+  if (requestUrl.username !== "" || requestUrl.password !== "") {
+    return yield* new GraphqlIntrospectionError({
+      message: "GraphQL endpoint must not embed credentials in the URL",
+      reason: "invalid-endpoint",
+    });
+  }
+
   for (const [name, value] of Object.entries(queryParams ?? {})) {
     requestUrl.searchParams.set(name, value);
   }
