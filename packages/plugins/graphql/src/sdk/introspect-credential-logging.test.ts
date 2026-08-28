@@ -20,6 +20,7 @@ import { describe, expect, it } from "@effect/vitest";
 import { Cause, Effect, Layer, Logger } from "effect";
 import { FetchHttpClient } from "effect/unstable/http";
 
+import { GraphqlIntrospectionError } from "./errors";
 import { introspect } from "./introspect";
 
 const SECRET = "tok_live_introspection_MUST_NOT_LOG";
@@ -125,13 +126,13 @@ describe("GraphQL introspection credential logging", () => {
         Effect.provide(Logger.layer([capturingLogger(logged)])),
       );
 
-      expect(error._tag).toBe("GraphqlIntrospectionError");
+      expect(error).toBeInstanceOf(GraphqlIntrospectionError);
       expect(error.reason).toBe("invalid-endpoint");
 
       // Nothing was sent: no request at all, rather than one missing the token.
       expect(seen).toHaveLength(0);
-      // And the rejection itself does not echo the credential.
-      expect(error.message).not.toContain(SECRET);
+      // And the rejection itself does not echo the credential anywhere.
+      expect(Cause.pretty(Cause.fail(error))).not.toContain(SECRET);
       expect(logged.join("\n")).not.toContain(SECRET);
     }),
   );
