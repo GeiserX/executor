@@ -7,7 +7,7 @@
 A token-endpoint failure renders a preview of the upstream body into its
 message, and that message is persisted onto connection health, returned to the
 caller, and carried into telemetry. On a malformed HTTP 200 the body being
-previewed is a *successful* token response, so an access token and a refresh
+previewed is a _successful_ token response, so an access token and a refresh
 token could be rendered into it.
 
 The preview is now built from an allowlist of fields that are safe to show

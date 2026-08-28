@@ -841,7 +841,7 @@ describe("exchangeAuthorizationCode", () => {
           }),
         ({ tokenUrl }) =>
           Effect.gen(function* () {
-            const error = yield* Effect.flip(
+            const failure = yield* Effect.flip(
               exchangeAuthorizationCode({
                 tokenUrl,
                 clientId: "cid",
@@ -850,17 +850,17 @@ describe("exchangeAuthorizationCode", () => {
                 code: "c",
               }),
             );
-            expect(error).toBeInstanceOf(OAuth2Error);
-            expect(error.message).not.toContain("AT-CANARY-must-not-escape");
-            expect(error.message).not.toContain("RT-CANARY-must-not-escape");
+            expect(failure).toBeInstanceOf(OAuth2Error);
+            expect(failure.message).not.toContain("AT-CANARY-must-not-escape");
+            expect(failure.message).not.toContain("RT-CANARY-must-not-escape");
             // Redacted, not dropped: the operator still sees which fields the
             // server sent, which is the whole point of previewing at all.
-            expect(error.message).toContain("access_token");
-            expect(error.message).toContain("[redacted]");
+            expect(failure.message).toContain("access_token");
+            expect(failure.message).toContain("[redacted]");
             // ...and the dead-grant verdict survives the redaction untouched.
-            expect(error.status).toBe(200);
-            expect(isUnusableSuccessTokenResponse(error)).toBe(true);
-            expect(isPermanentTokenRejection(error)).toBe(true);
+            expect(failure.status).toBe(200);
+            expect(isUnusableSuccessTokenResponse(failure)).toBe(true);
+            expect(isPermanentTokenRejection(failure)).toBe(true);
           }),
       ),
     );
