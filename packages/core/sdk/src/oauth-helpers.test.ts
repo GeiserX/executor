@@ -6,7 +6,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, Exit, Ref } from "effect";
+import { Cause, Effect, Exit, Ref } from "effect";
 import { HttpServerResponse } from "effect/unstable/http";
 
 import {
@@ -820,6 +820,12 @@ describe("exchangeAuthorizationCode", () => {
   // connection health, returned to the caller, and carried into telemetry. The
   // allowlist is what keeps the tokens out of it.
   //
+  // Asserting on the message alone would not be enough. What a log line, a
+  // Sentry event, or a crashing host actually prints is the WHOLE failure —
+  // `Cause.pretty`, or a `JSON.stringify` of the cause — so a retained
+  // rejection would carry the raw tokens straight past a clean message. These
+  // assert the full rendering for that reason.
+  //
   // The classifier has to keep working on exactly these inputs: a 2xx that
   // carried no usable token is a DEAD GRANT, and mis-reading it as transient is
   // what makes a connection retry forever instead of asking for re-auth. It
@@ -830,7 +836,7 @@ describe("exchangeAuthorizationCode", () => {
     ["scope is an array", { scope: ["read"] }],
     ["token_type is not a string", { token_type: 7 }],
   ] as const) {
-    it.effect(`keeps tokens out of the failure message when ${label}`, () =>
+    it.effect(`keeps tokens out of the whole rendered failure when ${label}`, () =>
       withTokenEndpoint(
         () =>
           json(200, {
@@ -841,7 +847,7 @@ describe("exchangeAuthorizationCode", () => {
           }),
         ({ tokenUrl }) =>
           Effect.gen(function* () {
-            const failure = yield* Effect.flip(
+            const exit = yield* Effect.exit(
               exchangeAuthorizationCode({
                 tokenUrl,
                 clientId: "cid",
@@ -850,14 +856,21 @@ describe("exchangeAuthorizationCode", () => {
                 code: "c",
               }),
             );
-            expect(failure).toBeInstanceOf(OAuth2Error);
-            expect(failure.message).not.toContain("AT-CANARY-must-not-escape");
-            expect(failure.message).not.toContain("RT-CANARY-must-not-escape");
+            expect(Exit.isFailure(exit)).toBe(true);
+            if (!Exit.isFailure(exit)) return;
+            const pretty = Cause.pretty(exit.cause);
+            const serialized = JSON.stringify(exit.cause);
+            for (const rendered of [pretty, serialized]) {
+              expect(rendered).not.toContain("AT-CANARY-must-not-escape");
+              expect(rendered).not.toContain("RT-CANARY-must-not-escape");
+            }
             // Redacted, not dropped: the operator still sees which fields the
             // server sent, which is the whole point of previewing at all.
-            expect(failure.message).toContain("access_token");
-            expect(failure.message).toContain("[redacted]");
+            expect(pretty).toContain("access_token");
+            expect(pretty).toContain("[redacted]");
             // ...and the dead-grant verdict survives the redaction untouched.
+            const failure = Cause.squash(exit.cause) as OAuth2Error;
+            expect(failure).toBeInstanceOf(OAuth2Error);
             expect(failure.status).toBe(200);
             expect(isUnusableSuccessTokenResponse(failure)).toBe(true);
             expect(isPermanentTokenRejection(failure)).toBe(true);

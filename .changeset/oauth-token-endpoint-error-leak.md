@@ -23,5 +23,13 @@ Form-encoded bodies take the same allowlist, the walk over a body is
 depth-bounded, and the failure summary records the token endpoint's hostname
 rather than its full URL, which can carry identifiers in its path.
 
+On that same malformed-200 path the failure no longer keeps the underlying
+rejection as its `cause`. That rejection carries the parsed token response, so
+keeping it put the raw tokens back into anything that renders the whole failure
+rather than only its message. Everything the path needs from the body — the
+status, the error code, the redacted preview — is read before the failure is
+built. A transport failure still keeps its cause, which is what tells a DNS miss
+apart from a refused connection.
+
 No public API changes. The dead-grant classification added for HTTP 200 refresh
 refusals is unaffected: it reads the HTTP status, not the rendered preview.

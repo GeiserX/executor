@@ -43,13 +43,20 @@ export class OAuth2Error extends Data.TaggedError("OAuth2Error")<{
    */
   readonly status?: number;
   /**
-   * The library rejection this failure was built from. INTERNAL diagnostic
-   * input, not display material: `parsedBodyFromOAuthErrorCause` reads the body
-   * oauth4webapi already parsed off a malformed HTTP 200 through it, which is
-   * how a 2xx that carries a refusal is classified as a dead grant at all, and
-   * the transport rejection chain (DNS miss vs refused connection) survives
-   * here too. Anything RENDERED from it goes through `redactedBodyPreview`
-   * first, whose allowlist is what keeps token material out of the message.
+   * The library rejection this failure was built from, kept so a transport
+   * failure stays diagnosable — the chain is what separates a DNS miss from a
+   * refused connection, and neither is expressible in `status` or `error`.
+   *
+   * It is DROPPED on the malformed-HTTP-200 path. There the rejection carries
+   * the token response oauth4webapi already parsed, so retaining it would hand
+   * the raw access and refresh tokens to anything that renders the whole
+   * failure (`Cause.pretty`, `JSON.stringify`) — around the allowlist that
+   * keeps them out of `message`. Everything that path needs from the body is
+   * already lifted onto `status`, `error`, and the redacted preview, and
+   * nothing downstream reads this field, so nothing is lost by omitting it.
+   *
+   * Treat whatever is here as INTERNAL diagnostic input, never display
+   * material: anything RENDERED goes through `redactedBodyPreview` first.
    */
   readonly cause?: unknown;
 }> {}
@@ -688,11 +695,18 @@ const toOAuth2ErrorWithHttpSummary = (
     const preview = redactedBodyPreview(safeStringify(parsedBody));
     const summary = [`HTTP ${PARSED_BODY_CAUSE_STATUS}`, ...(preview ? [`body: ${preview}`] : [])];
     return Effect.succeed(
+      // NO `cause` here, deliberately. The rejection this branch was built from
+      // carries the whole parsed token response — access and refresh tokens in
+      // the clear — and every read of that body has ALREADY happened above:
+      // `status`, `error`, and the redacted preview are all lifted out here.
+      // Keeping the rejection would only put the raw tokens back into whatever
+      // renders the full failure (`Cause.pretty`, `JSON.stringify`), which is
+      // exactly the leak the message allowlist exists to prevent. The other
+      // branches keep their cause because theirs is diagnostic, not a body.
       new OAuth2Error({
         message: `${options?.fallbackMessage ?? base.message} (${summary.join("; ")})`,
         error: base.error ?? envelope?.error,
         status: PARSED_BODY_CAUSE_STATUS,
-        cause,
       }),
     );
   }
