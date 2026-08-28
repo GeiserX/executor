@@ -1637,15 +1637,24 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
       // authorization is STARTED rather than by how often it is abandoned.
       //
       // Owner-scoped by the table's own delete policy, so a caller only ever
-      // sweeps rows it can already see. Best-effort: failing to tidy up must not
-      // stop someone connecting an account.
+      // sweeps rows it can already see.
+      //
+      // Best-effort, but NOT silent. Failing to tidy up must not stop someone
+      // connecting an account, so the failure is caught — and logged, because
+      // this is the only caller that ever runs the sweep, so a sweep that keeps
+      // failing quietly reinstates the very leak it exists to prevent. Warning
+      // rather than error: the authorization itself is unharmed.
       yield* deps.fuma
         .use("oauth_session.sweepExpired", (db) =>
           looseDb(db).deleteMany("oauth_session", {
             where: (b: any) => b("expires_at", "<", Date.now()),
           }),
         )
-        .pipe(Effect.ignore);
+        .pipe(
+          Effect.catch((failure) =>
+            Effect.logWarning("executor oauth expired-session sweep failed", { cause: failure }),
+          ),
+        );
 
       yield* deps.fuma.use("oauth_session.create", (db) =>
         looseDb(db).create("oauth_session", {
