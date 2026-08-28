@@ -14,7 +14,7 @@
 // the import and therefore never touch `node:child_process`.
 // ---------------------------------------------------------------------------
 
-import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
+import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/client/stdio";
 
 export type StdioTransportConfig = {
   readonly command: string;
@@ -61,6 +61,57 @@ const inheritedEnv = (): Record<string, string> =>
     }),
   );
 
+/**
+ * Combine the inherited allowlist with the source config's declared `env`,
+ * using the key identity the target platform actually has.
+ *
+ * On Windows an environment key is case-insensitive: `Path` and `PATH` name one
+ * variable. A JavaScript spread is case-sensitive on every platform, so a plain
+ * merge can emit two spellings of the same variable — inherited `HTTP_PROXY`
+ * beside a declared `http_proxy`, or the SDK's `PATH` beside a declared `Path`.
+ * Both then reach the child's environment block, and the child reads whichever
+ * Windows resolves first rather than the one the config declared. Precedence
+ * that reads correctly in the source is silently lost at the boundary.
+ *
+ * So on `win32` this merges by case-insensitive key identity. The declared env
+ * still wins, and the losing spelling is dropped instead of travelling beside
+ * the winner. A key that collides with one the SDK sets is emitted with the
+ * SDK's spelling, because the SDK spreads its own safe-list underneath this
+ * result: matching its spelling replaces that entry, while a different spelling
+ * would only add an alias next to it.
+ *
+ * On every other platform the keys are genuinely case-sensitive, and this is a
+ * plain merge.
+ */
+export const mergeStdioEnv = ({
+  platform,
+  inherited,
+  declared,
+  sdkKeys = [],
+}: {
+  readonly platform: NodeJS.Platform;
+  readonly inherited: Record<string, string>;
+  readonly declared?: Record<string, string>;
+  /** Keys the SDK's own safe-list will place underneath this result. */
+  readonly sdkKeys?: ReadonlyArray<string>;
+}): Record<string, string> => {
+  if (platform !== "win32") return { ...inherited, ...declared };
+
+  const sdkSpelling = new Map(sdkKeys.map((key) => [key.toLowerCase(), key] as const));
+  // Keyed by the case-insensitive identity; insertion order follows first
+  // sight of a variable, and a later source overwrites the entry in place.
+  const merged = new Map<string, readonly [string, string]>();
+
+  for (const source of [inherited, declared]) {
+    for (const [key, value] of Object.entries(source ?? {})) {
+      const identity = key.toLowerCase();
+      merged.set(identity, [sdkSpelling.get(identity) ?? key, value]);
+    }
+  }
+
+  return Object.fromEntries(merged.values());
+};
+
 export const createStdioTransport = (config: StdioTransportConfig) =>
   new StdioClientTransport({
     command: config.command,
@@ -76,6 +127,11 @@ export const createStdioTransport = (config: StdioTransportConfig) =>
     // server that spawns one includes `EXECUTOR_SECRET_KEY` (the key that
     // decrypts the secret store), `EXECUTOR_AUTH_TOKEN`, `DATABASE_URL` and
     // whatever else the operator exported.
-    env: { ...inheritedEnv(), ...config.env },
+    env: mergeStdioEnv({
+      platform: process.platform,
+      inherited: inheritedEnv(),
+      declared: config.env,
+      sdkKeys: Object.keys(getDefaultEnvironment()),
+    }),
     cwd: config.cwd,
   });
