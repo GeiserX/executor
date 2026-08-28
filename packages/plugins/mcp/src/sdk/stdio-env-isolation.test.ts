@@ -9,6 +9,10 @@
 // the same code path either way, and speaking the protocol would add nothing
 // to what is being measured. It never completes a handshake, so the transport
 // is closed once the file has been written.
+//
+// The child reports only the keys a test names. Dumping the whole environment
+// would write the runner's own secrets to a temp file to answer a question
+// about a handful of variables.
 
 import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -24,15 +28,31 @@ const HOST_ONLY_SECRET = "EXECUTOR_TEST_HOST_ONLY_SECRET";
 const HOST_ONLY_VALUE = "host-secret-that-must-not-reach-a-child";
 
 const dirs: string[] = [];
+/** Host variables a test set, restored rather than deleted: the machine
+ *  running this may legitimately be behind a proxy. */
+const restore = new Map<string, string | undefined>();
+
+const setHostEnv = (key: string, value: string): void => {
+  if (!restore.has(key)) restore.set(key, process.env[key]);
+  process.env[key] = value;
+};
 
 afterEach(() => {
-  delete process.env[HOST_ONLY_SECRET];
+  for (const [key, value] of restore) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  restore.clear();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-/** Spawn a child through the transport and return the environment it saw. */
+/**
+ * Spawn a child through the transport and return which of `probe` it saw.
+ * Keys the child did not receive are absent from the result.
+ */
 const envSeenByChild = async (
   declared: Record<string, string> | undefined,
+  probe: ReadonlyArray<string>,
 ): Promise<Record<string, string>> => {
   const dir = mkdtempSync(join(tmpdir(), "executor-stdio-env-"));
   dirs.push(dir);
@@ -42,8 +62,12 @@ const envSeenByChild = async (
     command: process.execPath,
     args: [
       "-e",
-      "require('node:fs').writeFileSync(process.argv[1], JSON.stringify(process.env))",
+      "const [out, ...keys] = process.argv.slice(1);" +
+        "require('node:fs').writeFileSync(out, JSON.stringify(Object.fromEntries(" +
+        "keys.flatMap((k) => (process.env[k] === undefined ? [] : [[k, process.env[k]]]))" +
+        ")))",
       out,
+      ...probe,
     ],
     env: declared,
   });
@@ -63,9 +87,12 @@ describe("environment handed to a stdio MCP subprocess", () => {
   it("does not leak a host secret to a server that declares its own env", async () => {
     // The declared-env branch is the one that matters: it is the branch a
     // credential-bearing integration takes, and it was the leaking one.
-    process.env[HOST_ONLY_SECRET] = HOST_ONLY_VALUE;
+    setHostEnv(HOST_ONLY_SECRET, HOST_ONLY_VALUE);
 
-    const childEnv = await envSeenByChild({ DECLARED_TOKEN: "declared-value" });
+    const childEnv = await envSeenByChild({ DECLARED_TOKEN: "declared-value" }, [
+      HOST_ONLY_SECRET,
+      "DECLARED_TOKEN",
+    ]);
 
     expect(childEnv[HOST_ONLY_SECRET]).toBeUndefined();
     // ...and the thing the integration actually asked for still arrives.
@@ -73,9 +100,9 @@ describe("environment handed to a stdio MCP subprocess", () => {
   });
 
   it("does not leak a host secret to a server that declares no env", async () => {
-    process.env[HOST_ONLY_SECRET] = HOST_ONLY_VALUE;
+    setHostEnv(HOST_ONLY_SECRET, HOST_ONLY_VALUE);
 
-    const childEnv = await envSeenByChild(undefined);
+    const childEnv = await envSeenByChild(undefined, [HOST_ONLY_SECRET]);
 
     expect(childEnv[HOST_ONLY_SECRET]).toBeUndefined();
   });
@@ -83,18 +110,57 @@ describe("environment handed to a stdio MCP subprocess", () => {
   it("still provides the SDK's safe-list, so servers keep working", async () => {
     // The fix must not strand servers that legitimately need PATH to find
     // their own interpreter. The SDK's list is what supplies it.
-    const childEnv = await envSeenByChild({ DECLARED_TOKEN: "declared-value" });
+    const childEnv = await envSeenByChild({ DECLARED_TOKEN: "declared-value" }, ["PATH", "HOME"]);
 
     expect(childEnv.PATH).toBeDefined();
     expect(childEnv.HOME).toBeDefined();
   });
 
+  it("passes the host's proxy and CA configuration through, but nothing beside it", async () => {
+    // A server behind a corporate proxy or an intercepting CA cannot reach
+    // anything without these, and no source config declares them. Inheriting
+    // this short list is the whole difference between the fix landing and the
+    // fix breaking every install on such a network.
+    setHostEnv("HTTPS_PROXY", "http://proxy.invalid:3128");
+    setHostEnv("no_proxy", "localhost,127.0.0.1");
+    setHostEnv("NODE_EXTRA_CA_CERTS", "/etc/ssl/certs/corporate.pem");
+    setHostEnv(HOST_ONLY_SECRET, HOST_ONLY_VALUE);
+
+    const childEnv = await envSeenByChild(undefined, [
+      "HTTPS_PROXY",
+      "no_proxy",
+      "NODE_EXTRA_CA_CERTS",
+      HOST_ONLY_SECRET,
+    ]);
+
+    expect(childEnv.HTTPS_PROXY).toBe("http://proxy.invalid:3128");
+    expect(childEnv.no_proxy).toBe("localhost,127.0.0.1");
+    expect(childEnv.NODE_EXTRA_CA_CERTS).toBe("/etc/ssl/certs/corporate.pem");
+    // The allowlist is an allowlist: a secret sitting beside those in the same
+    // environment still does not travel.
+    expect(childEnv[HOST_ONLY_SECRET]).toBeUndefined();
+  });
+
+  it("lets the source config override an inherited proxy value", async () => {
+    // The allowlist is merged underneath the declared env, so a source that
+    // needs its own egress route is not overruled by the host's.
+    setHostEnv("HTTPS_PROXY", "http://host-proxy.invalid:3128");
+
+    const childEnv = await envSeenByChild({ HTTPS_PROXY: "http://declared-proxy.invalid:8080" }, [
+      "HTTPS_PROXY",
+    ]);
+
+    expect(childEnv.HTTPS_PROXY).toBe("http://declared-proxy.invalid:8080");
+  });
+
   it("POSITIVE CONTROL: the child does report a variable when it is passed one", async () => {
     // Proves the measurement works. Without this, a child that failed to
     // write, or wrote an empty object, would satisfy every assertion above.
-    process.env[HOST_ONLY_SECRET] = HOST_ONLY_VALUE;
+    setHostEnv(HOST_ONLY_SECRET, HOST_ONLY_VALUE);
 
-    const childEnv = await envSeenByChild({ [HOST_ONLY_SECRET]: HOST_ONLY_VALUE });
+    const childEnv = await envSeenByChild({ [HOST_ONLY_SECRET]: HOST_ONLY_VALUE }, [
+      HOST_ONLY_SECRET,
+    ]);
 
     expect(childEnv[HOST_ONLY_SECRET]).toBe(HOST_ONLY_VALUE);
   });
