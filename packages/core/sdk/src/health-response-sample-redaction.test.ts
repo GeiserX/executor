@@ -52,6 +52,24 @@ describe("health-check response sample redaction", () => {
     expect(fields["account.billing.secret"]).toBe(REDACTED_SAMPLE_VALUE);
   });
 
+  it("redacts a bare array of secrets, where only the enclosing key names them", () => {
+    // `{"tokens": ["sk-…"]}` yields the paths `tokens.0`, `tokens.1`. Their last
+    // segment is an array index, so a check that reads the literal leaf finds
+    // "0" and lets the secret straight through into `connection.last_health`.
+    const fields = byPath({
+      tokens: ["sk-live-must-not-be-persisted", "sk-test-must-not-be-persisted"],
+      names: ["prod", "staging"],
+    });
+
+    expect(fields["tokens.0"]).toBe(REDACTED_SAMPLE_VALUE);
+    expect(fields["tokens.1"]).toBe(REDACTED_SAMPLE_VALUE);
+
+    // The index walk-back stops at the nearest NAMED segment, so an innocent
+    // collection is still shown in full.
+    expect(fields["names.0"]).toBe("prod");
+    expect(fields["names.1"]).toBe("staging");
+  });
+
   it("keeps the field visible so the preview still shows the shape", () => {
     // Dropping the row would change what the picker displays. Redacting the
     // value keeps the response shape legible without persisting the secret.

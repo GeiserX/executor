@@ -395,12 +395,24 @@ export const REDACTED_SAMPLE_VALUE = "[redacted]";
  * returns different secrets entirely, and no scrub of a known value can see
  * those.
  */
+/* The optional trailing `s` matters because of the array case below: a key that
+ * holds a COLLECTION of secrets is named in the plural (`tokens`, `api_keys`,
+ * `credentials`), and those are exactly the key-listing responses this guards.
+ * It stays inside the same letter boundary, so `author` is still not `auth`. */
 const SECRET_KEY_PATTERN =
-  /(^|[^a-z])(secret|token|password|passwd|apikey|api_key|credential|authorization|auth|session|cookie|private|signature|bearer|refresh)([^a-z]|$)/i;
+  /(^|[^a-z])(secret|token|password|passwd|apikey|api_key|credential|authorization|auth|session|cookie|private|signature|bearer|refresh)s?([^a-z]|$)/i;
 
-/** True when the last segment of a dotted path names a credential. */
+/** True when the nearest NAMED segment of a dotted path names a credential.
+ *
+ *  The walker names array elements by index, so a bare array of secrets —
+ *  `{"tokens": ["sk-live-…"]}` — produces the path `tokens.0`, whose literal
+ *  last segment is `"0"` and matches nothing. Numeric segments are skipped so
+ *  the check lands on the key that named the collection, which is the only
+ *  place the secret is described. `keys.0.token` is unaffected: its last
+ *  segment already names the leaf. */
 const namesASecret = (path: string): boolean => {
-  const leaf = path.slice(path.lastIndexOf(".") + 1);
+  const named = path.split(".").filter((segment) => !/^\d+$/.test(segment));
+  const leaf = named[named.length - 1] ?? "";
   return SECRET_KEY_PATTERN.test(leaf);
 };
 
