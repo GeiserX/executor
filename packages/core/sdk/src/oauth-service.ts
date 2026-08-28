@@ -905,6 +905,17 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
           cause: undefined,
         });
       }
+      // "Is there an app at (owner, slug) right now?" — asked twice, for two
+      // different reasons. Before the delete it says whether this call removes
+      // anything at all; after the commit it says whether the secret key still
+      // belongs to the app this call removed.
+      const findClientRow = deps.fuma.use("oauth_client.findFirst", (db) =>
+        looseDb(db).findFirst("oauth_client", {
+          where: (b: any) => b.and(b("owner", "=", owner), b("slug", "=", String(slug))),
+        }),
+      );
+
+      const removedRow = yield* findClientRow;
       yield* deps.fuma
         .use("oauth_client.delete", (db) =>
           looseDb(db).deleteMany("oauth_client", {
@@ -912,6 +923,11 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
           }),
         )
         .pipe(Effect.asVoid);
+      // Nothing matched, so this call removed nothing and owns no secret. The
+      // idempotent no-op and the cross-subject miss both land here, and both
+      // used to queue a delete of a key they never had a claim on.
+      if (!removedRow) return;
+
       // Best-effort: drop the secret from the provider so it isn't orphaned.
       //
       // Deferred to the outermost commit. This function opens no transaction of
@@ -927,9 +943,20 @@ export const makeOAuthService = (deps: OAuthServiceDeps): OAuthService => {
       const dropSecret = provider?.delete;
       if (provider && dropSecret) {
         yield* afterCommit(
-          dropSecret
-            .call(provider, ProviderItemId.make(clientSecretItemId(owner, slug)))
-            .pipe(Effect.catch(() => Effect.void)),
+          Effect.gen(function* () {
+            // Deferral alone is not enough: the secret is keyed by (owner, slug)
+            // ALONE, so the key outlives the row it belonged to. If the same
+            // slug is registered again before this hook runs, the key now holds
+            // the NEW app's secret, and deleting it recreates exactly the state
+            // the deferral exists to prevent — a client that looks configured
+            // and can never authenticate. Re-check that the app is still gone
+            // and stand down when it is not. A re-check that FAILS is caught
+            // below and also stands down, which is the deliberate direction:
+            // an orphaned secret is recoverable, a destroyed live one is not.
+            const recreated = yield* findClientRow;
+            if (recreated) return;
+            yield* dropSecret.call(provider, ProviderItemId.make(clientSecretItemId(owner, slug)));
+          }).pipe(Effect.catch(() => Effect.void)),
         );
       }
     });
