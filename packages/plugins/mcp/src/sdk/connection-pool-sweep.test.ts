@@ -14,7 +14,8 @@
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "@effect/vitest";
-import { Effect } from "effect";
+import { Duration, Effect, Fiber } from "effect";
+import { TestClock } from "effect/testing";
 // oxlint-disable-next-line executor/no-vitest-import -- boundary: system-time control comes from vitest itself
 import { afterEach, vi } from "vitest";
 
@@ -36,6 +37,17 @@ const fakeConnector = (state: { closed: boolean }): McpConnector =>
         close: async () => {
           state.closed = true;
         },
+      }) satisfies McpConnection,
+  );
+
+/** A connection whose `close()` is accepted and then never answered — the
+ *  server that goes quiet mid-teardown. */
+const hangingConnector = (): McpConnector =>
+  Effect.sync(
+    () =>
+      ({
+        client: {} as McpConnection["client"],
+        close: () => new Promise<void>(() => {}),
       }) satisfies McpConnection,
   );
 
@@ -97,6 +109,35 @@ describe("MCP connection pool idle sweep", () => {
       yield* pool.withConnection("same", counting, () => Effect.void);
 
       expect(dials).toBe(1);
+      yield* pool.close();
+    }),
+  );
+
+  it.effect("a close that never answers does not strand the acquire that swept it", () =>
+    Effect.gen(function* () {
+      // The sweep is paid for by whichever invocation happens to acquire next,
+      // so an unresponsive teardown is a live caller's latency. Only `Date` is
+      // faked here: the wait being asserted is an Effect sleep, which belongs to
+      // `it.effect`'s TestClock, and faking the platform timers underneath it
+      // would leave nothing to advance.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const pool = createMcpConnectionPool();
+      const other = { closed: false };
+
+      yield* pool.withConnection("hung", hangingConnector(), () => Effect.void);
+      vi.advanceTimersByTime(IDLE_TTL_MS + 1_000);
+
+      const fiber = yield* Effect.forkChild(
+        pool.withConnection("other", fakeConnector(other), () => Effect.void),
+      );
+
+      // Past the close timeout, but nowhere near "forever": an unbounded close
+      // would leave this fiber suspended and the join below would never return.
+      yield* TestClock.adjust(Duration.seconds(5));
+      yield* Fiber.join(fiber);
+
+      // The unrelated connection was served, not collateral damage.
+      expect(other.closed).toBe(false);
       yield* pool.close();
     }),
   );

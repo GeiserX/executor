@@ -1,4 +1,4 @@
-import { Cause, Effect, Exit, Predicate } from "effect";
+import { Cause, Duration, Effect, Exit, Predicate } from "effect";
 
 import type { McpConnection, McpConnector } from "./connection";
 import type { McpInvocationError } from "./errors";
@@ -8,6 +8,16 @@ import type { McpInvocationError } from "./errors";
 // harmless and keeps one lifecycle for both protocol eras.
 
 const IDLE_TTL_MS = 5 * 60 * 1_000;
+
+/** How long a `close()` is waited on before the connection is abandoned.
+ *
+ *  Eviction is driven by live traffic — the invocation that acquires a lease is
+ *  the one that runs the sweep — so an unbounded close is that caller's problem:
+ *  a server that accepts the close and then goes quiet would hold up a request
+ *  that has nothing to do with the connection being reclaimed. Teardown is
+ *  milliseconds' work when it works at all, so anything past this window is a
+ *  socket that is not coming back. */
+const CLOSE_TIMEOUT = Duration.seconds(2);
 
 type IdleConnection = {
   readonly connection: McpConnection;
@@ -20,7 +30,7 @@ type ConnectionLease = {
 };
 
 const closeQuietly = (connection: McpConnection): Effect.Effect<void> =>
-  Effect.tryPromise(() => connection.close()).pipe(Effect.ignore);
+  Effect.tryPromise(() => connection.close()).pipe(Effect.timeout(CLOSE_TIMEOUT), Effect.ignore);
 
 const isMcpInvocationError = (error: unknown): error is McpInvocationError =>
   Predicate.isTagged(error, "McpInvocationError");
@@ -83,7 +93,14 @@ export const createMcpConnectionPool = (): McpConnectionPool => {
    *  reused.
    *
    *  Still lazy — activity drives it, there is no timer and no background fiber.
-   *  The map holds at most one entry per identity, so scanning it is trivial. */
+   *  The map holds at most one entry per identity, so scanning it is trivial.
+   *
+   *  The entries leave the map synchronously, before any close is awaited, so a
+   *  slow teardown can never hand the same connection to a second caller. The
+   *  closes themselves run concurrently and each is bounded by `CLOSE_TIMEOUT`,
+   *  the same shape `close()` below uses: the sweep is work the acquiring
+   *  invocation pays for, and one unresponsive server must not be able to stall
+   *  it, let alone stall the connections queued behind it. */
   const sweepExpired = Effect.suspend(() => {
     const now = Date.now();
     const expired: McpConnection[] = [];
@@ -92,7 +109,7 @@ export const createMcpConnectionPool = (): McpConnectionPool => {
       idle.delete(key);
       expired.push(entry.connection);
     }
-    return Effect.forEach(expired, closeQuietly, { discard: true });
+    return Effect.forEach(expired, closeQuietly, { concurrency: "unbounded", discard: true });
   });
 
   const acquire = (key: string, connector: McpConnector, forceFresh: boolean) =>
