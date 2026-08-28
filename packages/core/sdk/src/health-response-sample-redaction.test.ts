@@ -70,6 +70,89 @@ describe("health-check response sample redaction", () => {
     expect(fields["names.1"]).toBe("staging");
   });
 
+  it("redacts camelCase credential keys, in both spellings", () => {
+    // `accessToken` has no non-letter before `Token`, so a matcher that only
+    // looks for a separator reads it as innocent. camelCase is the dominant
+    // spelling in JSON APIs, so this is not an edge case.
+    const fields = byPath({
+      accessToken: "at-must-not-be-persisted",
+      refreshToken: "rt-must-not-be-persisted",
+      clientSecret: "cs-must-not-be-persisted",
+      privateKey: "pk-must-not-be-persisted",
+      sessionId: "sid-must-not-be-persisted",
+      // Still matched as one contiguous word, which is how it has always
+      // matched: splitting on the case boundary alone would lose it.
+      apiKey: "ak-must-not-be-persisted",
+    });
+
+    for (const value of Object.values(fields)) {
+      expect(value).toBe(REDACTED_SAMPLE_VALUE);
+    }
+  });
+
+  it("does not redact camelCase keys that merely start with a matching word", () => {
+    // The other direction of the same change: exposing the case boundary must
+    // not turn ordinary fields into blanks.
+    const fields = byPath({
+      author: "alex",
+      authors: "alex, sam",
+      authorName: "Alex",
+      privacyLevel: "public",
+      tokenizer: "bpe",
+    });
+
+    expect(fields.author).toBe("alex");
+    expect(fields.authors).toBe("alex, sam");
+    expect(fields.authorName).toBe("Alex");
+    expect(fields.privacyLevel).toBe("public");
+    expect(fields.tokenizer).toBe("bpe");
+  });
+
+  it("redacts a secret under an innocent leaf inside a credential-named array", () => {
+    // The shape a key-listing endpoint actually returns. The nearest named
+    // segment is the harmless `value`; only the array's own key says what the
+    // collection holds.
+    const fields = byPath({
+      api_keys: [{ name: "prod", value: "sk-live-must-not-be-persisted" }],
+      names: ["prod", "staging"],
+      results: [{ value: "42" }],
+    });
+
+    expect(fields["api_keys.0.value"]).toBe(REDACTED_SAMPLE_VALUE);
+
+    // An array whose key names nothing is untouched, at either depth.
+    expect(fields["names.0"]).toBe("prod");
+    expect(fields["results.0.value"]).toBe("42");
+  });
+
+  it("scrubs a known credential value before truncating, not after", () => {
+    // A credential can sit under a key that names nothing — the body echoing
+    // back the key it was authenticated with. Only the caller can recognise it,
+    // by exact value. Truncating first cuts it to a 120-char prefix that the
+    // exact-value scrub no longer matches, and that prefix is what reaches
+    // `connection.last_health`.
+    const secret = `sk-live-${"x".repeat(200)}`;
+    expect(secret.length).toBeGreaterThan(120);
+
+    const sample = extractResponseFields(
+      { data: secret },
+      { scrub: (value) => value.split(secret).join(REDACTED_SAMPLE_VALUE) },
+    );
+
+    expect(sample[0]?.value).toBe(REDACTED_SAMPLE_VALUE);
+    // Not merely "shorter than the secret": assert no recognisable prefix of it
+    // survived, which is the actual leak.
+    expect(sample[0]?.value).not.toContain("sk-live-");
+  });
+
+  it("still truncates a long value the scrub does not recognise", () => {
+    // Reordering must not disable the cap for everything else.
+    const long = "y".repeat(400);
+    const sample = extractResponseFields({ blob: long }, { scrub: (value) => value });
+
+    expect(sample[0]?.value).toBe(`${"y".repeat(120)}...`);
+  });
+
   it("keeps the field visible so the preview still shows the shape", () => {
     // Dropping the row would change what the picker displays. Redacting the
     // value keeps the response shape legible without persisting the secret.

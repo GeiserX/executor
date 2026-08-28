@@ -128,6 +128,8 @@ export {
   sortHealthCheckCandidatesByIdentity,
   projectResponseFields,
   extractResponseFields,
+  pathNamesASecret,
+  REDACTED_SAMPLE_VALUE,
   identityPathTier,
   rankResponseSample,
 } from "./health-check";
