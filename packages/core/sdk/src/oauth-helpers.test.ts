@@ -6,7 +6,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "@effect/vitest";
-import { Cause, Effect, Exit, Ref } from "effect";
+import { Effect, Exit, Ref } from "effect";
 import { HttpServerResponse } from "effect/unstable/http";
 
 import {
@@ -22,6 +22,8 @@ import {
   exchangeAuthorizationCode,
   exchangeClientCredentials,
   idTokenIdentityLabel,
+  isPermanentTokenRejection,
+  isUnusableSuccessTokenResponse,
   refreshAccessToken,
   shouldRefreshToken,
 } from "./oauth-helpers";
@@ -100,6 +102,14 @@ const tokenResponse =
   (body: unknown): TokenHandler =>
   () =>
     json(200, body);
+
+const tokenResponseFetch =
+  (body: unknown): typeof globalThis.fetch =>
+  async () =>
+    new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
 
 // ---------------------------------------------------------------------------
 // PKCE
@@ -489,6 +499,157 @@ describe("exchangeAuthorizationCode", () => {
     ),
   );
 
+  it.effect("uses nested granted scopes for Slack-style user token responses", () =>
+    withTokenEndpoint(
+      tokenResponse({
+        access_token: "xoxp-user-token",
+        token_type: "Bearer",
+        scope: "",
+        authed_user: {
+          id: "U12345",
+          scope: "channels:read,chat:write",
+        },
+      }),
+      ({ tokenUrl }) =>
+        Effect.gen(function* () {
+          const result = yield* exchangeAuthorizationCode({
+            tokenUrl,
+            clientId: "cid",
+            clientSecret: "csecret",
+            redirectUrl: "https://app.example.com/cb",
+            codeVerifier: "verifier",
+            code: "abc",
+          });
+          expect(result.access_token).toBe("xoxp-user-token");
+          expect(result.scope).toBe("channels:read chat:write");
+        }),
+    ),
+  );
+
+  it.effect("selects the nested user grant when an empty top-level grant has a bot token", () =>
+    withTokenEndpoint(
+      tokenResponse({
+        access_token: "xoxb-bot-token",
+        token_type: "Bearer",
+        scope: "",
+        refresh_token: "bot-refresh-token",
+        expires_in: 600,
+        id_token: unsignedJwt({ email: "alice@example.com" }),
+        authed_user: {
+          scope: "channels:read,chat:write",
+          access_token: "xoxp-user-token",
+          token_type: "user",
+          refresh_token: "user-refresh-token",
+          expires_in: 3600,
+        },
+      }),
+      ({ tokenUrl }) =>
+        Effect.gen(function* () {
+          const result = yield* exchangeAuthorizationCode({
+            tokenUrl,
+            clientId: "cid",
+            clientSecret: "csecret",
+            redirectUrl: "https://app.example.com/cb",
+            codeVerifier: "verifier",
+            code: "abc",
+          });
+          expect(result).toMatchObject({
+            access_token: "xoxp-user-token",
+            token_type: "user",
+            refresh_token: "user-refresh-token",
+            expires_in: 3600,
+            scope: "channels:read chat:write",
+            idTokenIdentityLabel: "alice@example.com",
+          });
+        }),
+    ),
+  );
+
+  it.effect("treats an empty standard scope as omitted", () =>
+    withTokenEndpoint(
+      tokenResponse({
+        access_token: "user-token",
+        token_type: "Bearer",
+        scope: "   ",
+      }),
+      ({ tokenUrl }) =>
+        Effect.gen(function* () {
+          const result = yield* exchangeAuthorizationCode({
+            tokenUrl,
+            clientId: "cid",
+            clientSecret: "csecret",
+            redirectUrl: "https://app.example.com/cb",
+            codeVerifier: "verifier",
+            code: "abc",
+          });
+          expect(result.scope).toBeUndefined();
+        }),
+    ),
+  );
+
+  it.effect("normalizes Slack's comma-delimited top-level scopes", () =>
+    Effect.gen(function* () {
+      const result = yield* exchangeAuthorizationCode({
+        tokenUrl: "https://slack.com/api/oauth.v2.user.access",
+        clientId: "cid",
+        clientSecret: "csecret",
+        redirectUrl: "https://app.example.com/cb",
+        codeVerifier: "verifier",
+        code: "abc",
+        fetch: tokenResponseFetch({
+          access_token: "xoxp-user-token",
+          token_type: "Bearer",
+          scope: "channels:read,chat:write,reactions:read",
+        }),
+      });
+
+      expect(result.scope).toBe("channels:read chat:write reactions:read");
+    }),
+  );
+
+  it.effect("preserves commas in scope tokens from non-Slack providers", () =>
+    Effect.gen(function* () {
+      const result = yield* exchangeAuthorizationCode({
+        tokenUrl: "https://oauth.example.com/token",
+        clientId: "cid",
+        clientSecret: "csecret",
+        redirectUrl: "https://app.example.com/cb",
+        codeVerifier: "verifier",
+        code: "abc",
+        fetch: tokenResponseFetch({
+          access_token: "provider-token",
+          token_type: "Bearer",
+          scope: "scope,with-comma other.scope",
+        }),
+      });
+
+      expect(result.scope).toBe("scope,with-comma other.scope");
+    }),
+  );
+
+  it.effect("keeps a standard top-level scope ahead of nested provider metadata", () =>
+    withTokenEndpoint(
+      tokenResponse({
+        access_token: "user-token",
+        token_type: "Bearer",
+        scope: "standard.scope",
+        authed_user: { scope: "provider.scope" },
+      }),
+      ({ tokenUrl }) =>
+        Effect.gen(function* () {
+          const result = yield* exchangeAuthorizationCode({
+            tokenUrl,
+            clientId: "cid",
+            clientSecret: "csecret",
+            redirectUrl: "https://app.example.com/cb",
+            codeVerifier: "verifier",
+            code: "abc",
+          });
+          expect(result.scope).toBe("standard.scope");
+        }),
+    ),
+  );
+
   it.effect("still surfaces RFC 6749 §5.2 error envelopes after the id_token strip", () =>
     withTokenEndpoint(
       () =>
@@ -653,15 +814,23 @@ describe("exchangeAuthorizationCode", () => {
   );
 
   // A malformed HTTP 200 is the worst case in this module. The OAuth library
-  // rejects it by attaching the PARSED BODY — the whole token response — and
-  // these are ordinary provider quirks, not exotic inputs. Each of these bodies
-  // was confirmed to leak both tokens before the `cause` field was removed.
+  // rejects it by handing back the PARSED BODY — the whole token response — and
+  // these are ordinary provider quirks, not exotic inputs. That body is the one
+  // the failure MESSAGE is built from, and the message is what is persisted onto
+  // connection health, returned to the caller, and carried into telemetry. The
+  // allowlist is what keeps the tokens out of it.
+  //
+  // The classifier has to keep working on exactly these inputs: a 2xx that
+  // carried no usable token is a DEAD GRANT, and mis-reading it as transient is
+  // what makes a connection retry forever instead of asking for re-auth. It
+  // reads `status`, which this module lifts out of the rejection itself — so
+  // redacting the rendering costs the classifier nothing.
   for (const [label, quirk] of [
     ["expires_in is null", { expires_in: null }],
     ["scope is an array", { scope: ["read"] }],
     ["token_type is not a string", { token_type: 7 }],
   ] as const) {
-    it.effect(`keeps tokens out of the failure when ${label}`, () =>
+    it.effect(`keeps tokens out of the failure message when ${label}`, () =>
       withTokenEndpoint(
         () =>
           json(200, {
@@ -672,7 +841,7 @@ describe("exchangeAuthorizationCode", () => {
           }),
         ({ tokenUrl }) =>
           Effect.gen(function* () {
-            const exit = yield* Effect.exit(
+            const error = yield* Effect.flip(
               exchangeAuthorizationCode({
                 tokenUrl,
                 clientId: "cid",
@@ -681,14 +850,17 @@ describe("exchangeAuthorizationCode", () => {
                 code: "c",
               }),
             );
-            expect(Exit.isFailure(exit)).toBe(true);
-            if (!Exit.isFailure(exit)) return;
-            // Both renderings, because different sinks use different ones:
-            // structured capture serialises, console output pretty-prints.
-            for (const rendering of [JSON.stringify(exit.cause), Cause.pretty(exit.cause)]) {
-              expect(rendering).not.toContain("AT-CANARY-must-not-escape");
-              expect(rendering).not.toContain("RT-CANARY-must-not-escape");
-            }
+            expect(error).toBeInstanceOf(OAuth2Error);
+            expect(error.message).not.toContain("AT-CANARY-must-not-escape");
+            expect(error.message).not.toContain("RT-CANARY-must-not-escape");
+            // Redacted, not dropped: the operator still sees which fields the
+            // server sent, which is the whole point of previewing at all.
+            expect(error.message).toContain("access_token");
+            expect(error.message).toContain("[redacted]");
+            // ...and the dead-grant verdict survives the redaction untouched.
+            expect(error.status).toBe(200);
+            expect(isUnusableSuccessTokenResponse(error)).toBe(true);
+            expect(isPermanentTokenRejection(error)).toBe(true);
           }),
       ),
     );
@@ -1007,6 +1179,24 @@ describe("exchangeClientCredentials", () => {
 });
 
 describe("refreshAccessToken", () => {
+  it.effect("normalizes Slack's comma-delimited scopes on refresh", () =>
+    Effect.gen(function* () {
+      const result = yield* refreshAccessToken({
+        tokenUrl: "https://slack.com/api/oauth.v2.user.access",
+        clientId: "cid",
+        clientSecret: "csecret",
+        refreshToken: "refresh-token",
+        fetch: tokenResponseFetch({
+          access_token: "xoxp-refreshed-token",
+          token_type: "Bearer",
+          scope: "channels:read,chat:write,reactions:read",
+        }),
+      });
+
+      expect(result.scope).toBe("channels:read chat:write reactions:read");
+    }),
+  );
+
   it.effect("posts grant_type=refresh_token with the refresh token", () =>
     withTokenEndpoint(tokenResponse(validRefreshBody), ({ tokenUrl, calls }) =>
       Effect.gen(function* () {
@@ -1195,6 +1385,29 @@ describe("refreshAccessToken", () => {
         }),
     ),
   );
+
+  // Every refusal the classifier can be handed as an HTTP RESPONSE — a
+  // text/plain 400, a text/plain 404, a 200 carrying an error body, a 200 with
+  // no usable token, a 5xx — is covered black-box by
+  // `e2e/scenarios/oauth-refresh-rejected-non-json.test.ts`, where the test
+  // authorization server can actually emit those bytes. The one shape no
+  // authorization server can emit is *no answer at all*, so this case stays
+  // here: it is the boundary between "the server said no" (permanent) and "we
+  // never got an answer" (retryable), and only a dead socket expresses it.
+  it.effect("a transport failure stays transient and carries no status", () =>
+    Effect.gen(function* () {
+      const error = yield* Effect.flip(
+        refreshAccessToken({
+          tokenUrl: "http://127.0.0.1:1/token",
+          clientId: "cid",
+          refreshToken: "old",
+          timeoutMs: 100,
+        }),
+      );
+      expect(error.status).toBeUndefined();
+      expect(isPermanentTokenRejection(error)).toBe(false);
+    }),
+  );
 });
 
 describe("shouldRefreshToken", () => {
@@ -1243,21 +1456,12 @@ describe("OAuth2Error tagging", () => {
     }),
   );
 
-  it("OAuth2Error is constructable directly with message and code", () => {
-    const err = new OAuth2Error({ message: "test", error: "invalid_grant" });
+  it("OAuth2Error is constructable directly with message and cause", () => {
+    const err = new OAuth2Error({ message: "test", cause: { foo: 1 } });
     expect(err).toMatchObject({
       _tag: "OAuth2Error",
       message: "test",
-      error: "invalid_grant",
+      cause: { foo: 1 },
     });
-  });
-
-  it("carries no cause, so nothing unsanitised can ride along", () => {
-    // The type forbids it; this pins the RUNTIME shape too. The leak this
-    // prevents came from an object attached at construction and rendered far
-    // away, so a re-added `cause` field would compile and silently reopen it.
-    const err = new OAuth2Error({ message: "test", error: "invalid_grant" });
-    expect(Object.hasOwn(err, "cause")).toBe(false);
-    expect(JSON.stringify(err)).not.toContain("cause");
   });
 });

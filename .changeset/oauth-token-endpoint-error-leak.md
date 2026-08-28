@@ -2,8 +2,26 @@
 "executor": patch
 ---
 
-**Token material no longer reaches OAuth error messages or logs**
+**Keep token material out of OAuth token-endpoint error messages**
 
-When a token endpoint replied in a way the OAuth library could not parse, the resulting `OAuth2Error` carried the parsed response body as its `cause`. On a malformed `200` that body is a *successful* token response — so an access token, and sometimes a refresh token, travelled inside an error object into whatever logged it.
+A token-endpoint failure renders a preview of the upstream body into its
+message, and that message is persisted onto connection health, returned to the
+caller, and carried into telemetry. On a malformed HTTP 200 the body being
+previewed is a *successful* token response, so an access token and a refresh
+token could be rendered into it.
 
-The body preview is now built from an allowlist of fields that are safe to show (`error`, `errors`, `error_description`, `error_uri`, and `code`/`message`/`detail` nested inside them) rather than from a denylist of fields to hide, so a field nobody anticipated is omitted by default instead of printed by default. The same allowlist applies to form-encoded bodies, previews are depth-bounded, and the failure summary records the token endpoint's hostname rather than its full URL, which can carry identifiers in its path.
+The preview is now built from an allowlist of fields that are safe to show
+(`error`, `errors`, `error_description`, `error_uri`, plus `code`, `message`,
+and `detail` nested inside them) instead of a denylist of fields to hide. A
+field nobody anticipated is omitted by default rather than printed by default.
+Keys stay visible and only non-allowlisted string values are replaced, so an
+operator can still read the shape of what the server sent. `code` is readable
+only when nested, because at the top level of a token response it is the RFC
+6749 authorization code.
+
+Form-encoded bodies take the same allowlist, the walk over a body is
+depth-bounded, and the failure summary records the token endpoint's hostname
+rather than its full URL, which can carry identifiers in its path.
+
+No public API changes. The dead-grant classification added for HTTP 200 refresh
+refusals is unaffected: it reads the HTTP status, not the rendered preview.
